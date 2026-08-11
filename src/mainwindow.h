@@ -485,7 +485,7 @@ public:
     // Open the RTTI browser modal for a given vtable address. Walks MSVC RTTI
     // (COL → CHD → BCD → TD), surfaces class name + virtual methods. Resolves
     // method symbols via SymbolStore when PDBs are loaded for the owning module.
-    void showRttiBrowser(uint64_t vtableAddr);
+    void showRttiBrowser(uint64_t vtableAddr, int pointerSize = 8);
 
 protected:
     bool event(QEvent* event) override;

@@ -348,6 +348,9 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
     // Insert above/below
     {
         int sx = pad;
+        const bool is32 = (m_ctx.pointerSize < 8);
+        const QString wordLabel = is32 ? QStringLiteral("+ hex32") : QStringLiteral("+ hex64");
+        const NodeKind wordKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
         auto drawActBtn = [&](const QString& label, int action) {
             int bw = fm.horizontalAdvance(label) + 8;
             QRect r(sx, y, bw, lineH);
@@ -360,11 +363,11 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
             p.fillRect(r.right(), r.y(), 1, r.height(), t.border);
             p.setPen(t.text);
             p.drawText(r, Qt::AlignCenter, label);
-            m_hits.append({r, action, true, NodeKind::Hex64});
+            m_hits.append({r, action, true, wordKind});
             sx += bw + 2;
         };
-        drawActBtn(QStringLiteral("+ hex64 above"), HA_InsAbove);
-        drawActBtn(QStringLiteral("+ hex64 below"), HA_InsBelow);
+        drawActBtn(wordLabel + QStringLiteral(" above"), HA_InsAbove);
+        drawActBtn(wordLabel + QStringLiteral(" below"), HA_InsBelow);
         y += lineH + 2;
     }
 

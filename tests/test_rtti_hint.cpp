@@ -383,6 +383,94 @@ private slots:
         QVERIFY2(anyRtti,  "RTTI hint should appear regardless of typeHints");
         QVERIFY2(!anyTypeHint, "typeHints=false should suppress green hints");
     }
+
+    void test32BitRttiHint() {
+        // Build 32-bit RTTI shape:
+        //   [0..0x10000) zeros
+        //   [0x10000..0x20000) 32-bit RTTI region
+        //   [0x30000) struct with Hex32 node pointing at vtableVa
+        constexpr uint32_t kImg32 = 0x10000;
+        constexpr uint32_t vtableRva = 0x1000;
+        constexpr uint32_t colRva    = 0x1900;
+        constexpr uint32_t tdRva     = 0x1100;
+        constexpr uint32_t chdRva    = 0x1400;
+
+        QByteArray data(0x40000, '\0');
+
+        auto write32 = [&](uint32_t off, uint32_t val) {
+            std::memcpy(data.data() + off, &val, 4);
+        };
+        auto writeCStr = [&](uint32_t off, const char* s) {
+            std::memcpy(data.data() + off, s, std::strlen(s) + 1);
+        };
+
+        // On 32-bit MSVC, vtable[-1] is an absolute pointer to COL
+        write32(kImg32 + vtableRva - 4, kImg32 + colRva);
+        // vtable entry
+        write32(kImg32 + vtableRva, kImg32 + 0x2000);
+
+        // COL (32-bit layout):
+        // +0x00 signature (0)
+        // +0x04 offset (0)
+        // +0x08 cdOffset (0)
+        // +0x0C pTypeDescriptor (abs pointer on x86!)
+        // +0x10 pClassDescriptor (abs pointer on x86!)
+        write32(kImg32 + colRva + 0x00, 0);
+        write32(kImg32 + colRva + 0x04, 0);
+        write32(kImg32 + colRva + 0x08, 0);
+        write32(kImg32 + colRva + 0x0C, kImg32 + tdRva);
+        write32(kImg32 + colRva + 0x10, kImg32 + chdRva);
+
+        // TypeDescriptor: +8 is char name[] on 32-bit (2 * 4 bytes offset)
+        writeCStr(kImg32 + tdRva + 8, ".?AVMy32Class@@");
+
+        // CHD: +0x08 numBaseClasses = 0
+        write32(kImg32 + chdRva + 0x08, 0);
+        write32(kImg32 + chdRva + 0x0C, 0);
+
+        // Plant 32-bit vtable address at struct offset 0
+        constexpr uint64_t kStructBase = 0x30000;
+        uint32_t vtableVa32 = kImg32 + vtableRva;
+        write32(kStructBase, vtableVa32);
+
+        class Fake32BitProvider : public FakeModuleProvider {
+        public:
+            Fake32BitProvider(QByteArray data, QString name)
+                : FakeModuleProvider(std::move(data), std::move(name)) {}
+            int pointerSize() const override { return 4; }
+        };
+
+        Fake32BitProvider prov(std::move(data), QStringLiteral("synth32"));
+        prov.setModule(kImg32, 0x10000);
+
+        NodeTree tree;
+        tree.pointerSize = 4;
+        tree.baseAddress = kStructBase;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = QStringLiteral("Root32");
+        root.id = 1;
+        tree.nodes.append(root);
+
+        Node h32;
+        h32.kind = NodeKind::Hex32;
+        h32.name = QStringLiteral("vptr");
+        h32.parentId = 1;
+        h32.offset = 0;
+        h32.id = 2;
+        tree.nodes.append(h32);
+
+        ComposeResult r = compose(tree, prov);
+        bool found = false;
+        for (const auto& lm : r.meta) {
+            if (lm.nodeKind != NodeKind::Hex32) continue;
+            const LineChip* rttiChip = findChip(lm, ChipKind::Rtti);
+            QVERIFY2(rttiChip, "expected 32-bit Rtti chip on Hex32 field");
+            QVERIFY(rttiChip->text.contains(QStringLiteral("My32Class")));
+            found = true;
+        }
+        QVERIFY(found);
+    }
 };
 
 QTEST_MAIN(TestRttiHint)

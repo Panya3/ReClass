@@ -1387,16 +1387,19 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (m_doc->tree.childrenOf(structId).isEmpty()
             && m_doc->tree.nodes[si].refId != 0)
             targetId = m_doc->tree.nodes[si].refId;
-        int hex64Count = byteCount / 8;
-        int remainBytes = byteCount % 8;
+        const bool is32 = (m_doc->tree.pointerSize < 8);
+        const NodeKind wordKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+        const int stride = is32 ? 4 : 8;
+        int wordCount = byteCount / stride;
+        int remainBytes = byteCount % stride;
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-        for (int i = 0; i < hex64Count; i++)
-            insertNode(targetId, -1, NodeKind::Hex64,
+        for (int i = 0; i < wordCount; i++)
+            insertNode(targetId, -1, wordKind,
                        QStringLiteral("field_%1").arg(i));
         for (int i = 0; i < remainBytes; i++)
             insertNode(targetId, -1, NodeKind::Hex8,
-                       QStringLiteral("field_%1").arg(hex64Count + i));
+                       QStringLiteral("field_%1").arg(wordCount + i));
         m_doc->undoStack.endMacro();
         m_suppressRefresh = false;
         refresh();
@@ -4065,13 +4068,16 @@ void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
     else
         byteCount = trimmed.toInt(&ok, 10);
     if (!ok || byteCount <= 0) return;
-    int hex64Count = byteCount / 8;
-    int remainBytes = byteCount % 8;
+    const bool is32 = (m_doc->tree.pointerSize < 8);
+    const NodeKind wordKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+    const int stride = is32 ? 4 : 8;
+    int wordCount = byteCount / stride;
+    int remainBytes = byteCount % stride;
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
     int idx = 0;
-    for (int i = 0; i < hex64Count; i++, idx++)
-        insertNode(targetId, -1, NodeKind::Hex64, QStringLiteral("field_%1").arg(idx));
+    for (int i = 0; i < wordCount; i++, idx++)
+        insertNode(targetId, -1, wordKind, QStringLiteral("field_%1").arg(idx));
     for (int i = 0; i < remainBytes; i++, idx++)
         insertNode(targetId, -1, NodeKind::Hex8, QStringLiteral("field_%1").arg(idx));
     m_doc->undoStack.endMacro();

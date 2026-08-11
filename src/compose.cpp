@@ -320,9 +320,10 @@ static const RttiInfo& rttiForVtable(ComposeState& state, const Provider& prov,
         // risk). Fall back to Itanium ABI for GCC/Clang/MinGW binaries —
         // most C++ class instances on Linux/macOS, and any Reclass.exe
         // self-attach (Reclass is MinGW-built) hit this path.
-        info = walkRtti(prov, candidateAddr, /*ptrSize=*/8, /*maxVtableSlots=*/0);
+        int ptrSz = prov.pointerSize();
+        info = walkRtti(prov, candidateAddr, ptrSz, /*maxVtableSlots=*/0);
         if (!info.ok)
-            info = walkRttiItanium(prov, candidateAddr, /*ptrSize=*/8, /*maxVtableSlots=*/0);
+            info = walkRttiItanium(prov, candidateAddr, ptrSz, /*maxVtableSlots=*/0);
         if (info.ok && !info.demangledName.isEmpty() && g_rttiDiscoveryHook) {
             // Surface the discovery in the unified Symbols panel + make it
             // resolve in the expression parser. The hook is set by the
@@ -543,26 +544,27 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 QString rttiName;
                 uint64_t rttiVtable = 0;
                 bool isNullPointer = false;
-                if (state.showRtti
-                    && (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64)
-                    && prov.isReadable(absAddr, 8)) {
-                    uint64_t candidate = prov.readU64(absAddr);
-                    if (candidate == 0
-                        && prov.isLive()
-                        && (node.kind == NodeKind::Pointer64
-                            || node.kind == NodeKind::Pointer32)) {
-                        // Null vtable slot — chip becomes a "name this class"
-                        // call-to-action. Only on a LIVE memory source: on a
-                        // flat file (all zeros) every pointer would sprout it.
-                        // Excluded for raw Hex64 because every zero-byte row
-                        // would otherwise sprout a chip. (Resolved RTTI below
-                        // stays ungated — it works on file buffers too.)
-                        isNullPointer = true;
-                    } else if (candidate != 0 && candidate != UINT64_MAX) {
-                        const RttiInfo& info = rttiForVtable(state, prov, candidate);
-                        if (info.ok && !info.demangledName.isEmpty()) {
-                            rttiName = info.demangledName;
-                            rttiVtable = candidate;
+                if (state.showRtti) {
+                    const int ptrSz = prov.pointerSize();
+                    const bool isPtrWord = (ptrSz == 4)
+                        ? (node.kind == NodeKind::Hex32 || node.kind == NodeKind::Pointer32)
+                        : (node.kind == NodeKind::Hex64 || node.kind == NodeKind::Pointer64);
+                    if (isPtrWord && prov.isReadable(absAddr, ptrSz)) {
+                        uint64_t candidate = (ptrSz == 4)
+                            ? (uint64_t)prov.readU32(absAddr)
+                            : prov.readU64(absAddr);
+                        uint64_t nullSentinel = (ptrSz == 4) ? 0xFFFFFFFFULL : UINT64_MAX;
+                        if (candidate == 0
+                            && prov.isLive()
+                            && (node.kind == NodeKind::Pointer64
+                                || node.kind == NodeKind::Pointer32)) {
+                            isNullPointer = true;
+                        } else if (candidate != 0 && candidate != nullSentinel) {
+                            const RttiInfo& info = rttiForVtable(state, prov, candidate);
+                            if (info.ok && !info.demangledName.isEmpty()) {
+                                rttiName = info.demangledName;
+                                rttiVtable = candidate;
+                            }
                         }
                     }
                 }
@@ -1178,15 +1180,19 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 uint64_t rttiVtable = 0;
                 QString ptrSym;
                 bool isNullPointer = false;
-                if (prov.isReadable(absAddr, 8)) {
-                    uint64_t candidate = prov.readU64(absAddr);
+                const int ptrSz = prov.pointerSize();
+                if (prov.isReadable(absAddr, ptrSz)) {
+                    uint64_t candidate = (ptrSz == 4)
+                        ? (uint64_t)prov.readU32(absAddr)
+                        : prov.readU64(absAddr);
+                    uint64_t nullSentinel = (ptrSz == 4) ? 0xFFFFFFFFULL : UINT64_MAX;
                     if (candidate == 0) {
                         // Null-pointer "name this class" CTA only makes sense on
                         // a live memory source — on a flat file (all zeros) it
                         // would sprout on every pointer. isLive() round-trips
                         // through SnapshotProvider so a frozen process keeps it.
                         if (state.showRtti && prov.isLive()) isNullPointer = true;
-                    } else if (candidate != UINT64_MAX) {
+                    } else if (candidate != nullSentinel) {
                         if (state.showRtti) {
                             const RttiInfo& info = rttiForVtable(state, prov, candidate);
                             if (info.ok && !info.demangledName.isEmpty()) {

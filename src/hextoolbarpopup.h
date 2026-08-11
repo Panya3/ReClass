@@ -28,6 +28,7 @@ struct HexPopupContext {
     bool hasString = false;
     QString stringPreview;
 
+    int pointerSize = 8;
     // Multi-select (populated by controller)
     int multiSelectCount = 0;
     int multiSelectBytes = 0;

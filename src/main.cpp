@@ -1914,7 +1914,7 @@ void MainWindow::createMenus() {
             setAppStatus(QStringLiteral("Field is null"));
             return;
         }
-        showRttiBrowser(val);
+        showRttiBrowser(val, ctrl->document()->tree.pointerSize);
     });
     Qt5Qt6AddAction(tools, "&Type Aliases...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::showTypeAliasesDialog);
     Qt5Qt6AddAction(tools, "&Validate Project...",
@@ -4842,12 +4842,15 @@ static void buildEmptyStruct(NodeTree& tree, const QString& classKeyword = QStri
     int ri = tree.addNode(root);
     uint64_t rootId = tree.nodes[ri].id;
 
+    const bool is32 = (tree.pointerSize < 8);
+    const NodeKind hexKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+    const int stride = is32 ? 4 : 8;
     for (int i = 0; i < 16; i++) {
         Node n;
-        n.kind = NodeKind::Hex64;
-        n.name = QStringLiteral("field_%1").arg(i * 8, 2, 16, QChar('0'));
+        n.kind = hexKind;
+        n.name = QStringLiteral("field_%1").arg(i * stride, 2, 16, QChar('0'));
         n.parentId = rootId;
-        n.offset = i * 8;
+        n.offset = i * stride;
         tree.addNode(n);
     }
 
@@ -5351,7 +5354,7 @@ void MainWindow::showCommandPalette() {
     dlg.exec();
 }
 
-void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
+void MainWindow::showRttiBrowser(uint64_t vtableAddr, int pointerSize) {
     auto* ctrl = activeController();
     if (!ctrl || !ctrl->document()->provider) {
         setAppStatus(QStringLiteral("No active provider for RTTI"));
@@ -5366,10 +5369,15 @@ void MainWindow::showRttiBrowser(uint64_t vtableAddr) {
     // chip claims.
     RttiInfo info;
     if (auto* snap = ctrl->snapshotProv()) {
-        info = walkRtti(*snap, vtableAddr);
+        info = walkRtti(*snap, vtableAddr, pointerSize);
+        if (!info.ok)
+            info = walkRttiItanium(*snap, vtableAddr, pointerSize);
     }
     if (!info.ok) {
-        info = walkRtti(*ctrl->document()->provider, vtableAddr);
+        auto* prov = ctrl->document()->provider.get();
+        info = walkRtti(*prov, vtableAddr, pointerSize);
+        if (!info.ok)
+            info = walkRttiItanium(*prov, vtableAddr, pointerSize);
     }
     if (!info.ok) {
         ThemedMessageBox::info(this,

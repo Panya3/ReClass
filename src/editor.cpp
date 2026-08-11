@@ -5813,12 +5813,15 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             return true;
         }
         return false;
-    case Qt::Key_Insert:
+    case Qt::Key_Insert: {
+        bool is32 = false;
+        if (m_disasmTree) is32 = (m_disasmTree->pointerSize < 8);
         if (ke->modifiers() & Qt::ShiftModifier)
             emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex32);
         else
-            emit insertAboveRequested(currentNodeIndex(), NodeKind::Hex64);
+            emit insertAboveRequested(currentNodeIndex(), is32 ? NodeKind::Hex32 : NodeKind::Hex64);
         return true;
+    }
     case Qt::Key_Semicolon:
         if (ke->modifiers() == Qt::NoModifier) {
             emit commentEditRequested();

@@ -205,6 +205,109 @@ private slots:
         QVERIFY(info.error.contains(QStringLiteral("offset_to_top")));
     }
 
+    void walkSynthetic32BitRtti() {
+        constexpr uint32_t kImg32   = 0x10000;
+        constexpr uint32_t vtableRva= 0x1000;
+        constexpr uint32_t tdFooRva = 0x1100;
+        constexpr uint32_t chdRva   = 0x1400;
+        constexpr uint32_t bcaRva   = 0x1500;
+        constexpr uint32_t bcdFooRva= 0x1600;
+        constexpr uint32_t colRva   = 0x1900;
+
+        QByteArray data(kImg32 + 0x10000, '\0');
+
+        auto write32 = [&](uint32_t off, uint32_t val) {
+            std::memcpy(data.data() + off, &val, 4);
+        };
+        auto writeCStr = [&](uint32_t off, const char* s) {
+            std::memcpy(data.data() + off, s, std::strlen(s) + 1);
+        };
+
+        // Absolute pointer to COL at vtable[-4]
+        write32(kImg32 + vtableRva - 4, kImg32 + colRva);
+        for (int i = 0; i < 3; i++)
+            write32(kImg32 + vtableRva + i * 4, kImg32 + 0x2000 + i * 0x10);
+
+        // COL 32-bit layout: abs pointers to TD & CHD
+        write32(kImg32 + colRva + 0x00, 0); // signature
+        write32(kImg32 + colRva + 0x04, 0); // offset
+        write32(kImg32 + colRva + 0x08, 0); // cdOffset
+        write32(kImg32 + colRva + 0x0C, kImg32 + tdFooRva);
+        write32(kImg32 + colRva + 0x10, kImg32 + chdRva);
+
+        writeCStr(kImg32 + tdFooRva + 8, ".?AVMy32Foo@@");
+
+        // CHD: numBaseClasses = 1, bcaAddr (abs pointer)
+        write32(kImg32 + chdRva + 0x08, 1);
+        write32(kImg32 + chdRva + 0x0C, kImg32 + bcaRva);
+
+        // BCA
+        write32(kImg32 + bcaRva, kImg32 + bcdFooRva);
+
+        // BCD: abs pointer to TD
+        write32(kImg32 + bcdFooRva + 0x00, kImg32 + tdFooRva);
+
+        BufferProvider prov(data, QStringLiteral("synth32"));
+        auto info = walkRtti(prov, kImg32 + vtableRva, /*pointerSize=*/4, /*maxSlots=*/16);
+
+        QVERIFY2(info.ok, qPrintable(info.error));
+        QCOMPARE(info.abi, QStringLiteral("MSVC"));
+        QCOMPARE(info.demangledName, QStringLiteral("My32Foo"));
+        QCOMPARE(info.bases.size(), 1);
+        QCOMPARE(info.vtable.size(), 3);
+    }
+
+    void walkSynthetic32BitItanium() {
+        constexpr uint32_t kImg32    = 0x10000;
+        constexpr uint32_t kVtableRva = 0x1000;
+        constexpr uint32_t kTiRva     = 0x1100;
+        constexpr uint32_t kNameRva   = 0x1180;
+        constexpr uint32_t kTiVtRva   = 0x1200;
+
+        QByteArray data(kImg32 + 0x10000, '\0');
+
+        auto write32 = [&](uint32_t off, uint32_t val) {
+            std::memcpy(data.data() + off, &val, 4);
+        };
+
+        // 32-bit Itanium: offset_to_top at -8, type_info at -4
+        int32_t z = 0;
+        std::memcpy(data.data() + kImg32 + kVtableRva - 8, &z, 4);
+        write32(kImg32 + kVtableRva - 4, kImg32 + kTiRva);
+
+        for (int i = 0; i < 3; i++)
+            write32(kImg32 + kVtableRva + i * 4, kImg32 + 0x2000 + i * 0x10);
+
+        // type_info: vtable_ptr at +0, name_ptr at +4
+        write32(kImg32 + kTiRva + 0, kImg32 + kTiVtRva);
+        write32(kImg32 + kTiRva + 4, kImg32 + kNameRva);
+
+        const char* mangled = "5Foo32";
+        std::memcpy(data.data() + kImg32 + kNameRva, mangled, std::strlen(mangled) + 1);
+
+        uint32_t marker = 0xFEEDFACE;
+        std::memcpy(data.data() + kImg32 + kTiVtRva, &marker, 4);
+
+        class ItProv32 : public BufferProvider {
+        public:
+            ItProv32(QByteArray d, const QString& n) : BufferProvider(std::move(d), n) {}
+            int pointerSize() const override { return 4; }
+            QVector<ModuleEntry> enumerateModules() const override {
+                return { ModuleEntry{ QStringLiteral("synth-itanium32"),
+                                      QStringLiteral("synth-itanium32"),
+                                      kImg32, 0x10000 } };
+            }
+        };
+
+        ItProv32 prov(data, QStringLiteral("synth-itanium32"));
+        auto info = walkRttiItanium(prov, kImg32 + kVtableRva, /*pointerSize=*/4, /*maxSlots=*/16);
+
+        QVERIFY2(info.ok, qPrintable(info.error));
+        QCOMPARE(info.abi, QStringLiteral("Itanium"));
+        QCOMPARE(info.demangledName, QStringLiteral("Foo32"));
+        QCOMPARE(info.vtable.size(), 3);
+    }
+
     void rejectsNonItaniumNameString() {
         ItaniumFixture fx("not_a_mangle");  // doesn't start with digit / N / S / etc.
         auto info = walkRttiItanium(*fx.prov, fx.vtableVa());
