@@ -1559,6 +1559,8 @@ namespace fmt {
     QString fmtUInt16(uint16_t v);
     QString fmtUInt32(uint32_t v);
     QString fmtUInt64(uint64_t v);
+    QString fmtInt128(const void* data);   // 16-byte LE buffer
+    QString fmtUInt128(const void* data);  // 16-byte LE buffer
     QString fmtFloat(float v);
     QString fmtDouble(double v);
     QString fmtBool(uint8_t v);

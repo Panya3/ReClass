@@ -331,6 +331,17 @@ QString demangleItaniumName(const QString& mangled) {
             p += 2;
             return true;
         }
+        // S<code> = std::<thing> with embedded length, e.g. "St9type_info".
+        if (s[p] == 'S' && p + 1 < s.size()) {
+            int q = p + 2;
+            int len = parseLength(s, q);
+            if (len > 0 && q + len <= s.size()) {
+                parts << QStringLiteral("std") << s.mid(q, len);
+                p = q + len;
+                return true;
+            }
+            return false; // unknown std shorthand, give up
+        }
         int len = parseLength(s, p);
         if (len <= 0 || p + len > s.size()) return false;
         parts << s.mid(p, len);
@@ -346,7 +357,9 @@ QString demangleItaniumName(const QString& mangled) {
         }
         if (p >= s.size() || s[p] != 'E') return mangled;
     } else {
-        if (!consumeSegment(parts)) return mangled;
+        while (p < s.size()) {
+            if (!consumeSegment(parts)) return mangled;
+        }
     }
     if (parts.isEmpty()) return mangled;
     return parts.join(QStringLiteral("::"));

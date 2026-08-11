@@ -363,8 +363,11 @@ private slots:
     // Plain C++ class with one virtual method. Validates the walker on a
     // simple MinGW Itanium vtable (no Q_OBJECT, no MOC, no MI).
     void walkRealItaniumVtableInOwnProcess() {
-#ifndef _WIN32
-        QSKIP("self-process probe is Windows-only");
+#if defined(_MSC_VER) || !defined(_WIN32)
+        // MSVC uses a different vtable layout (complete-object locator
+        // at vtable[-1]) — this probe only applies to Itanium-ABI builds
+        // (MinGW/Clang). Skips on MSVC builds like the others below.
+        QSKIP("self-process Itanium probe requires a non-MSVC toolchain");
 #else
         ProbeClass obj;
         uint64_t vptrSlot = reinterpret_cast<uint64_t>(&obj);
@@ -406,8 +409,8 @@ private slots:
     // TutorialTest itself IS a QObject (Q_OBJECT macro), so we walk our
     // own vtable. Failures here pinpoint the discrepancy.
     void walkRealQtObjectVtableInOwnProcess() {
-#ifndef _WIN32
-        QSKIP("self-process probe is Windows-only");
+#if defined(_MSC_VER) || !defined(_WIN32)
+        QSKIP("self-process Itanium probe requires a non-MSVC toolchain");
 #else
         // `this` is a TutorialTest* with full Qt vtable.
         uint64_t thisAddr = reinterpret_cast<uint64_t>(this);
@@ -452,8 +455,8 @@ private slots:
     // If THIS fails but the single-inheritance Qt test passes, that's the
     // RcxEditor-specific bug.
     void walkRealMultiInheritanceVtableInOwnProcess() {
-#ifndef _WIN32
-        QSKIP("self-process probe is Windows-only");
+#if defined(_MSC_VER) || !defined(_WIN32)
+        QSKIP("self-process Itanium probe requires a non-MSVC toolchain");
 #else
         MIDerived obj;
         // The primary vtable lives at offset 0 of the object — same as

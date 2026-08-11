@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#if defined(_MSC_VER)
+#include <intrin.h>
+#endif
 
 namespace rcx::fmt {
 
@@ -148,37 +151,47 @@ QString fmtFloat16(uint16_t bits) {
     return s + QStringLiteral("h");
 }
 
-// ── 128-bit integers (native __int128 on GCC/Clang) ──
+// ── 128-bit integers (portable; no compiler __int128 required) ──
+// 128-bit values travel as (lo, hi) halves; decimal conversion uses
+// grade-school long division in base 2^32, which stays within uint64.
 
-#if defined(__SIZEOF_INT128__)
-using rcx_int128  = __int128;
-using rcx_uint128 = unsigned __int128;
-#else
-#error "128-bit integer support required"
-#endif
+static uint32_t divmod10(uint32_t l[4]) {
+    uint64_t rem = 0;
+    for (int i = 3; i >= 0; --i) {
+        uint64_t cur = (rem << 32) | l[i];
+        l[i] = (uint32_t)(cur / 10);
+        rem   = cur % 10;
+    }
+    return (uint32_t)rem;
+}
 
-static QString fmtUInt128Impl(rcx_uint128 v) {
-    if (v == 0) return QStringLiteral("0");
+static QString fmtU128Impl(uint64_t lo, uint64_t hi) {
+    uint32_t l[4] = { (uint32_t)lo, (uint32_t)(lo >> 32),
+                      (uint32_t)hi, (uint32_t)(hi >> 32) };
+    if (!(l[0] | l[1] | l[2] | l[3])) return QStringLiteral("0");
     char buf[40];
     int pos = 0;
-    while (v != 0) { buf[pos++] = char('0' + (uint32_t)(v % 10)); v /= 10; }
+    while (l[0] | l[1] | l[2] | l[3]) buf[pos++] = char('0' + divmod10(l));
     QString out; out.reserve(pos);
     while (pos > 0) out.append(QLatin1Char(buf[--pos]));
     return out;
 }
 
 QString fmtInt128(const void* data) {
-    rcx_int128 v; memcpy(&v, data, 16);
-    if (v < 0) {
-        rcx_uint128 u = (rcx_uint128)(-(v + 1)) + 1;  // two's complement negate without UB
-        return QStringLiteral("-") + fmtUInt128Impl(u);
+    uint64_t lo, hi;
+    memcpy(&lo, data, 8); memcpy(&hi, (const char*)data + 8, 8);
+    bool neg = (hi >> 63) != 0;
+    if (neg) { // two's complement negate without UB
+        lo = ~lo; hi = ~hi;
+        if (++lo == 0) ++hi;
     }
-    return fmtUInt128Impl((rcx_uint128)v);
+    return (neg ? QStringLiteral("-") : QString()) + fmtU128Impl(lo, hi);
 }
 
 QString fmtUInt128(const void* data) {
-    rcx_uint128 v; memcpy(&v, data, 16);
-    return fmtUInt128Impl(v);
+    uint64_t lo, hi;
+    memcpy(&lo, data, 8); memcpy(&hi, (const char*)data + 8, 8);
+    return fmtU128Impl(lo, hi);
 }
 
 QString fmtFloat(float v) {
@@ -738,7 +751,8 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
         bool neg = false;
         if (!isHex && digits.startsWith('-')) { neg = true; digits = digits.mid(1); }
         if (digits.isEmpty()) return {};
-        rcx_uint128 acc = 0;
+        // 128-bit accumulator as (lo, hi) halves; multiply-add with carry.
+        uint64_t accLo = 0, accHi = 0;
         int base = isHex ? 16 : 10;
         for (QChar c : digits) {
             int d = -1;
@@ -746,25 +760,40 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
             else if (isHex && c >= 'a' && c <= 'f') d = 10 + (c.unicode() - 'a');
             else if (isHex && c >= 'A' && c <= 'F') d = 10 + (c.unicode() - 'A');
             if (d < 0 || d >= base) return {};
-            rcx_uint128 next = acc * (rcx_uint128)base + (rcx_uint128)d;
-            if (next < acc) return {};  // overflow
-            acc = next;
+            // acc = acc * base + d  (mod 2^128)
+#if defined(_MSC_VER)
+            uint64_t mHi;
+            uint64_t mLo = _umul128(accLo, (uint64_t)base, &mHi);
+#else
+            __uint128_t cur = ((__uint128_t)accLo * (uint64_t)base);
+            uint64_t mLo = (uint64_t)cur, mHi = (uint64_t)(cur >> 64);
+#endif
+            mLo += (uint64_t)d; mHi += (mLo < (uint64_t)d);
+            // Overflow when accHi*base wraps past 2^64 (tighter than
+            // the naive accHi > UINT64_MAX/base check, and correct for
+            // exact-boundary values like INT128_MIN).
+            if (accHi > (UINT64_MAX - mHi) / (uint64_t)base) return {};
+            accHi = accHi * (uint64_t)base + mHi;
+            accLo = mLo;
         }
+        uint64_t outLo = accLo, outHi = accHi;
         if (kind == NodeKind::Int128) {
-            // Signed range: [-(2^127), 2^127-1]
-            const rcx_uint128 signBit = (rcx_uint128)1 << 127;
+            // Signed range: [-(2^127), 2^127-1]; sign bit is bit 127.
             if (neg) {
-                if (acc > signBit) return {};
-                acc = (rcx_uint128)(-(rcx_int128)acc);
+                if (accHi > (1ULL << 63)) return {};   // magnitude > 2^127
+                accLo = ~accLo; accHi = ~accHi;
+                if (++accLo == 0) ++accHi;
+                outLo = accLo; outHi = accHi;
             } else {
-                if (acc >= signBit) return {};
+                if (accHi & (1ULL << 63)) return {};   // >= 2^127
             }
         } else if (neg) {
             return {};  // unsigned can't be negative
         }
         *ok = true;
         QByteArray out(16, Qt::Uninitialized);
-        memcpy(out.data(), &acc, 16);
+        memcpy(out.data(), &outLo, 8);
+        memcpy(out.data() + 8, &outHi, 8);
         return out;
     }
     case NodeKind::Float16: {

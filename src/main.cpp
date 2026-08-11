@@ -85,6 +85,9 @@
 #include "names/rtti_name_provider.h"
 #include "names/bookmark_name_provider.h"
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <windowsx.h>
 #include <dwmapi.h>

@@ -1,4 +1,5 @@
 #include <QtTest/QTest>
+#include <cstring>
 #include "core.h"
 
 using namespace rcx;
@@ -18,6 +19,116 @@ private slots:
         QCOMPARE(fmt::fmtInt32(0),   QString("0"));
     }
 
+    void testFmtInt128() {
+        // 128-bit formatting (little-endian 16-byte buffer).
+        auto fmt128 = [](uint64_t lo, uint64_t hi, bool isSigned) {
+            QByteArray b(16, Qt::Uninitialized);
+            memcpy(b.data(), &lo, 8);
+            memcpy(b.data() + 8, &hi, 8);
+            return isSigned ? fmt::fmtInt128(b.constData())
+                            : fmt::fmtUInt128(b.constData());
+        };
+        // Zero
+        QCOMPARE(fmt128(0, 0, true),  QString("0"));
+        QCOMPARE(fmt128(0, 0, false), QString("0"));
+        // Small positive
+        QCOMPARE(fmt128(1234567890123ull, 0, true),  QString("1234567890123"));
+        // Boundary: 2^64-1 / 2^64
+        QCOMPARE(fmt128(0xFFFFFFFFFFFFFFFFull, 0, true), QString("18446744073709551615"));
+        QCOMPARE(fmt128(0, 1, true),  QString("18446744073709551616"));
+        // Max unsigned: 2^128-1
+        QCOMPARE(fmt128(0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, false),
+                 QString("340282366920938463463374607431768211455"));
+        // Negative
+        QCOMPARE(fmt128(0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, true),
+                 QString("-1"));
+        QCOMPARE(fmt128(1, 0xFFFFFFFFFFFFFFFFull, true),
+                 QString("-18446744073709551615"));
+        // INT128_MIN round-trip: -2^127
+        QCOMPARE(fmt128(0, 0x8000000000000000ull, true),
+                 QString("-170141183460469231731687303715884105728"));
+        // INT128_MAX
+        QCOMPARE(fmt128(0xFFFFFFFFFFFFFFFFull, 0x7FFFFFFFFFFFFFFFull, true),
+                 QString("170141183460469231731687303715884105727"));
+    }
+
+    void testParseInt128() {
+        auto parse = [](NodeKind k, const QString& s) {
+            bool ok = false;
+            QByteArray b = fmt::parseValue(k, s, &ok);
+            if (!ok) return QString();
+            uint64_t lo, hi;
+            memcpy(&lo, b.constData(), 8);
+            memcpy(&hi, b.constData() + 8, 8);
+            return (k == NodeKind::Int128)
+                ? fmt::fmtInt128(b.constData())
+                : fmt::fmtUInt128(b.constData());
+        };
+        // Decimal round-trips
+        QCOMPARE(parse(NodeKind::UInt128, "0"), QString("0"));
+        QCOMPARE(parse(NodeKind::UInt128, "340282366920938463463374607431768211455"),
+                 QString("340282366920938463463374607431768211455"));
+        QCOMPARE(parse(NodeKind::Int128, "170141183460469231731687303715884105727"),
+                 QString("170141183460469231731687303715884105727"));
+        // INT128_MIN must parse
+        QCOMPARE(parse(NodeKind::Int128, "-170141183460469231731687303715884105728"),
+                 QString("-170141183460469231731687303715884105728"));
+        // Hex round-trip (both widths)
+        QCOMPARE(parse(NodeKind::UInt128, "0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"),
+                 QString("340282366920938463463374607431768211455"));
+        // Overflow rejection
+        bool ok = true;
+        QCOMPARE(fmt::parseValue(NodeKind::UInt128,
+                                 "340282366920938463463374607431768211456", &ok),
+                 QByteArray());
+        QVERIFY(!ok);
+        ok = true;
+        QCOMPARE(fmt::parseValue(NodeKind::Int128,
+                                 "170141183460469231731687303715884105728", &ok),
+                 QByteArray());
+        QVERIFY(!ok);
+        // Negative unsigned rejected
+        ok = true;
+        QCOMPARE(fmt::parseValue(NodeKind::UInt128, "-1", &ok), QByteArray());
+        QVERIFY(!ok);
+    }
+
+    void testInt128BigEndian() {
+        // Big-endian Int128: Node-aware parseValue byte-swaps, readValue
+        // displays from the swapped buffer. Round-trip through a BE node.
+        Node n;
+        n.kind = NodeKind::Int128;
+        n.bigEndian = true;
+        bool ok = false;
+        QByteArray b = fmt::parseValue(n, QStringLiteral("-2"), &ok);
+        QVERIFY(ok);
+        // BE storage: high half byte-swapped into first 8 bytes.
+        // -2 = 0xFFFF...FFE; BE bytes = FF FF .. FF FE (lo half stored
+        // first, already byte-swapped by parseValue).
+        QCOMPARE(b.size(), 16);
+        // Round-trip through readValueImpl's BE reverse + fmtInt128:
+        // the display must come back as "-2".
+        // (readValueImpl lives in fmt; exercise via the same path the
+        // editor uses — parseValue's reverse is what readValueImpl undoes.)
+        QString shown;
+        {
+            // Simulate readValueImpl BE branch: reverse, then fmtInt128.
+            QByteArray rev = b;
+            std::reverse(rev.begin(), rev.end());
+            shown = fmt::fmtInt128(rev.constData());
+        }
+        QCOMPARE(shown, QString("-2"));
+        // UInt128 BE round-trip, non-symmetric value.
+        Node nu;
+        nu.kind = NodeKind::UInt128;
+        nu.bigEndian = true;
+        QByteArray bu = fmt::parseValue(nu, QStringLiteral("340282366920938463463374607431768211455"), &ok);
+        QVERIFY(ok);
+        QByteArray revu = bu;
+        std::reverse(revu.begin(), revu.end());
+        QCOMPARE(fmt::fmtUInt128(revu.constData()),
+                 QStringLiteral("340282366920938463463374607431768211455"));
+    }
     void testFmtFloat() {
         // Positive: 7 chars body. Negative: '-' + 7 chars = 8.
         auto check = [](float v, const char* expected) {
@@ -54,8 +165,8 @@ private slots:
         check(-100000.f,  "-99999+f");
 
         // Special values
-        check( 1.f / 0.f, "inff");
-        check(-1.f / 0.f, "-inff");
+        check( INFINITY,  "inff");
+        check(-INFINITY,  "-inff");
         QCOMPARE(fmt::fmtFloat(std::nanf("")), QString("NaN"));
 
         // 1.0 exactly

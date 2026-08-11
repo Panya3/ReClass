@@ -15,6 +15,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <psapi.h>
+#include <intrin.h>
 
 /* ── globals ──────────────────────────────────────────────────────── */
 static HANDLE  g_hShm          = nullptr;
@@ -266,8 +267,12 @@ bool RcxPayloadInit()
 
     /* image base from PEB */
     {
+#if defined(_MSC_VER)
+        uint64_t peb = (uint64_t)__readgsqword(0x60);
+#else
         uint64_t peb;
         asm volatile("mov %%gs:0x60, %0" : "=r"(peb));
+#endif
         uint64_t ldr       = *reinterpret_cast<uint64_t*>(peb + 0x18);
         uint64_t firstLink = *reinterpret_cast<uint64_t*>(ldr + 0x10);
         hdr->imageBase     = *reinterpret_cast<uint64_t*>(firstLink + 0x30);
