@@ -1118,7 +1118,10 @@ private slots:
         QCOMPARE(pixelFont.pointSize(), -1);        // sanity: it really is pixel-sized
         popup.setFont(pixelFont);
 
-        const auto chips = popup.findChildren<rcx::CategoryChip*>();
+        QList<rcx::CategoryChip*> chips;
+        for (auto* w : popup.findChildren<QWidget*>())
+            if (auto* c = dynamic_cast<rcx::CategoryChip*>(w))
+                chips.append(c);
         QVERIFY2(!chips.isEmpty(), "no category chips found");
         for (auto* chip : chips) {
             // QFontInfo resolves a concrete point size whether the font is in

@@ -4872,6 +4872,16 @@ MainWindow::~MainWindow() {
         it->doc->provider.reset();
         it->ctrl->resetProvider();
     }
+    // Also release providers on orphaned documents that are no longer in
+    // m_tabs/m_allDocs (an open/import flow replaces them via m_allDocs.clear()
+    // without deleting them). They're still MainWindow children and QObject
+    // child cleanup runs only AFTER m_pluginManager unloads the plugin DLLs,
+    // so deleting their provider then would vtable-dispatch into an unloaded
+    // DLL and crash — exactly the hazard the reset above guards against.
+    // Repeated reset() is a cheap no-op, so sweeping all direct children is
+    // safe even though the m_tabs loop already cleared those docs.
+    for (RcxDocument* doc : findChildren<RcxDocument*>(Qt::FindDirectChildrenOnly))
+        doc->provider.reset();
     m_tabs.clear();
 }
 
