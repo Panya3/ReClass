@@ -3758,15 +3758,12 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
     connect(dock, &QObject::destroyed, this, [this, dock]() {
         auto it = m_tabs.find(dock);
         if (it != m_tabs.end()) {
-            RcxDocument* doc = it->doc;
+            // NOTE: the RcxDocument is deliberately NOT deleted here. Closing
+            // a tab closes the *view*; the doc stays alive in m_allDocs so the
+            // workspace sidebar keeps its classes and any tab can be re-opened
+            // from it. Docs are only discarded on project replacement
+            // (open/import/start-continue purge m_allDocs explicitly).
             m_tabs.erase(it);
-            // Only delete the doc if no other tab references it
-            bool docStillUsed = false;
-            for (auto jt = m_tabs.begin(); jt != m_tabs.end(); ++jt) {
-                if (jt->doc == doc) { docStillUsed = true; break; }
-            }
-            if (!docStillUsed)
-                doc->deleteLater();
         }
         m_docDocks.removeOne(dock);
         if (m_activeDocDock == dock) {
@@ -3776,7 +3773,6 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                 m_activeDocDock->show();
             }
         }
-        rebuildAllDocs();
         rebuildWorkspaceModel();
         updateWindowTitle();
         if (m_tabs.isEmpty() && !m_closingAll) {
@@ -4880,15 +4876,15 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::newClass() {
-    project_new(QStringLiteral("class"), /*forceFreshDoc=*/true);
+    project_new(QStringLiteral("class"), /*forceFreshDoc=*/false);
 }
 
 void MainWindow::newStruct() {
-    project_new(QString(),                /*forceFreshDoc=*/true);
+    project_new(QString(),                /*forceFreshDoc=*/false);
 }
 
 void MainWindow::newEnum() {
-    project_new(QStringLiteral("enum"),   /*forceFreshDoc=*/true);
+    project_new(QStringLiteral("enum"),   /*forceFreshDoc=*/false);
 }
 
 // Returns the RcxEditor root struct id so the caller can pin viewRootId.
@@ -6928,6 +6924,7 @@ void MainWindow::importReclassXml() {
 
     { ClosingGuard guard(m_closingAll);
       closeAllDocDocks();
+      m_allDocs.clear();
       createTab(doc);
     }
     rebuildWorkspaceModel();
@@ -6986,6 +6983,7 @@ void MainWindow::importFromSource() {
 
     { ClosingGuard guard(m_closingAll);
       closeAllDocDocks();
+      m_allDocs.clear();
       createTab(doc);
     }
     rebuildWorkspaceModel();
@@ -7349,6 +7347,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         QDockWidget* dock;
         { ClosingGuard guard(m_closingAll);
           closeAllDocDocks();
+          m_allDocs.clear();
           dock = createTab(doc);
         }
         rebuildWorkspaceModel();
@@ -7400,6 +7399,7 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     QDockWidget* dock;
     { ClosingGuard guard(m_closingAll);
       closeAllDocDocks();
+      m_allDocs.clear();
       dock = createTab(doc);
     }
     rebuildWorkspaceModel();
@@ -7426,22 +7426,28 @@ QDockWidget* MainWindow::project_open(const QString& path) {
 }
 
 bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
-    if (!dock) dock = m_activeDocDock;
-    if (!dock || !m_tabs.contains(dock)) return false;
-    auto& tab = m_tabs[dock];
+    RcxDocument* doc = nullptr;
+    if (dock && m_tabs.contains(dock)) {
+        doc = m_tabs[dock].doc;
+    } else if (m_activeDocDock && m_tabs.contains(m_activeDocDock)) {
+        doc = m_tabs[m_activeDocDock].doc;
+    } else if (!m_allDocs.isEmpty()) {
+        doc = m_allDocs.last();
+    }
+    if (!doc) return false;
 
     QString savedPath;
-    if (saveAs || tab.doc->filePath.isEmpty()) {
+    if (saveAs || doc->filePath.isEmpty()) {
         QString path = QFileDialog::getSaveFileName(this,
             "Save Definition", {}, "REECLASS (*.rcx);;JSON (*.json)");
         if (path.isEmpty()) return false;
-        tab.doc->save(path);
+        doc->save(path);
         addRecentFile(path);
         savedPath = path;
     } else {
-        tab.doc->save(tab.doc->filePath);
-        addRecentFile(tab.doc->filePath);
-        savedPath = tab.doc->filePath;
+        doc->save(doc->filePath);
+        addRecentFile(doc->filePath);
+        savedPath = doc->filePath;
     }
     // Drop the autosave shadow on a real save — the user's explicit save
     // is the authoritative version, no need to keep the recovery copy.
@@ -7455,7 +7461,26 @@ bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
 void MainWindow::project_close(QDockWidget* dock) {
     if (!dock) dock = m_activeDocDock;
     if (!dock) return;
-    dock->close();
+    if (m_tabs.contains(dock)) {
+        RcxDocument* doc = m_tabs[dock].doc;
+        dock->close();
+        if (doc) closeDocument(doc);
+    } else {
+        dock->close();
+    }
+}
+
+void MainWindow::closeDocument(RcxDocument* doc) {
+    if (!doc) return;
+    // Close any tabs using this document
+    auto docks = m_docDocks;
+    for (auto* dock : docks) {
+        if (m_tabs.contains(dock) && m_tabs[dock].doc == doc)
+            dock->close();
+    }
+    m_allDocs.removeAll(doc);
+    doc->deleteLater();
+    rebuildWorkspaceModel();
 }
 
 void MainWindow::closeAllDocDocks() {
@@ -7465,17 +7490,31 @@ void MainWindow::closeAllDocDocks() {
         dock->close();
 }
 
+QDockWidget* MainWindow::ensureTabForDoc(RcxDocument* doc) {
+    if (!doc) return nullptr;
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
+        if (it->doc == doc) return it.key();
+    auto* dock = createTab(doc);
+    if (m_tabs.contains(dock)) {
+        m_tabs[dock].ctrl->refresh();
+        dock->setWindowTitle(tabTitle(m_tabs[dock]));
+        rebuildWorkspaceModel();
+    }
+    return dock;
+}
+
 QVector<MainWindow::ReferenceHit>
 MainWindow::findReferences(const QString& targetTypeName,
                             uint64_t targetStructId) const {
     QVector<ReferenceHit> hits;
     QSet<RcxDocument*> scannedDocs;
-    for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
-        RcxDocument* doc = it.value().doc;
-        // Dedup by document — multiple tabs can share a doc, and we only
-        // want to walk each unique tree once.
-        if (scannedDocs.contains(doc)) continue;
+    for (RcxDocument* doc : m_allDocs) {
+        if (!doc || scannedDocs.contains(doc)) continue;
         scannedDocs.insert(doc);
+
+        QDockWidget* ownerDock = nullptr;
+        for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it)
+            if (it.value().doc == doc) { ownerDock = it.key(); break; }
 
         const auto& tree = doc->tree;
         for (const Node& n : tree.nodes) {
@@ -7501,7 +7540,8 @@ MainWindow::findReferences(const QString& targetTypeName,
             }
 
             ReferenceHit h;
-            h.ownerDock   = it.key();
+            h.ownerDock   = ownerDock;
+            h.doc         = doc;
             h.nodeId      = n.id;
             h.ownerType   = ownerType;
             h.fieldName   = n.name;
@@ -7832,14 +7872,16 @@ void MainWindow::showFindReferences(const QString& targetTypeName,
         .arg(t.background.name(), t.text.name(), t.border.name(),
              t.hover.name(), t.selected.name(), t.text.name()));
     for (const auto& h : hits) {
+        QString title = h.ownerDock ? h.ownerDock->windowTitle()
+            : (h.doc ? rootName(h.doc->tree) : QStringLiteral("?"));
         QString text = QStringLiteral("%1 · %2.%3  (+0x%4)")
-            .arg(h.ownerDock ? h.ownerDock->windowTitle() : QStringLiteral("?"),
+            .arg(title,
                  h.ownerType.isEmpty() ? QStringLiteral("?") : h.ownerType,
                  h.fieldName)
             .arg(h.fieldOffset, 0, 16);
         auto* item = new QListWidgetItem(text);
         item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(
-            reinterpret_cast<quintptr>(h.ownerDock)));
+            reinterpret_cast<quintptr>(h.doc)));
         item->setData(Qt::UserRole + 1, QString::number(h.nodeId));
         list->addItem(item);
     }
@@ -7849,13 +7891,15 @@ void MainWindow::showFindReferences(const QString& targetTypeName,
     connect(list, &QListWidget::itemActivated, this,
             [this, &dlg](QListWidgetItem* item) {
         if (!item) return;
-        auto* dock = reinterpret_cast<QDockWidget*>(
+        auto* doc = reinterpret_cast<RcxDocument*>(
             item->data(Qt::UserRole).value<quintptr>());
         uint64_t nodeId = item->data(Qt::UserRole + 1).toString().toULongLong();
+        if (!doc) return;
+        auto* dock = ensureTabForDoc(doc);
         if (!dock || !m_tabs.contains(dock)) return;
         dock->raise();
         dock->show();
-        m_activeDocDock = dock;
+        setActiveDocDock(dock);
         m_tabs[dock].ctrl->scrollToNodeId(nodeId);
         QPointer<QDockWidget> dockRef = dock;
         QTimer::singleShot(0, this, [this, dockRef]() {
@@ -8085,9 +8129,11 @@ void MainWindow::createWorkspaceDock() {
         auto idVar = item->data(Qt::UserRole + 1);
         uint64_t sid = idVar.isValid() ? idVar.toULongLong() : 0;
         auto subVar = item->data(Qt::UserRole);
-        auto* dk = subVar.isValid()
-            ? static_cast<QDockWidget*>(subVar.value<void*>()) : nullptr;
-        if (sid == 0 || !dk || !m_tabs.contains(dk)) { rebuildWorkspaceModel(); return; }
+        auto* doc = subVar.isValid()
+            ? static_cast<RcxDocument*>(subVar.value<void*>()) : nullptr;
+        if (sid == 0 || !doc) { rebuildWorkspaceModel(); return; }
+        auto* dk = ensureTabForDoc(doc);
+        if (!dk || !m_tabs.contains(dk)) { rebuildWorkspaceModel(); return; }
         auto& tab = m_tabs[dk];
         int ni = tab.doc->tree.indexOfId(sid);
         if (ni < 0) { rebuildWorkspaceModel(); return; }
@@ -8198,7 +8244,7 @@ void MainWindow::createWorkspaceDock() {
         // Gather all selected ROOT items (children are not independently actionable)
         struct SelItem {
             uint64_t structId;
-            QDockWidget* dock;
+            RcxDocument* doc;
             int nodeIdx;
             QString keyword;
             QString typeName;
@@ -8212,14 +8258,14 @@ void MainWindow::createWorkspaceDock() {
             if (sid == 0) continue;
             auto subVar = idx.data(Qt::UserRole);
             if (!subVar.isValid()) continue;
-            auto* dk = static_cast<QDockWidget*>(subVar.value<void*>());
-            if (!dk || !m_tabs.contains(dk)) continue;
-            int ni = m_tabs[dk].doc->tree.indexOfId(sid);
+            auto* doc = static_cast<RcxDocument*>(subVar.value<void*>());
+            if (!doc) continue;
+            int ni = doc->tree.indexOfId(sid);
             if (ni < 0) continue;
-            const auto& nd = m_tabs[dk].doc->tree.nodes[ni];
+            const auto& nd = doc->tree.nodes[ni];
             QString tn = nd.structTypeName.isEmpty() ? nd.name : nd.structTypeName;
             if (tn.isEmpty()) tn = QStringLiteral("(unnamed)");
-            items.push_back(SelItem{sid, dk, ni, nd.resolvedClassKeyword(), tn});
+            items.push_back(SelItem{sid, doc, ni, nd.resolvedClassKeyword(), tn});
         }
         if (items.isEmpty()) return;
 
@@ -8281,21 +8327,20 @@ void MainWindow::createWorkspaceDock() {
             QStringList typeNames;
             for (const auto& item : items) {
                 typeNames << item.typeName;
-                if (!m_tabs.contains(item.dock)) continue;
-                for (const auto& n : m_tabs[item.dock].doc->tree.nodes) {
+                for (const auto& n : item.doc->tree.nodes) {
                     if (n.refId == item.structId) {
                         QString ownerName;
                         uint64_t pid = n.parentId;
                         while (pid != 0) {
-                            int pi = m_tabs[item.dock].doc->tree.indexOfId(pid);
+                            int pi = item.doc->tree.indexOfId(pid);
                             if (pi < 0) break;
-                            if (m_tabs[item.dock].doc->tree.nodes[pi].parentId == 0) {
-                                const auto& pn = m_tabs[item.dock].doc->tree.nodes[pi];
+                            if (item.doc->tree.nodes[pi].parentId == 0) {
+                                const auto& pn = item.doc->tree.nodes[pi];
                                 ownerName = pn.structTypeName.isEmpty()
                                     ? pn.name : pn.structTypeName;
                                 break;
                             }
-                            pid = m_tabs[item.dock].doc->tree.nodes[pi].parentId;
+                            pid = item.doc->tree.nodes[pi].parentId;
                         }
                         QString fieldDesc = ownerName.isEmpty()
                             ? n.name
@@ -8339,8 +8384,9 @@ void MainWindow::createWorkspaceDock() {
             // Group deletes by controller for single undo macro per document
             QHash<RcxController*, QVector<uint64_t>> byCtrl;
             for (const auto& item : items) {
-                if (!m_tabs.contains(item.dock)) continue;
-                byCtrl[m_tabs[item.dock].ctrl].append(item.structId);
+                auto* dock = ensureTabForDoc(item.doc);
+                if (!dock || !m_tabs.contains(dock)) continue;
+                byCtrl[m_tabs[dock].ctrl].append(item.structId);
             }
             for (auto it = byCtrl.begin(); it != byCtrl.end(); ++it) {
                 auto* ctrl = it.key();
@@ -8361,17 +8407,19 @@ void MainWindow::createWorkspaceDock() {
         } else if (chosen && chosen == actOpenCurrent && items.size() == 1) {
             // Open in current (active) tab — set viewRootId on active editor
             const auto& item = items[0];
-            if (!m_tabs.contains(item.dock)) return;
-            RcxDocument* doc = m_tabs[item.dock].doc;
+            RcxDocument* doc = item.doc;
             int ni = doc->tree.indexOfId(item.structId);
             if (ni < 0) return;
             doc->tree.nodes[ni].collapsed = false;
 
             // Use the active tab if it shares the same document, else use owner
-            QDockWidget* targetDock = item.dock;
+            QDockWidget* targetDock = nullptr;
             if (m_activeDocDock && m_tabs.contains(m_activeDocDock)
                 && m_tabs[m_activeDocDock].doc == doc)
                 targetDock = m_activeDocDock;
+            else
+                targetDock = ensureTabForDoc(doc);
+            if (!targetDock || !m_tabs.contains(targetDock)) return;
 
             auto& tab = m_tabs[targetDock];
             tab.ctrl->setViewRootId(item.structId);
@@ -8389,8 +8437,7 @@ void MainWindow::createWorkspaceDock() {
         } else if (chosen && chosen == actOpenNew && items.size() == 1) {
             // Open in a brand new tab (sharing the same document)
             const auto& item = items[0];
-            if (!m_tabs.contains(item.dock)) return;
-            RcxDocument* doc = m_tabs[item.dock].doc;
+            RcxDocument* doc = item.doc;
             int ni = doc->tree.indexOfId(item.structId);
             if (ni < 0) return;
             doc->tree.nodes[ni].collapsed = false;
@@ -8420,8 +8467,9 @@ void MainWindow::createWorkspaceDock() {
         } else if (chosen && chosen == actDuplicate && items.size() == 1) {
             // Duplicate: deep-copy the struct as a new root with a unique name
             const auto& item = items[0];
-            if (!m_tabs.contains(item.dock)) return;
-            auto& tab = m_tabs[item.dock];
+            auto* dock = ensureTabForDoc(item.doc);
+            if (!dock || !m_tabs.contains(dock)) return;
+            auto& tab = m_tabs[dock];
             auto& tree = tab.doc->tree;
 
             // Generate unique name
@@ -8467,8 +8515,9 @@ void MainWindow::createWorkspaceDock() {
 
         } else if (chosen && chosen == actConvert && items.size() == 1) {
             const auto& item = items[0];
-            if (!m_tabs.contains(item.dock)) return;
-            auto& tab = m_tabs[item.dock];
+            auto* dock = ensureTabForDoc(item.doc);
+            if (!dock || !m_tabs.contains(dock)) return;
+            auto& tab = m_tabs[dock];
             int ni = tab.doc->tree.indexOfId(item.structId);
             if (ni < 0) return;
             QString newKw = item.keyword == QStringLiteral("class")
@@ -8584,10 +8633,9 @@ void MainWindow::createWorkspaceDock() {
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
-        auto* ownerDock = static_cast<QDockWidget*>(subVar.value<void*>());
-        if (!ownerDock || !m_tabs.contains(ownerDock)) return;
+        auto* doc = static_cast<RcxDocument*>(subVar.value<void*>());
+        if (!doc) return;
 
-        RcxDocument* doc = m_tabs[ownerDock].doc;
         auto& tree = doc->tree;
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
@@ -8595,6 +8643,8 @@ void MainWindow::createWorkspaceDock() {
         // For child members: navigate within the owner tab and scroll
         uint64_t parentId = tree.nodes[ni].parentId;
         if (parentId != 0) {
+            auto* ownerDock = ensureTabForDoc(doc);
+            if (!ownerDock) return;
             ownerDock->raise();
             ownerDock->show();
             setActiveDocDock(ownerDock);
@@ -8653,17 +8703,21 @@ void MainWindow::createWorkspaceDock() {
 
         auto subVar = index.data(Qt::UserRole);
         if (!subVar.isValid()) return;
-        auto* ownerDock = static_cast<QDockWidget*>(subVar.value<void*>());
-        if (!ownerDock || !m_tabs.contains(ownerDock)) return;
+        auto* doc = static_cast<RcxDocument*>(subVar.value<void*>());
+        if (!doc) return;
 
-        RcxDocument* doc = m_tabs[ownerDock].doc;
         auto& tree = doc->tree;
         int ni = tree.indexOfId(structId);
         if (ni < 0) return;
 
         uint64_t parentId = tree.nodes[ni].parentId;
         if (parentId != 0) {
-            // Child member: navigate within owner tab, scroll to member
+            // Child member: peek only if a tab is already open for this doc
+            QDockWidget* ownerDock = nullptr;
+            for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
+                if (it->doc == doc) { ownerDock = it.key(); break; }
+            }
+            if (!ownerDock) return;
             ownerDock->raise();
             ownerDock->show();
             setActiveDocDock(ownerDock);
@@ -9561,7 +9615,9 @@ void MainWindow::downloadSymbolsForProcess() {
 }
 
 void MainWindow::rebuildAllDocs() {
-    m_allDocs.clear();
+    // Accumulating registry of live documents: docs whose last tab closed
+    // stay in m_allDocs (sidebar keeps them; a tab can be re-opened). The
+    // caller purges the list explicitly on project replacement.
     for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
         if (!m_allDocs.contains(it.value().doc))
             m_allDocs.append(it.value().doc);
@@ -9601,12 +9657,11 @@ void MainWindow::rebuildWorkspaceModelNow() {
         gen ^= v + 0x9E3779B97F4A7C15ULL + (gen << 6) + (gen >> 2);
     };
     QSet<RcxDocument*> seen;
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-        mix(reinterpret_cast<quintptr>(it.key()));
-        mix(it->ctrl->viewRootId());
-        if (seen.contains(it->doc)) continue;
-        seen.insert(it->doc);
-        for (const auto& n : it->doc->tree.nodes) {
+    for (auto* doc : m_allDocs) {
+        mix(reinterpret_cast<quintptr>(doc));
+        if (seen.contains(doc)) continue;
+        seen.insert(doc);
+        for (const auto& n : doc->tree.nodes) {
             if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
             mix(n.id);
             mix(qHash(n.structTypeName));
@@ -9652,12 +9707,11 @@ void MainWindow::rebuildWorkspaceModelNow() {
 
     QVector<rcx::TabInfo> tabs;
     QSet<RcxDocument*> seenDocs;
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-        TabState& tab = it.value();
-        if (seenDocs.contains(tab.doc)) continue;
-        seenDocs.insert(tab.doc);
-        QString name = rootName(tab.doc->tree, tab.ctrl->viewRootId());
-        tabs.push_back(rcx::TabInfo{ &tab.doc->tree, name, static_cast<void*>(it.key()) });
+    for (auto* doc : m_allDocs) {
+        if (seenDocs.contains(doc)) continue;
+        seenDocs.insert(doc);
+        QString name = rootName(doc->tree);
+        tabs.push_back(rcx::TabInfo{ &doc->tree, name, static_cast<void*>(doc) });
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs, m_pinnedIds);
 
@@ -10116,16 +10170,10 @@ void MainWindow::closeEvent(QCloseEvent* event) {
     // hid the other classes in a multi-class document.
     QSet<RcxDocument*> dirtyDocs;
     QStringList dirtyNames;
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-        if (!it->doc->modified || dirtyDocs.contains(it->doc)) continue;
-        dirtyDocs.insert(it->doc);
-        // No cross-doc dedup of names — two unsaved projects with the
-        // default class name "UnnamedClass0" SHOULD show two entries so
-        // the user can see exactly how many are dirty. The
-        // dirtyDocs.contains(it->doc) guard above already handles the
-        // multi-tab-shares-one-doc case, which was the original dedup's
-        // real purpose.
-        dirtyNames.append(collectDirtyDocLabels(it->doc));
+    for (RcxDocument* doc : m_allDocs) {
+        if (!doc || !doc->modified || dirtyDocs.contains(doc)) continue;
+        dirtyDocs.insert(doc);
+        dirtyNames.append(collectDirtyDocLabels(doc));
     }
     if (dirtyDocs.isEmpty()) { event->accept(); return; }
 
@@ -10161,12 +10209,13 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         return;
     }
     if (choice == ThemedMessageBox::UnsavedChoice::Save) {
-        // Save each unique dirty doc via the tab that owns it.
+        // Save each unique dirty doc via a tab that owns it.
         QSet<RcxDocument*> saved;
-        for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
-            if (!it->doc->modified || saved.contains(it->doc)) continue;
-            saved.insert(it->doc);
-            if (!project_save(it.key(), false)) {
+        for (RcxDocument* doc : m_allDocs) {
+            if (!doc || !doc->modified || saved.contains(doc)) continue;
+            saved.insert(doc);
+            auto* dock = ensureTabForDoc(doc);
+            if (!dock || !project_save(dock, false)) {
                 event->ignore();
                 return;
             }
@@ -10575,7 +10624,7 @@ void MainWindow::showStartPage() {
         dismissStartPage();
         // selfTest creates its own demo tabs; drop the preloaded class first
         // so we don't stack an unrelated scratch class on top of the demo.
-        { ClosingGuard guard(m_closingAll); closeAllDocDocks(); }
+        { ClosingGuard guard(m_closingAll); closeAllDocDocks(); m_allDocs.clear(); }
         selfTest();
     });
     connect(m_startPage, &StartPageWidget::fileSelected, this, [this](const QString& path) {

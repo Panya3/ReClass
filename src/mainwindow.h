@@ -148,6 +148,7 @@ public:
     QDockWidget* project_open(const QString& path = {});
     bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
     void project_close(QDockWidget* dock = nullptr);
+    void closeDocument(RcxDocument* doc);
 
     // Layout presets — called from the collapsed-rail click, the doc-tab
     // context menu, and the --screenshot harness. Sets visibility of the
@@ -162,7 +163,8 @@ public:
 
     // Data form for the same query, exposed for MCP tool reuse.
     struct ReferenceHit {
-        QDockWidget*    ownerDock;   // which doc tab contains the hit
+        QDockWidget*    ownerDock;   // which doc tab contains the hit (may be nullptr if no tab)
+        RcxDocument*    doc;         // document containing the hit
         uint64_t        nodeId;      // node holding the reference
         QString         ownerType;   // root struct containing nodeId
         QString         fieldName;   // nodeId's name
@@ -332,6 +334,10 @@ private:
     // active controller's source + the given liveness status.
     void updateSourceChip();
     void closeAllDocDocks();
+    // Returns an existing tab showing doc, or opens a fresh one. Row
+    // identifiers in the workspace sidebar now carry RcxDocument*; closed
+    // docs stay alive in m_allDocs, so activation must be able to re-open.
+    QDockWidget* ensureTabForDoc(RcxDocument* doc);
     // Toggle the empty-workspace hatch: lifts the central widget's 0-height
     // cap when no document tab is open (showing the WorkspaceHatch), re-pins
     // it to 0 when a tab exists so the doc-dock area fills the window.
