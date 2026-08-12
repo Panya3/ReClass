@@ -7272,7 +7272,7 @@ QDockWidget* MainWindow::project_new(const QString& classKeyword,
     return dock;
 }
 
-QDockWidget* MainWindow::project_open(const QString& path) {
+QDockWidget* MainWindow::project_open(const QString& path, bool interactive) {
     PROFILE_SCOPE("MainWindow::project_open");
     QString filePath = path;
     if (filePath.isEmpty()) {
@@ -7298,7 +7298,11 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         QString shadow = filePath + QStringLiteral(".autosave");
         QFileInfo origInfo(filePath);
         QFileInfo shadowInfo(shadow);
-        if (shadowInfo.exists() && shadowInfo.isFile()
+        // Headless opens (interactive=false) skip this prompt entirely:
+        // an automation request has no human to answer it, and opening
+        // the file as named is the least-surprise behavior. The shadow
+        // is left in place for the next interactive open to decide on.
+        if (interactive && shadowInfo.exists() && shadowInfo.isFile()
             && shadowInfo.lastModified() > origInfo.lastModified()) {
             // Show the full absolute path so the user can verify
             // exactly which file (and which shadow) the prompt refers
@@ -7326,6 +7330,67 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         }
     }
 
+    // Ask how the loaded project should enter the workspace when a
+    // document is already open: merge its classes into the active
+    // document, or clear the workspace and open the file on its own.
+    // The prompt is skipped when no document is open yet (the typical
+    // first open) — there is nothing to merge into or to replace.
+    enum class OpenMode { Merge, Clear, Cancel };
+    OpenMode openMode = OpenMode::Clear;
+    {
+        bool hasOpenDoc = false;
+        for (RcxDocument* d : m_allDocs)
+            if (!d->tree.nodes.isEmpty()) { hasOpenDoc = true; break; }
+        // MCP / automation (interactive=false) skips the prompt — a
+        // headless call has no human to answer it. The historical
+        // behavior applies: opening replaces the current workspace.
+        if (interactive && hasOpenDoc) {
+            ThemedMessageBox box(this, ThemedMessageBox::Question,
+                QStringLiteral("Merge or Open Clear?"),
+                QStringLiteral(
+                    "Another project is already open.\n\n"
+                    "%1 contains the current classes.\n\n"
+                    "Merge the classes of %2 into the current project, "
+                    "or close everything and open %2 on its own?")
+                    .arg(activeTab() && activeTab()->doc
+                             ? rootName(activeTab()->doc->tree)
+                             : QStringLiteral("The active project"))
+                    .arg(QFileInfo(filePath).fileName()));
+
+            OpenMode chosen = OpenMode::Cancel;
+            auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+                DialogButton::Secondary, &box);
+            QObject::connect(cancelBtn, &QPushButton::clicked, &box, [&]() {
+                chosen = OpenMode::Cancel;
+                box.reject();
+            });
+            box.appendButton(cancelBtn);
+
+            auto* clearBtn = new DialogButton(QStringLiteral("Open Clear"),
+                DialogButton::Destructive, &box);
+            QObject::connect(clearBtn, &QPushButton::clicked, &box, [&]() {
+                chosen = OpenMode::Clear;
+                box.accept();
+            });
+            box.appendButton(clearBtn);
+
+            auto* mergeBtn = new DialogButton(QStringLiteral("Merge"),
+                DialogButton::Primary, &box);
+            QObject::connect(mergeBtn, &QPushButton::clicked, &box, [&]() {
+                chosen = OpenMode::Merge;
+                box.accept();
+            });
+            box.appendButton(mergeBtn);
+
+            // Destructive action (Open Clear) default-focuses the safe
+            // choice (Merge) — a stray Enter must never destroy work.
+            box.setDefault(mergeBtn);
+            box.exec();
+            openMode = chosen;
+        }
+    }
+    if (openMode == OpenMode::Cancel) return nullptr;
+
     // Detect if this is an XML-based ReClass file by checking first bytes.
     // Also recognise the ReClass.NET .rcnet ZIP container (PK\x03\x04
     // magic) — importReclassXml handles the unzip itself.
@@ -7345,13 +7410,16 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         QString error;
         NodeTree tree = rcx::importReclassXml(filePath, &error);
         if (tree.nodes.isEmpty()) {
-            ThemedMessageBox::warn(this,
-                QStringLiteral("Import Failed"),
-                error.isEmpty()
-                    ? QStringLiteral("The file doesn't contain any class data.")
-                    : error);
+            if (interactive)
+                ThemedMessageBox::warn(this,
+                    QStringLiteral("Import Failed"),
+                    error.isEmpty()
+                        ? QStringLiteral("The file doesn't contain any class data.")
+                        : error);
             return nullptr;
         }
+        if (openMode == OpenMode::Merge)
+            return mergeTreeIntoActive(filePath, std::move(tree));
         auto* doc = new RcxDocument(this);
         doc->tree = std::move(tree);
         QDockWidget* dock;
@@ -7378,9 +7446,10 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     QApplication::processEvents();
 
     if (!doc->load(filePath)) {
-        ThemedMessageBox::warn(this,
-            QStringLiteral("Open Failed"),
-            QStringLiteral("Couldn't load %1.").arg(filePath));
+        if (interactive)
+            ThemedMessageBox::warn(this,
+                QStringLiteral("Open Failed"),
+                QStringLiteral("Couldn't load %1.").arg(filePath));
         setAppStatus({});
         endProgress();
         delete doc;
@@ -7396,6 +7465,13 @@ QDockWidget* MainWindow::project_open(const QString& path) {
         doc->filePath = originalPath;
         doc->modified = true;
         filePath = originalPath;  // local var so addRecentFile + status use the real path
+    }
+
+    if (openMode == OpenMode::Merge) {
+        endProgress();
+        QDockWidget* dock = mergeTreeIntoActive(filePath, std::move(doc->tree));
+        delete doc;
+        return dock;
     }
 
     int nodeCount = doc->tree.nodes.size();
@@ -7433,6 +7509,251 @@ QDockWidget* MainWindow::project_open(const QString& path) {
     endProgress();
 
     return dock;
+}
+
+QDockWidget* MainWindow::mergeTreeIntoActive(const QString& filePath,
+                                             NodeTree incoming) {
+    auto* tab = activeTab();
+    // Docs survive tab closes (commit 7b1c835); if no tab is currently
+    // focused, merge into the most recent live document and open its tab.
+    if (!tab) {
+        QDockWidget* dock = nullptr;
+        if (!m_allDocs.isEmpty()) dock = ensureTabForDoc(m_allDocs.last());
+        if (dock && m_tabs.contains(dock)) tab = &m_tabs[dock];
+    }
+    if (!tab || !tab->doc || !tab->ctrl)
+        return nullptr;
+
+    RcxDocument* doc = tab->doc;
+    NodeTree& target = doc->tree;
+
+    int classCount = 0;
+    for (const auto& n : incoming.nodes)
+        if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
+
+    // ── Duplicate class names ──
+    // Root structs whose label already exists in the target project need
+    // a decision from the user: overwrite the existing class (its subtree
+    // is replaced by the incoming one), auto-rename the incoming one
+    // (append a counter), or cancel the whole merge.
+    struct Dup { QString label; uint64_t incomingId, targetId; };
+    QVector<Dup> dups;
+    {
+        QHash<QString, uint64_t> targetRoots;
+        for (const auto& n : target.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct)
+                targetRoots.insert(nodeClassLabel(n), n.id);
+        QSet<QString> seenIncoming;
+        for (const auto& n : incoming.nodes) {
+            if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+            QString label = nodeClassLabel(n);
+            // Only the first incoming class of a given name collides with
+            // an existing target root — a second identical incoming name
+            // is already a duplicate inside the file itself.
+            if (seenIncoming.contains(label)) continue;
+            seenIncoming.insert(label);
+            auto it = targetRoots.find(label);
+            if (it != targetRoots.end())
+                dups.push_back({label, n.id, it.value()});
+        }
+    }
+
+    // Merge policy for duplicate names, decided once up front.
+    enum class DupPolicy { Overwrite, Rename, Cancel };
+    DupPolicy dupPolicy = DupPolicy::Rename;
+    if (!dups.isEmpty()) {
+        ThemedMessageBox box(this, ThemedMessageBox::Question,
+            QStringLiteral("Duplicate Class Names"),
+            QStringLiteral(
+                "%1 class%2 already exist%3 in the current project:\n\n"
+                "How should they be merged?")
+                .arg(dups.size())
+                .arg(dups.size() == 1 ? QStringLiteral("") : QStringLiteral("es"))
+                .arg(dups.size() == 1 ? QStringLiteral("s") : QStringLiteral("")));
+        QStringList dupNames;
+        for (const auto& d : dups) dupNames.append(d.label);
+        box.setDetailText(dupNames.join(QLatin1Char('\n')));
+
+        DupPolicy chosen = DupPolicy::Cancel;
+        auto* cancelBtn = new DialogButton(QStringLiteral("Cancel"),
+            DialogButton::Secondary, &box);
+        QObject::connect(cancelBtn, &QPushButton::clicked, &box, [&]() {
+            chosen = DupPolicy::Cancel;
+            box.reject();
+        });
+        box.appendButton(cancelBtn);
+
+        auto* overwriteBtn = new DialogButton(QStringLiteral("Overwrite Existing"),
+            DialogButton::Destructive, &box);
+        QObject::connect(overwriteBtn, &QPushButton::clicked, &box, [&]() {
+            chosen = DupPolicy::Overwrite;
+            box.accept();
+        });
+        box.appendButton(overwriteBtn);
+
+        auto* renameBtn = new DialogButton(QStringLiteral("Rename New Classes"),
+            DialogButton::Primary, &box);
+        QObject::connect(renameBtn, &QPushButton::clicked, &box, [&]() {
+            chosen = DupPolicy::Rename;
+            box.accept();
+        });
+        box.appendButton(renameBtn);
+
+        // Overwrite discards the current project's classes — a stray
+        // Enter must never destroy work, so Rename gets the focus.
+        box.setDefault(renameBtn);
+        box.exec();
+        dupPolicy = chosen;
+    }
+    if (dupPolicy == DupPolicy::Cancel) return nullptr;
+
+    // For Rename: rewrite the labels of colliding incoming roots with a
+    // unique "<base>_<counter>" form (the same underscore-suffix shape
+    // the app uses for generated names like "UnnamedClass0_2"), checked
+    // against every name that
+    // will exist after the merge: the target's classes, the incoming
+    // file's own classes (a rename must not land on an unchanged
+    // arrival), and renames made so far in this pass.
+    int renamedCount = 0;
+    if (dupPolicy == DupPolicy::Rename && !dups.isEmpty()) {
+        QSet<QString> targetLabels;
+        QSet<QString> used;
+        for (const auto& n : target.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+                QString label = nodeClassLabel(n);
+                targetLabels.insert(label);
+                used.insert(label);
+            }
+        // Reserve the incoming file's own root labels too — a rename must
+        // not collide with a class arriving unchanged (e.g. the file
+        // already contains both "Foo" and "Foo_2").
+        for (const auto& n : incoming.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct)
+                used.insert(nodeClassLabel(n));
+        // Rename every incoming root whose label collides with a target
+        // root — NOT just the first duplicate of a name. If the incoming
+        // file itself contains "Foo" twice, both must move aside or the
+        // second would land unchanged next to the target's "Foo".
+        for (auto& n : incoming.nodes) {
+            if (n.parentId != 0 || n.kind != NodeKind::Struct) continue;
+            QString base = nodeClassLabel(n);
+            if (!targetLabels.contains(base)) continue;
+            QString candidate = base;
+            int counter = 2;
+            while (used.contains(candidate))
+                candidate = base + QStringLiteral("_%1").arg(counter++);
+            used.insert(candidate);
+            n.structTypeName = candidate;
+            n.name = candidate;
+            renamedCount++;
+        }
+    }
+
+    // Map the incoming tree's ids onto fresh ids of the target so the
+    // two forests can't collide (same pattern as the MCP import type).
+    QHash<uint64_t, uint64_t> idMap;
+    for (const auto& n : incoming.nodes)
+        idMap.insert(n.id, target.reserveId());
+
+    // Push one undoable macro so Ctrl+Z undoes the whole merge at once.
+    tab->ctrl->setSuppressRefresh(true);
+    doc->undoStack.beginMacro(
+        QStringLiteral("Merge ") + QFileInfo(filePath).fileName());
+
+    // Overwrite: drop the colliding target roots (subtree and all)
+    // before inserting the incoming replacements — same removal shape as
+    // RcxController::deleteRootStruct.
+    if (dupPolicy == DupPolicy::Overwrite) {
+        for (const auto& d : dups) {
+            // Clear refId references pointing into the deleted subtree
+            QSet<uint64_t> removedIds;
+            for (int i : target.subtreeIndices(d.targetId))
+                removedIds.insert(target.nodes[i].id);
+            for (int i = 0; i < target.nodes.size(); i++) {
+                auto& n = target.nodes[i];
+                if (n.refId != 0 && removedIds.contains(n.refId)) {
+                    doc->undoStack.push(new rcx::RcxCommand(tab->ctrl,
+                        rcx::cmd::ChangePointerRef{n.id, n.refId, (uint64_t)0}));
+                }
+            }
+            QVector<int> indices = target.subtreeIndices(d.targetId);
+            QVector<Node> subtree;
+            for (int i : indices)
+                subtree.append(target.nodes[i]);
+            doc->undoStack.push(new rcx::RcxCommand(tab->ctrl,
+                rcx::cmd::Remove{d.targetId, subtree, {}}));
+        }
+    }
+
+    for (const auto& n : incoming.nodes) {
+        rcx::Node copy = n;
+        copy.id = idMap.value(copy.id, copy.id);
+        copy.parentId = idMap.value(copy.parentId, copy.parentId);
+        if (copy.refId != 0)
+            copy.refId = idMap.value(copy.refId, copy.refId);
+        doc->undoStack.push(new rcx::RcxCommand(tab->ctrl,
+            rcx::cmd::Insert{copy}));
+    }
+    doc->undoStack.endMacro();
+    tab->ctrl->setSuppressRefresh(false);
+
+    // Overwrite may have deleted the root the user was currently viewing
+    // — the controller's view root would dangle (blank editor + stale
+    // breadcrumbs). Repoint it at the merged replacement (same-name
+    // incoming root) or the first remaining root, mirroring the view
+    // fixup in RcxController::deleteRootStruct.
+    // setViewRootId() refreshes internally, so only issue the trailing
+    // refresh when the view wasn't repointed (avoids a double compose on
+    // large projects when an overwrite changed the viewed class).
+    bool viewRepointed = false;
+    if (dupPolicy == DupPolicy::Overwrite) {
+        uint64_t viewed = tab->ctrl->viewRootId();
+        for (const auto& d : dups) {
+            if (viewed == 0 || d.targetId != viewed) continue;
+            uint64_t replacement = idMap.value(d.incomingId, 0);
+            if (replacement == 0 || target.indexOfId(replacement) < 0) {
+                for (const auto& n : target.nodes)
+                    if (n.parentId == 0 && n.kind == NodeKind::Struct) {
+                        replacement = n.id;
+                        break;
+                    }
+            }
+            tab->ctrl->setViewRootId(replacement);
+            viewRepointed = true;
+            break;
+        }
+    }
+    if (!viewRepointed) tab->ctrl->refresh();
+
+    // Merge bookmarks, skipping name-duplicates of the target's own set.
+    for (const Bookmark& b : incoming.bookmarks) {
+        bool dup = false;
+        for (const Bookmark& e : target.bookmarks)
+            if (e.name == b.name) { dup = true; break; }
+        if (!dup) target.bookmarks.append(b);
+    }
+    // The bookmarks dock listens for documentChanged / tab activation —
+    // neither fires for an undo-stack-driven merge — so refresh it
+    // explicitly or the merged bookmarks stay invisible.
+    refreshBookmarksDock();
+
+    doc->modified = true;
+    updateWindowTitle();
+    rebuildWorkspaceModel();
+    QString policyNote;
+    if (dupPolicy == DupPolicy::Overwrite)
+        policyNote = QStringLiteral(", %1 overwritten")
+            .arg(dups.size());
+    else if (dupPolicy == DupPolicy::Rename && renamedCount > 0)
+        policyNote = QStringLiteral(", %1 renamed")
+            .arg(renamedCount);
+    setAppStatus(QStringLiteral("Merged %1 class%2 from %3%4")
+        .arg(classCount)
+        .arg(classCount == 1 ? QStringLiteral("") : QStringLiteral("es"))
+        .arg(QFileInfo(filePath).fileName())
+        .arg(policyNote));
+    addRecentFile(filePath);
+    return m_activeDocDock;
 }
 
 bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
@@ -7496,8 +7817,18 @@ void MainWindow::closeDocument(RcxDocument* doc) {
 void MainWindow::closeAllDocDocks() {
     // Take a copy since closing modifies m_docDocks via destroyed signal
     auto docks = m_docDocks;
-    for (auto* dock : docks)
+    for (auto* dock : docks) {
         dock->close();
+        // WA_DeleteOnClose schedules the dock's destruction via
+        // deleteLater() — DEFERRED, so the destroyed handler (which
+        // erases the m_tabs entry) wouldn't run until the event loop
+        // spins again. Callers (createTab → rebuildAllDocs) rebuild
+        // m_allDocs from m_tabs synchronously, so a deferred deletion
+        // would re-register the just-closed docs and resurrect them in
+        // the workspace sidebar. Flush the deletion here so m_tabs is
+        // already clean when the caller continues.
+        QCoreApplication::sendPostedEvents(dock, QEvent::DeferredDelete);
+    }
 }
 
 QDockWidget* MainWindow::ensureTabForDoc(RcxDocument* doc) {

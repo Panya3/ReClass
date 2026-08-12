@@ -2200,7 +2200,12 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
         QString path = args.value("filePath").toString();
         if (path.isEmpty())
             return makeTextResult("filePath required for open_file", true);
-        m_mainWindow->project_open(path);
+        // Headless: never block on the Merge/Open-Clear (or autosave)
+        // modal — there is no human at the other end of an MCP call.
+        // Opening replaces the workspace, the historical behavior.
+        QDockWidget* dock = m_mainWindow->project_open(path, /*interactive=*/false);
+        if (!dock)
+            return makeTextResult("Failed to open: " + path, true);
         return makeTextResult("Opened: " + path);
     }
     if (action == "collapse_node") {

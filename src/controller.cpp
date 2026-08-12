@@ -2075,6 +2075,16 @@ void RcxController::refresh() {
     // exception compose might throw.
     ComposeDocGuard composeGuard(m_doc);
 
+    // A view root that no longer exists (undo of a merge that
+    // overwrote the class being viewed, an undo that removed the
+    // inspected class, etc.) would compose to an EMPTY result — a
+    // blank editor with stale breadcrumbs. Fall back to show-all
+    // (0) instead of rendering nothing.
+    if (m_viewRootId != 0 && m_doc->tree.indexOfId(m_viewRootId) < 0) {
+        m_viewRootId = 0;
+        m_focusPath.clear();
+    }
+
     // Build symbol lookup callback. The unified NameRegistry aggregates
     // every registered NameProvider (PDB + RTTI + bookmarks + future
     // plugin sources) so a single callback labels addresses from any

@@ -145,7 +145,17 @@ public:
     // Project Lifecycle API
     QDockWidget* project_new(const QString& classKeyword = QString(),
                              bool forceFreshDoc = false);
-    QDockWidget* project_open(const QString& path = {});
+    // `interactive` gates the modal prompts on this path (the Merge /
+    // Open-Clear choice, the autosave-restore offer, the load-failure
+    // boxes). Headless callers like MCP's open_file pass false so an
+    // automation request never blocks on a dialog; the workspace is
+    // simply replaced — the historical open behavior.
+    QDockWidget* project_open(const QString& path = {}, bool interactive = true);
+    // Merge `incoming` (a tree parsed from another project file) into the
+    // document shown in the active tab, remapping every node id so the two
+    // forests coexist. Bookmarks are appended (duplicates by name skipped).
+    // Returns the active dock (nullptr when no document is open).
+    QDockWidget* mergeTreeIntoActive(const QString& filePath, NodeTree incoming);
     bool project_save(QDockWidget* dock = nullptr, bool saveAs = false);
     void project_close(QDockWidget* dock = nullptr);
     void closeDocument(RcxDocument* doc);
