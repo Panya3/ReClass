@@ -3569,6 +3569,30 @@ bool RcxController::writeSelectedBytesToFile(uint64_t addr, int n,
     return true;
 }
 
+namespace {
+// The auto-clear draft sweep only needs to run after commands that can
+// change whether a field's offset overlaps a sibling (insert/delete,
+// offset moves, kind/size changes, union toggles, draft flips). Value
+// writes, renames, comments etc. cannot — skipping the O(N) scan keeps
+// keystroke-frequency commands (WriteBytes, ChangeComment, Rename) cheap
+// on huge projects.
+bool commandCanChangeLayout(const Command& c) {
+    return std::visit([](const auto& cmd) {
+        using T = std::decay_t<decltype(cmd)>;
+        if constexpr (std::is_same_v<T, cmd::Insert> ||
+                      std::is_same_v<T, cmd::Remove> ||
+                      std::is_same_v<T, cmd::ChangeKind> ||
+                      std::is_same_v<T, cmd::ChangeOffset> ||
+                      std::is_same_v<T, cmd::ChangeParent> ||
+                      std::is_same_v<T, cmd::ChangeArrayMeta> ||
+                      std::is_same_v<T, cmd::ChangeClassKeyword> ||
+                      std::is_same_v<T, cmd::SetDraft>)
+            return true;
+        return false;
+    }, c);
+}
+} // namespace
+
 bool RcxController::applyCommand(const Command& command, bool isUndo) {
     auto& tree = m_doc->tree;
     bool success = true;
@@ -3811,6 +3835,30 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
                 tree.nodes[idx].draft = isUndo ? c.oldVal : c.newVal;
         }
     }, command);
+
+    // Auto-clear stale drafts (the "automatic" part of the draft system):
+    // a draft whose offset no longer conflicts with any sibling is usable
+    // again, no matter HOW the conflict disappeared (offset edit, sibling
+    // deletion, resize...). Clear-only — never auto-set, so the innocent
+    // member of an overlap pair is never flagged. Runs after every command
+    // that can change the layout, so the user's rule "when the condition is
+    // correct the draft state disappears" holds with no manual toggle (the
+    // Mark-as-Draft/Active menu was removed). Direct tree mutation (no
+    // command pushed) so undo/redo semantics stay clean; touch() bumps the
+    // generation so the overlap-warning cache recomputes.
+    if (success && commandCanChangeLayout(command)) {
+        bool changed = false;
+        for (auto& n : tree.nodes) {
+            if (!n.draft) continue;
+            int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                ? tree.structSpan(n.id) : n.byteSize();
+            if (describeOffsetConflict(n.parentId, n.offset, sz, n.id).isEmpty()) {
+                n.draft = false;
+                changed = true;
+            }
+        }
+        if (changed) tree.touch();
+    }
 
     // Only refresh when the op actually took effect. On WriteBytes failure
     // we skip the refresh so the UI keeps whatever the most recent

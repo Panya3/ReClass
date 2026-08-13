@@ -161,6 +161,79 @@ private slots:
         delete doc2;
     }
 
+    // ── Draft lifecycle (automatic system) ──
+    // A draft only persists while its offset actually conflicts; the
+    // auto-clear sweep in applyCommand wipes it the moment the conflict
+    // disappears (or if it never existed). Survives a .rcx round-trip
+    // while the conflict is live.
+    void testDraftLifecycleAndFileRoundTrip() {
+        auto idxOf = [&](const QString& name) {
+            for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+                if (m_doc->tree.nodes[i].name == name) return i;
+            return -1;
+        };
+        int hex = idxOf(QStringLiteral("field_hex"));  // 0xC..0x10
+        int pad1 = idxOf(QStringLiteral("pad1"));      // 0xB
+        QVERIFY(hex >= 0 && pad1 >= 0);
+
+        // Create a live conflict: pad1 (1 byte) moved onto field_hex
+        m_doc->tree.nodes[pad1].offset = 0xE;           // 0xE..0xF overlaps
+        uint64_t hexId = m_doc->tree.nodes[hex].id;
+
+        // setNodeDraft pushes a command → the auto-clear sweep runs after it;
+        // the conflict is real, so the draft persists.
+        m_ctrl->setNodeDraft(hexId, true);
+        QVERIFY(m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].draft);
+        m_doc->undoStack.undo();
+        QVERIFY(!m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].draft);
+
+        // File round-trip keeps the flag while the conflict is live
+        m_ctrl->setNodeDraft(hexId, true);
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        const QString path = f.fileName();
+        f.close();
+        QVERIFY(m_doc->save(path));
+
+        auto* doc2 = new RcxDocument();
+        QVERIFY(doc2->load(path));
+        bool found = false;
+        for (const auto& n : doc2->tree.nodes)
+            if (n.name == QStringLiteral("field_hex")) { QVERIFY(n.draft); found = true; }
+        QVERIFY(found);
+        delete doc2;
+    }
+
+    // ── Auto-clear sweep: the draft disappears the moment its offset no
+    //    longer conflicts — the user's "เมื่อเงื่อนไขถูกต้อง สถานะ draft
+    //    ก็จะหายไป" rule. No manual toggle exists anymore, so this sweep
+    //    is the ONLY way a stale draft gets un-stuck.
+    void testDraftAutoClearSweep() {
+        auto idxOf = [&](const QString& name) {
+            for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+                if (m_doc->tree.nodes[i].name == name) return i;
+            return -1;
+        };
+        int hex = idxOf(QStringLiteral("field_hex"));  // 0xC..0x10
+        int pad1 = idxOf(QStringLiteral("pad1"));      // 0xB
+        uint64_t hexId = m_doc->tree.nodes[hex].id;
+
+        // Conflict live → draft sticks
+        m_doc->tree.nodes[pad1].offset = 0xE;
+        m_ctrl->setNodeDraft(hexId, true);
+        QVERIFY(m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].draft);
+
+        // Fix = delete the conflicting sibling → next command auto-clears
+        m_ctrl->removeNode(m_doc->tree.indexOfId(m_doc->tree.nodes[pad1].id));
+        QVERIFY(!m_doc->tree.nodes[m_doc->tree.indexOfId(hexId)].draft);
+
+        // A draft on a conflict-free field never sticks at all
+        int floatIdx = idxOf(QStringLiteral("field_float"));
+        uint64_t floatId = m_doc->tree.nodes[floatIdx].id;
+        m_ctrl->setNodeDraft(floatId, true);
+        QVERIFY(!m_doc->tree.nodes[m_doc->tree.indexOfId(floatId)].draft);
+    }
+
     // ── Two delete modes ──
     // removeNode(idx, keepOffsets=true) leaves the remaining siblings' offsets
     // untouched (the deleted span stays as a gap); the default compacts them
