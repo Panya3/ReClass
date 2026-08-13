@@ -76,6 +76,13 @@ struct ComposeState {
     QSet<uint64_t>     visiting;      // cycle detection for struct recursion
     QSet<qulonglong>   ptrVisiting;   // cycle guard for pointer expansions
     QSet<uint64_t>     virtualPtrRefs; // refIds currently being virtually expanded via pointer deref
+    // Node ids participating in a sibling offset overlap (active fields
+    // only). Rows whose node is in this set get LineMeta::overlapWarning
+    // so the editor can paint a warning band. Populated by the caller
+    // (controller) from NodeTree::findOverlaps() — NOT recomputed here,
+    // because compose runs every refresh tick and the O(siblings²) scan
+    // doesn't belong in the hot path.
+    QSet<uint64_t>     overlapNodeIds;
     int                currentLine = 0;
     int                typeW       = kColType;  // global type column width (fallback)
     int                nameW       = kColName;  // global name column width (fallback)
@@ -442,6 +449,16 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         // / rttiHint* fields are populated alongside while step 5 of
         // the migration finishes; remove them then.
         if (sub == 0) {
+            // Layout-overlap warning flag — the editor paints a warning
+            // band on the row. Active-active overlaps come from the
+            // controller's findOverlaps() set (both members flagged). A
+            // draft is itself the acknowledged conflict and has no other
+            // indicator (the [draft] chip was removed), so its row must
+            // carry the band too; findOverlaps() excludes drafts (the
+            // review dialog treats them as acknowledged), hence the
+            // explicit `|| node.draft` here.
+            lm.overlapWarning = state.overlapNodeIds.contains(node.id) || node.draft;
+
             // Defensive sanitizer for any chip text: chips occupy a
             // single Scintilla row, no exceptions. Any \r/\n/\t in the
             // source (Node::comment, PDB symbol with embedded newlines,
@@ -1393,7 +1410,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                       bool compactColumns, bool treeLines, bool braceWrap,
                       bool typeHints, bool showComments,
                       SymbolLookupFn symbolLookup,
-                      bool showRtti, bool showEnumChips) {
+                      bool showRtti, bool showEnumChips,
+                      const QSet<uint64_t>* overlapNodeIds) {
     PROFILE_SCOPE("compose");
     ComposeState state;
     state.compactColumns = compactColumns;
@@ -1404,6 +1422,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     state.showRtti = showRtti;
     state.showEnumChips = showEnumChips;
     state.symbolLookup = std::move(symbolLookup);
+    if (overlapNodeIds) state.overlapNodeIds = *overlapNodeIds;
 
     // Precompute parent→children map
     for (int i = 0; i < tree.nodes.size(); i++)

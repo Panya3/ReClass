@@ -1213,6 +1213,12 @@ struct LineMeta {
                                       // not readable (bad page / freed region) — render the value
                                       // distinctly instead of as a silent "00". NOT set for the
                                       // intentional NullProvider zero-fill of null pointer targets.
+    // true when this row's node participates in a sibling offset overlap
+    // (duplicate offset, or its size eats into another field) — or is a
+    // draft (the acknowledged conflict, whose band is its only indicator
+    // now that the [draft] chip is gone). Painted as a full-row warning
+    // band by the editor.
+    bool     overlapWarning = false;
     int      heatLevel      = 0;     // 0=static, 1=cold, 2=warm, 3=hot (from ValueHistory)
     QVector<int> changedByteIndices;  // Hex preview: which byte indices (0-based) changed on this line
     int      lineByteCount  = 0;     // Hex preview: actual data byte count on this line
@@ -1746,6 +1752,7 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
                       bool braceWrap = false, bool typeHints = false,
                       bool showComments = true,
                       SymbolLookupFn symbolLookup = {},
-                      bool showRtti = true, bool showEnumChips = true);
+                      bool showRtti = true, bool showEnumChips = true,
+                      const QSet<uint64_t>* overlapNodeIds = nullptr);
 
 } // namespace rcx

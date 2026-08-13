@@ -57,6 +57,65 @@ private slots:
         QCOMPARE(result.meta[3].lineKind, LineKind::Footer);
     }
 
+    // ── Overlap warning flag ──
+    // Rows whose node participates in a sibling offset overlap carry
+    // LineMeta::overlapWarning (the editor paints a warning band). Active
+    // overlaps flag both members; a draft is itself the acknowledged
+    // conflict and its only indicator (the chip is gone), so its row must
+    // be flagged even though findOverlaps() excludes drafts.
+    void testOverlapWarningFlag() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Root";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        auto add = [&](int off, NodeKind k, const char* name, bool draft = false) {
+            Node n;
+            n.kind = k;
+            n.name = name;
+            n.parentId = rootId;
+            n.offset = off;
+            n.draft = draft;
+            tree.addNode(n);
+        };
+
+        add(0, NodeKind::UInt64, "a");               // 0x0..0x8
+        add(4, NodeKind::UInt32, "b");               // 0x4..0x8 — overlaps a
+        add(8, NodeKind::UInt32, "c");               // 0x8..0xC — free
+        add(8, NodeKind::UInt32, "d_draft", true);   // overlaps c, acknowledged
+
+        NullProvider prov;
+        QSet<uint64_t> overlaps;
+        for (const auto& p : tree.findOverlaps()) {  // a/b only; draft excluded
+            overlaps.insert(p.aId);
+            overlaps.insert(p.bId);
+        }
+        ComposeResult result = compose(tree, prov, /*viewRootId=*/0, /*compactColumns=*/false,
+                                       /*treeLines=*/false, /*braceWrap=*/false, /*typeHints=*/false,
+                                       /*showComments=*/true, /*symbolLookup=*/{}, /*showRtti=*/true,
+                                       /*showEnumChips=*/true, &overlaps);
+
+        auto rowFor = [&](const QString& name) -> const LineMeta* {
+            for (const auto& lm : result.meta)
+                if (lm.nodeIdx >= 0 && lm.nodeIdx < tree.nodes.size()
+                    && tree.nodes[lm.nodeIdx].name == name)
+                    return &lm;
+            return nullptr;
+        };
+
+        QVERIFY(rowFor("a"));
+        QVERIFY(rowFor("a")->overlapWarning);
+        QVERIFY(rowFor("b")->overlapWarning);
+        QVERIFY(rowFor("c") && !rowFor("c")->overlapWarning);
+        QVERIFY(rowFor("d_draft") && rowFor("d_draft")->overlapWarning);
+    }
+
     void testVec3SingleLine() {
         NodeTree tree;
         tree.baseAddress = 0;

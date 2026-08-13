@@ -540,6 +540,8 @@ private:
                               int firstLine = -1, int lastLine = -1);
     void applyUnreadableHighlight(const QVector<LineMeta>& meta,
                                   const QVector<QString>& lineTexts);
+    void applyOverlapHighlight(const QVector<LineMeta>& meta,
+                               const QVector<QString>& lineTexts);
     void applyBaseAddressColoring(const QVector<LineMeta>& meta);
     void applyCommandRowPills();
 

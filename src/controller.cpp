@@ -173,9 +173,11 @@ RcxDocument::RcxDocument(QObject* parent)
 ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
                                    bool treeLines, bool braceWrap, bool typeHints,
                                    bool showComments,
-                                   SymbolLookupFn symbolLookup) const {
+                                   SymbolLookupFn symbolLookup,
+                                   const QSet<uint64_t>* overlapNodeIds) const {
     return rcx::compose(tree, *provider, viewRootId, compactColumns, treeLines, braceWrap, typeHints,
-                        showComments, std::move(symbolLookup));
+                        showComments, std::move(symbolLookup),
+                        /*showRtti=*/true, /*showEnumChips=*/true, overlapNodeIds);
 }
 
 bool RcxDocument::saveCopy(const QString& path) {
@@ -2157,11 +2159,24 @@ void RcxController::refresh() {
         };
     }
 
+    // Overlap-warning set: recompute only when the tree changed (structural
+    // edits bump the generation counter; value refreshes don't) so the
+    // O(siblings²) scan doesn't run on every ~200 ms tick.
+    if (m_doc->tree.generation() != m_overlapGen) {
+        m_overlapGen = m_doc->tree.generation();
+        m_overlapNodeIds.clear();
+        auto overlaps = m_doc->tree.findOverlaps();
+        for (const auto& p : overlaps) {
+            m_overlapNodeIds.insert(p.aId);
+            m_overlapNodeIds.insert(p.bId);
+        }
+    }
+
     // Compose against snapshot provider if active, otherwise real provider
     if (m_snapshotProv)
-        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup, m_showRtti, m_showEnumChips);
+        m_lastResult = rcx::compose(m_doc->tree, *m_snapshotProv, m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup, m_showRtti, m_showEnumChips, &m_overlapNodeIds);
     else
-        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup);
+        m_lastResult = m_doc->compose(m_viewRootId, m_compactColumns, m_treeLines, m_braceWrap, m_typeHints, m_showComments, symLookup, &m_overlapNodeIds);
 
     // Mark lines whose node data changed since last refresh
     if (!m_changedOffsets.isEmpty()) {

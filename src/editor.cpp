@@ -1718,6 +1718,10 @@ static constexpr int IND_BYTE_SEL     = 26; // Foreground recolor (TEXTFORE) on 
                                             // overlapping bytes — selection is an explicit user
                                             // action and should be the dominant visual signal.
 static constexpr int IND_UNREADABLE   = 28; // Strike-through (INDIC_STRIKE) in theme.markerError
+static constexpr int IND_OVERLAP      = 29; // Full-row warning band (STRAIGHTBOX) on fields whose
+                                            // offset overlaps a sibling (duplicate offset or size
+                                            // eating into another field). Painted by
+                                            // applyOverlapHighlight for LineMeta::overlapWarning rows.
                                             // over the value span of a row whose bytes the
                                             // provider couldn't read (bad page / freed region).
                                             // The shown value is a zero-fill placeholder, so the
@@ -2201,6 +2205,16 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
                          IND_EDIT_BOUNDS, (long)1);
 
+    // Overlap warning band — soft straightbox behind the whole offending
+    // row. UNDER=1 paints behind text; the low alpha keeps the row legible
+    // while clearly marking the layout conflict.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_OVERLAP, 8 /*INDIC_STRAIGHTBOX*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
+                         IND_OVERLAP, (long)70);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
+                         IND_OVERLAP, (long)1);
+
     // Heatmap indicators (cold / warm / hot)
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HEAT_COLD, 17 /*INDIC_TEXTFORE*/);
@@ -2388,6 +2402,11 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_HEX_DIM, theme.textFaint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_UNREADABLE, theme.markerError);
+    // Overlap band is the "layout error" signal — red, in the same
+    // destructive/error family as markerError, so a draft or overlapping
+    // field reads as broken (heat stays amber "activity").
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_OVERLAP, theme.indOverlap);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_TREE_CONN, theme.textDim);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
@@ -2789,7 +2808,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                         IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
                         IND_HEAT_HOT, IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
                         IND_CHIP_HOVER, IND_CHIP_PRESSED, IND_TREE_CONN,
-                        IND_BYTE_SEL, IND_EDIT_BOUNDS, IND_UNREADABLE}) {
+                        IND_BYTE_SEL, IND_EDIT_BOUNDS, IND_UNREADABLE, IND_OVERLAP}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -2825,6 +2844,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     applyHeatmapHighlight(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
     applySymbolColoring(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
     applyUnreadableHighlight(result.meta, lineTexts);
+    applyOverlapHighlight(result.meta, lineTexts);
 
     applyCommandRowPills();
 
@@ -3260,6 +3280,25 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta, int firstLine, in
         const int colB = g.prefixWidth + g.indentWidth;
         if (colB > colA)
             fillIndicatorCols(IND_TREE_CONN, i, colA, colB);
+    }
+}
+
+void RcxEditor::applyOverlapHighlight(const QVector<LineMeta>& meta,
+                                      const QVector<QString>& lineTexts) {
+    PROFILE_SCOPE("applyOverlapHighlight");
+    // Full-row warning band on fields whose offset overlaps a sibling
+    // (duplicate offset, or this field's size eating into another). The
+    // clear loop in applyDocument already wiped IND_OVERLAP; this pass
+    // re-fills only the offending rows. Draft rows are flagged too — the
+    // draft is the acknowledged conflict and the band is its only
+    // indicator (the [draft] chip was removed); compose sets
+    // overlapWarning for drafts directly. Forced full-doc like the other
+    // indicator passes (cheap).
+    const int n = qMin(meta.size(), lineTexts.size());
+    for (int i = 0; i < n; i++) {
+        const LineMeta& lm = meta[i];
+        if (!lm.overlapWarning || isSyntheticLine(lm)) continue;
+        fillIndicatorCols(IND_OVERLAP, i, 0, lineTexts[i].size());
     }
 }
 

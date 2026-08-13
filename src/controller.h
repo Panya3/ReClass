@@ -84,7 +84,8 @@ public:
     ComposeResult compose(uint64_t viewRootId = 0, bool compactColumns = false,
                           bool treeLines = false, bool braceWrap = false,
                           bool typeHints = false, bool showComments = true,
-                          SymbolLookupFn symbolLookup = {}) const;
+                          SymbolLookupFn symbolLookup = {},
+                          const QSet<uint64_t>* overlapNodeIds = nullptr) const;
     bool save(const QString& path);
     // Serialize to `path` WITHOUT any document-state side effects: unlike
     // save(), filePath, modified and the undo stack are left untouched.
@@ -509,6 +510,15 @@ private:
     uint64_t        m_refreshGen = 0;
     uint64_t        m_readGen = 0;
     bool            m_readInFlight = false;
+
+    // ── Overlap-warning cache ──
+    // Node ids participating in sibling offset overlaps (active fields only),
+    // recomputed from NodeTree::findOverlaps() only when the tree's generation
+    // counter moves — NOT on every refresh tick, since compose runs ~200 ms
+    // and the scan is O(siblings²) per container. Fed into compose so rows can
+    // carry LineMeta::overlapWarning (editor paints the warning band).
+    QSet<uint64_t> m_overlapNodeIds;
+    quint64        m_overlapGen = 0;
 
     // ── Refresh speedups (memory-source-only optimizations) ──
     // Per-page stability counter: increments every tick a page's bytes
