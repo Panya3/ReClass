@@ -187,6 +187,13 @@ public:
     void deleteRootStruct(uint64_t structId);
     void groupIntoUnion(const QSet<uint64_t>& nodeIds);
     void dissolveUnion(uint64_t unionId);
+    // Absorb a union's siblings whose start offset now falls inside the
+    // union's span into the union as members (unions overlap by design).
+    // Run after a union member grows — e.g. a member changed to
+    // int8_t[16] makes a 0x10 union swallow fields at 0xC/0x10 that were
+    // previously siblings. Emits cmd::ChangeParent commands, so call
+    // inside an undo macro to keep the size change + absorption one step.
+    void absorbUnionOverlaps(uint64_t unionId);
 
     // Write a span of bytes from the active provider to a binary file
     // at `path`. Returns true on success; on failure writes a one-line

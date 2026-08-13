@@ -410,7 +410,12 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
         }
     }
 
-    int structSize = ctx.tree.structSpan(structId, &ctx.childMap);
+    // A union's sizeof() in C is the largest member, not the extent of its
+    // members' offsets — use unionSize so the emitted sizeof comment and
+    // static_assert match what the compiler computes.
+    int structSize = node.isUnion()
+        ? ctx.tree.unionSize(structId, &ctx.childMap)
+        : ctx.tree.structSpan(structId, &ctx.childMap);
 
     QString kw = node.resolvedClassKeyword();
 
@@ -731,7 +736,12 @@ static void emitRustStruct(GenContext& ctx, uint64_t structId) {
 
     ctx.emittedIds.insert(structId);
     ctx.emittedTypeNames.insert(typeName);
-    int structSize = ctx.tree.structSpan(structId, &ctx.childMap);
+    // A union's sizeof() in Rust is the largest member, not the extent of its
+    // members' offsets — use unionSize so the emitted size comment and
+    // size_of assert match what the compiler computes.
+    int structSize = node.isUnion()
+        ? ctx.tree.unionSize(structId, &ctx.childMap)
+        : ctx.tree.structSpan(structId, &ctx.childMap);
 
     QString kw = node.resolvedClassKeyword();
 
@@ -794,7 +804,9 @@ static void emitDefinesForStruct(GenContext& ctx, uint64_t structId,
         return;
     }
 
-    int structSize = ctx.tree.structSpan(structId, &ctx.childMap);
+    int structSize = node.isUnion()
+        ? ctx.tree.unionSize(structId, &ctx.childMap)
+        : ctx.tree.structSpan(structId, &ctx.childMap);
     ctx.output += QStringLiteral("// %1 (0x%2 bytes)\n")
         .arg(typeName)
         .arg(QString::number(structSize, 16).toUpper());
@@ -913,7 +925,9 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
                     + oc + QStringLiteral("\n");
             } else if (child.structTypeName.isEmpty()) {
                 // Anonymous inline — emit as fixed byte array
-                int span = tree.structSpan(child.id, &ctx.childMap);
+                // (structExtent: Size= must cover the members' byte range;
+                // structSpan would report the C-size footprint for unions)
+                int span = tree.structExtent(child.id, &ctx.childMap);
                 ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[0x%3];")
                     .arg(QString::number(absOffset, 16).toUpper(), name)
                     .arg(QString::number(span, 16).toUpper())
@@ -1028,7 +1042,10 @@ static void emitCSharpStruct(GenContext& ctx, uint64_t structId) {
 
     ctx.emittedIds.insert(structId);
     ctx.emittedTypeNames.insert(typeName);
-    int structSize = ctx.tree.structSpan(structId, &ctx.childMap);
+    // structExtent, not structSpan: [StructLayout(Explicit, Size=)] must
+    // cover the members' actual byte range (a member at offset 4 sized
+    // 0x10 spans to 0x14), or C# throws a TypeLoadException.
+    int structSize = ctx.tree.structExtent(structId, &ctx.childMap);
 
     QString kw = node.resolvedClassKeyword();
 
@@ -1295,7 +1312,12 @@ static void emitPythonStruct(GenContext& ctx, uint64_t structId) {
 
     ctx.emittedIds.insert(structId);
     ctx.emittedTypeNames.insert(typeName);
-    int structSize = ctx.tree.structSpan(structId, &ctx.childMap);
+    // A union's size in ctypes is the largest member, not the extent of its
+    // members' offsets — use unionSize so the emitted size comment matches
+    // what ctypes computes.
+    int structSize = node.isUnion()
+        ? ctx.tree.unionSize(structId, &ctx.childMap)
+        : ctx.tree.structSpan(structId, &ctx.childMap);
 
     QString kw = node.resolvedClassKeyword();
 

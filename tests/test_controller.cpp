@@ -1,6 +1,7 @@
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
 #include <QApplication>
+#include <QClipboard>
 #include <QSplitter>
 #include <QTemporaryFile>
 #include <QTemporaryDir>
@@ -8,8 +9,10 @@
 #include <QKeyEvent>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
+#include "clipboard.h"
 #include "controller.h"
 #include "core.h"
+#include "typeselectorpopup.h"
 
 using namespace rcx;
 
@@ -99,6 +102,12 @@ private slots:
         m_splitter = new QSplitter();
         // Pass nullptr as parent so controller is not auto-deleted with splitter
         m_ctrl = new RcxController(m_doc, nullptr);
+        // Tests drive refresh() explicitly — stop the GUI auto-refresh timer
+        // (started in the controller ctor) so a spurious 200ms tick can't fire
+        // during processEvents(). onRefreshTick reads 4096-byte pages; the test
+        // providers are tiny, so a tick mid-test snapshotting all-zero pages
+        // silently relights value-history heat (flaky testClearValueHistoryResetsHeat).
+        m_ctrl->setWindowState(false, false);
         m_editor = m_ctrl->addSplitEditor(m_splitter);
 
         m_splitter->resize(800, 600);
@@ -1365,6 +1374,593 @@ private slots:
             if (n.name == "appended") { found = true; QVERIFY(n.offset > 0); break; }
         }
         QVERIFY(found);
+    }
+
+    void testUnionAppendPlacesAtExactEnd() {
+        // A union whose members end at 0x14 (member at offset 4 sized 0x10)
+        // must append the next member at exactly 0x14 — not round it up to
+        // 0x18 via Hex64 alignment, which would skip 4 bytes.
+        Node u;
+        u.kind = NodeKind::Struct;
+        u.name = "u";
+        u.classKeyword = "union";
+        u.parentId = m_doc->tree.nodes[0].id;
+        u.offset = 0;
+        int ui = m_doc->tree.addNode(u);
+        uint64_t unionId = m_doc->tree.nodes[ui].id;
+
+        Node a; a.kind = NodeKind::Hex64; a.name = "a";
+        a.parentId = unionId; a.offset = 0;
+        m_doc->tree.addNode(a);
+        Node b; b.kind = NodeKind::Hex64; b.name = "b";
+        b.parentId = unionId; b.offset = 8;
+        m_doc->tree.addNode(b);
+        Node c; c.kind = NodeKind::Hex128; c.name = "c";
+        c.parentId = unionId; c.offset = 4;
+        m_doc->tree.addNode(c);
+
+        // Union size = 0x10 (largest member); members' extent = 0x14.
+        QCOMPARE(m_doc->tree.unionSize(unionId), 0x10);
+
+        // +1 pill path (Hex8 auto-place) must land exactly at 0x14, the
+        // last member's end — never rounded up.
+        emit m_editor->appendSingleFieldRequested(unionId);
+        int bi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name.startsWith(QStringLiteral("field_"))
+                && m_doc->tree.nodes[i].parentId == unionId) { bi = i; break; }
+        QVERIFY(bi >= 0);
+        QCOMPARE(m_doc->tree.nodes[bi].offset, 0x14);
+
+        // +10h-style append (Hex64 auto-place) must also land exactly at
+        // the new last member's end (0x14 + 1) — 0x15, not 0x18.
+        m_ctrl->insertNode(unionId, -1, NodeKind::Hex64, "appended");
+        int ai = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "appended") { ai = i; break; }
+        QVERIFY(ai >= 0);
+        QCOMPARE(m_doc->tree.nodes[ai].offset, 0x15);
+    }
+
+    void testDeleteUnionShiftsSiblingToUnionStart() {
+        // Model: a union's footprint in its parent is its C size (largest
+        // member), NOT the extent of member offsets. A member at offset 4
+        // sized 0x10 keeps the union at 0x10 — so a sibling placed right
+        // after the '}' (offset 0x10) must shift back to 0x0 when the union
+        // is deleted. Deleting the union must not leave a hole at offset 0
+        // where the union started.
+        struct Probe { int memberOff; int memberSz; int sibOff; };
+        QVector<Probe> probes = {
+            {0,    8,    8},     // trivial: size == extent, sibling right after
+            {4,    0x10, 0x10},  // the reported bug: member at 4 sized 0x10
+                                 // -> union size 0x10, sibling after '}'
+        };
+        for (const auto& p : probes) {
+            RcxDocument* doc = new RcxDocument();
+            Node root; root.kind = NodeKind::Struct; root.name = "R";
+            root.parentId = 0; root.offset = 0;
+            int ri = doc->tree.addNode(root);
+            uint64_t rootId = doc->tree.nodes[ri].id;
+
+            Node u; u.kind = NodeKind::Struct; u.name = "u";
+            u.classKeyword = "union"; u.parentId = rootId; u.offset = 0;
+            int ui = doc->tree.addNode(u);
+            uint64_t uid = doc->tree.nodes[ui].id;
+            Node m1; m1.kind = (p.memberSz == 8) ? NodeKind::Hex64 : NodeKind::Hex128;
+            m1.name = "m1";
+            m1.parentId = uid; m1.offset = p.memberOff;
+            doc->tree.addNode(m1);
+            Node f; f.kind = NodeKind::Hex64; f.name = "field";
+            f.parentId = rootId; f.offset = p.sibOff;
+            doc->tree.addNode(f);
+
+            // The union's footprint (structSpan) is its C size, not the
+            // extent of the member at a non-zero offset.
+            QCOMPARE(doc->tree.unionSize(uid), p.memberSz);
+            QCOMPARE(doc->tree.structSpan(uid), p.memberSz);
+
+            QByteArray buf(128, '\0');
+            doc->provider = std::make_unique<BufferProvider>(buf);
+            auto* splitter = new QSplitter();
+            auto* ctrl = new RcxController(doc, nullptr);
+            ctrl->addSplitEditor(splitter);
+
+            ctrl->removeNode(ui);
+
+            // The sibling must land exactly where the union started — no
+            // hole at offset 0, no leftover gap.
+            int fi = -1;
+            for (int i = 0; i < doc->tree.nodes.size(); i++)
+                if (doc->tree.nodes[i].name == "field") { fi = i; break; }
+            QVERIFY(fi >= 0);
+            QCOMPARE(doc->tree.nodes[fi].offset, 0);
+
+            delete ctrl; delete splitter; delete doc;
+        }
+    }
+
+    void testUnionSiblingAppendAfterNonZeroOffset() {
+        // User's shape: union at parent offset 4 with a member at rel 4
+        // sized 0x10. C size = 0x10, so a sibling appended after the union
+        // must land at 0x14 (4 + 0x10) — not 0x18 (4 + extent 0x14).
+        RcxDocument* doc = new RcxDocument();
+        Node root; root.kind = NodeKind::Struct; root.name = "R";
+        root.parentId = 0; root.offset = 0;
+        int ri = doc->tree.addNode(root);
+        uint64_t rootId = doc->tree.nodes[ri].id;
+
+        Node u; u.kind = NodeKind::Struct; u.name = "u";
+        u.classKeyword = "union"; u.parentId = rootId; u.offset = 4;
+        int ui = doc->tree.addNode(u);
+        uint64_t uid = doc->tree.nodes[ui].id;
+        Node m1; m1.kind = NodeKind::Hex32; m1.name = "field1";
+        m1.parentId = uid; m1.offset = 0;
+        doc->tree.addNode(m1);
+        Node m2; m2.kind = NodeKind::Hex128; m2.name = "field2";
+        m2.parentId = uid; m2.offset = 4;
+        doc->tree.addNode(m2);
+
+        // C size 0x10 (largest member), footprint in parent = 0x10.
+        QCOMPARE(doc->tree.unionSize(uid), 0x10);
+        QCOMPARE(doc->tree.structSpan(uid), 0x10);
+
+        QByteArray buf(128, '\0');
+        doc->provider = std::make_unique<BufferProvider>(buf);
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        RcxEditor* editor = ctrl->addSplitEditor(splitter);
+
+        // +1 on the parent struct row → sibling after the union.
+        emit editor->appendSingleFieldRequested(rootId);
+
+        int fi = -1;
+        for (int i = 0; i < doc->tree.nodes.size(); i++)
+            if (doc->tree.nodes[i].parentId == rootId
+                && doc->tree.nodes[i].kind == NodeKind::Hex8) { fi = i; break; }
+        QVERIFY(fi >= 0);
+        QCOMPARE(doc->tree.nodes[fi].offset, 0x14);
+
+        delete ctrl; delete splitter; delete doc;
+    }
+
+    void testPasteUnionShiftUsesCSize() {
+        // Pasting a union block below a selection shifts later siblings
+        // down by the union's C size (largest member, 0x10) — not the
+        // member extent (0x14). A member at rel 4 sized 0x10 must not push
+        // the tail 4 bytes too far, recreating the 0x14→0x18 gap on paste.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        Node a; a.kind = NodeKind::Hex8; a.name = "a";
+        a.parentId = rootId; a.offset = 0;
+        uint64_t aId = m_doc->tree.nodes[m_doc->tree.addNode(a)].id;
+
+        Node u; u.kind = NodeKind::Struct; u.name = "u"; u.classKeyword = "union";
+        u.parentId = rootId; u.offset = 4;
+        uint64_t uid = m_doc->tree.nodes[m_doc->tree.addNode(u)].id;
+        Node m1; m1.kind = NodeKind::Hex32; m1.name = "m1";
+        m1.parentId = uid; m1.offset = 0;
+        m_doc->tree.addNode(m1);
+        Node m2; m2.kind = NodeKind::Hex128; m2.name = "m2";
+        m2.parentId = uid; m2.offset = 4;
+        m_doc->tree.addNode(m2);
+
+        Node tail; tail.kind = NodeKind::Hex64; tail.name = "tail";
+        tail.parentId = rootId; tail.offset = 0x18;
+        m_doc->tree.addNode(tail);
+
+        QCOMPARE(m_doc->tree.unionSize(uid), 0x10);
+        QCOMPARE(m_doc->tree.structSpan(uid), 0x10);
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        // Select the anchor row, then paste the union block below it.
+        m_ctrl->handleNodeClick(m_ctrl->primaryEditor(), 1, aId, Qt::NoModifier);
+        QVERIFY(m_ctrl->selectedIds().contains(aId));
+        // Release any previous clipboard ownership first — a stale owner
+        // makes the next setMimeData fail with OpenClipboard COM errors.
+        QApplication::clipboard()->clear();
+        QApplication::processEvents();
+        QApplication::clipboard()->setMimeData(
+            ClipboardCodec::serialize(m_doc->tree, {uid}));
+        emit m_editor->pasteNodesRequested();
+
+        // Original union and tail shift down by the C size (0x10), not the
+        // extent (0x14): 4 + 0x10 = 0x14, 0x18 + 0x10 = 0x28.
+        int ui = m_doc->tree.indexOfId(uid);
+        QVERIFY(ui >= 0);
+        QCOMPARE(m_doc->tree.nodes[ui].offset, 0x14);
+        int ti = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "tail") { ti = i; break; }
+        QVERIFY(ti >= 0);
+        QCOMPARE(m_doc->tree.nodes[ti].offset, 0x28);
+
+        // The pasted union lands right after the anchor (offset 1).
+        int pasted = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "u"
+                && m_doc->tree.nodes[i].parentId == rootId
+                && m_doc->tree.nodes[i].id != uid) { pasted = i; break; }
+        QVERIFY(pasted >= 0);
+        QCOMPARE(m_doc->tree.nodes[pasted].offset, 0x1);
+        QCOMPARE(m_doc->tree.unionSize(m_doc->tree.nodes[pasted].id), 0x10);
+    }
+
+    void testPasteMultiRootUnionPlacement() {
+        // Copy a block {union with member at rel 4 sized 0x10 (C size
+        // 0x10), following sibling} and paste below a selection: the pasted
+        // sibling must land exactly one C-size (0x10) past the pasted
+        // union's start — pre-fix extent math would place it 0x14 past,
+        // then align it to 0x18, leaving a 4-byte gap.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        Node a; a.kind = NodeKind::Hex64; a.name = "a";
+        a.parentId = rootId; a.offset = 0;
+        uint64_t aId = m_doc->tree.nodes[m_doc->tree.addNode(a)].id;
+
+        Node u; u.kind = NodeKind::Struct; u.name = "u"; u.classKeyword = "union";
+        u.parentId = rootId; u.offset = 0x10;
+        uint64_t uid = m_doc->tree.nodes[m_doc->tree.addNode(u)].id;
+        Node m1; m1.kind = NodeKind::Hex32; m1.name = "m1";
+        m1.parentId = uid; m1.offset = 0;
+        m_doc->tree.addNode(m1);
+        Node m2; m2.kind = NodeKind::Hex128; m2.name = "m2";
+        m2.parentId = uid; m2.offset = 4;
+        m_doc->tree.addNode(m2);
+
+        Node after; after.kind = NodeKind::Hex64; after.name = "after";
+        after.parentId = rootId; after.offset = 0x20;
+        uint64_t afterId = m_doc->tree.nodes[m_doc->tree.addNode(after)].id;
+
+        QCOMPARE(m_doc->tree.unionSize(uid), 0x10);
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+        m_ctrl->handleNodeClick(m_ctrl->primaryEditor(), 1, aId, Qt::NoModifier);
+        QVERIFY(m_ctrl->selectedIds().contains(aId));
+
+        // Roots in struct order (union@0x10 before after@0x20) — the
+        // codec preserves the given order, so paste places union first.
+        QApplication::clipboard()->clear();
+        QApplication::processEvents();
+        QApplication::clipboard()->setMimeData(
+            ClipboardCodec::serialize(m_doc->tree, {uid, afterId}));
+        emit m_editor->pasteNodesRequested();
+
+        // Find the pasted pair (original union/after were shifted, not
+        // duplicated, so any node past the anchor with these names is new).
+        int pu = -1, pa = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId != rootId) continue;
+            if (n.name == "u" && n.id != uid)      pu = i;
+            if (n.name == "after" && n.id != afterId) pa = i;
+        }
+        QVERIFY2(pu >= 0 && pa >= 0, "expected pasted union + sibling");
+
+        // Pasted union right after the anchor (anchorEnd 8, Struct align 1).
+        QCOMPARE(m_doc->tree.nodes[pu].offset, 0x8);
+        // Pasted sibling lands exactly one C-size later (align 8 keeps 0x18).
+        QCOMPARE(m_doc->tree.nodes[pa].offset - m_doc->tree.nodes[pu].offset, 0x10);
+        QCOMPARE(m_doc->tree.nodes[pa].offset, 0x18);
+    }
+
+    void testUnionAbsorbsOverlappingSiblings() {
+        // User's scenario: fields at 0, 4, 8, 0xC, 0x10 → group 4+8 into
+        // a union → grow a member to int8_t[16] → the union now spans
+        // [0x4, 0x14), swallowing the fields at 0xC and 0x10. They must
+        // be absorbed into the union as members (rel 8 / rel 0xC), not
+        // left as overlapping siblings.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        for (int off : {0, 4, 8, 0xC, 0x10}) {
+            Node f; f.kind = NodeKind::Hex32;
+            f.name = QStringLiteral("f%1").arg(off, 0, 16);
+            f.parentId = rootId; f.offset = off;
+            m_doc->tree.addNode(f);
+        }
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        // Group the fields at 4 and 8 into a union.
+        QVector<uint64_t> g;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == rootId && (n.offset == 4 || n.offset == 8))
+                g.append(n.id);
+        }
+        QCOMPARE(g.size(), 2);
+        QSet<uint64_t> gset;
+        for (uint64_t id : g) gset.insert(id);
+        m_ctrl->groupIntoUnion(gset);
+
+        int ui = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].isUnion()) { ui = i; break; }
+        QVERIFY(ui >= 0);
+        uint64_t uid = m_doc->tree.nodes[ui].id;
+        QCOMPARE(m_doc->tree.unionSize(uid), 4);
+
+        // Grow a member (rel 0) to int8_t[16] via the type-chooser path.
+        int mi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId == uid
+                && m_doc->tree.nodes[i].offset == 0) { mi = i; break; }
+        QVERIFY(mi >= 0);
+        TypeEntry e;
+        e.entryKind = TypeEntry::Primitive;
+        e.primitiveKind = NodeKind::Int8;
+        m_ctrl->applyTypePopupResult(TypePopupMode::FieldType, mi, e,
+                                     QStringLiteral("int8_t[16]"));
+
+        // Union now spans [0x4, 0x14).
+        QCOMPARE(m_doc->tree.unionSize(uid), 0x10);
+
+        // The fields formerly at 0xC and 0x10 are union members at
+        // rel 8 / rel 0xC (offset relative to the union at 0x4).
+        // (The union also keeps its original second member at rel 0.)
+        int at8 = 0, atC = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == uid && n.kind == NodeKind::Hex32) {
+                if (n.offset == 8)      at8++;
+                else if (n.offset == 0xC) atC++;
+            }
+        }
+        QCOMPARE(at8, 1);
+        QCOMPARE(atC, 1);
+        QVERIFY(m_doc->tree.findOverlaps().isEmpty());
+
+        // One undo restores the pre-growth layout: 0xC/0x10 back as
+        // siblings of the union, union back to size 4.
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.unionSize(uid), 4);
+        int sibs = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == rootId && n.kind == NodeKind::Hex32) {
+                sibs++;
+                QVERIFY2(n.offset == 0 || n.offset == 0xC || n.offset == 0x10,
+                    qPrintable(QString("sibling back at unexpected offset 0x%1")
+                                   .arg(n.offset, 0, 16)));
+            }
+        }
+        QCOMPARE(sibs, 3);  // f@0 plus the restored 0xC and 0x10
+    }
+
+    void testUnionAbsorbsOnMemberKindGrow() {
+        // Same shape, but the member grows via changeNodeKind directly
+        // (Hex32 → Hex128): the union spans [0x4, 0x14) and the fields at
+        // 0xC/0x10 are absorbed in the same undo step.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        for (int off : {0, 4, 8, 0xC, 0x10}) {
+            Node f; f.kind = NodeKind::Hex32;
+            f.name = QStringLiteral("f%1").arg(off, 0, 16);
+            f.parentId = rootId; f.offset = off;
+            m_doc->tree.addNode(f);
+        }
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        QVector<uint64_t> g;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == rootId && (n.offset == 4 || n.offset == 8))
+                g.append(n.id);
+        }
+        QSet<uint64_t> gset;
+        for (uint64_t id : g) gset.insert(id);
+        m_ctrl->groupIntoUnion(gset);
+
+        int ui = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].isUnion()) { ui = i; break; }
+        QVERIFY(ui >= 0);
+        uint64_t uid = m_doc->tree.nodes[ui].id;
+
+        int mi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId == uid) { mi = i; break; }
+        QVERIFY(mi >= 0);
+        m_ctrl->changeNodeKind(mi, NodeKind::Hex128);
+
+        QCOMPARE(m_doc->tree.unionSize(uid), 0x10);
+        int at8 = 0, atC = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == uid && n.kind == NodeKind::Hex32) {
+                if (n.offset == 8)      at8++;
+                else if (n.offset == 0xC) atC++;
+            }
+        }
+        QCOMPARE(at8, 1);
+        QCOMPARE(atC, 1);
+        QVERIFY(m_doc->tree.findOverlaps().isEmpty());
+    }
+
+    void testUnionMemberGrowDoesNotShiftMembers() {
+        // A union's members keep their deliberate union-relative offsets —
+        // growing one member must NOT shift the others (they overlap by
+        // design). Pre-absorption this was latent; after absorption the
+        // members sit at rel 8/rel 0xC and an unguarded shift would move
+        // them, corrupting the layout.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        Node u; u.kind = NodeKind::Struct; u.name = "u"; u.classKeyword = "union";
+        u.parentId = rootId; u.offset = 0;
+        uint64_t uid = m_doc->tree.nodes[m_doc->tree.addNode(u)].id;
+        Node a; a.kind = NodeKind::Hex32; a.name = "a";
+        a.parentId = uid; a.offset = 0;
+        m_doc->tree.addNode(a);
+        Node b; b.kind = NodeKind::Hex32; b.name = "b";
+        b.parentId = uid; b.offset = 8;
+        m_doc->tree.addNode(b);
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        int ai = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "a") { ai = i; break; }
+        QVERIFY(ai >= 0);
+        m_ctrl->changeNodeKind(ai, NodeKind::Hex64);  // 4 → 8 bytes
+
+        // Member b keeps its deliberate offset — it must not be shifted.
+        int bi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "b") { bi = i; break; }
+        QVERIFY(bi >= 0);
+        QCOMPARE(m_doc->tree.nodes[bi].offset, 8);
+    }
+
+    void testUnionArrayGrowAbsorbSingleUndo() {
+        // Finding 1 (scrutinize): appendBytesRequested on an array that is a
+        // union member must wrap the array growth AND the absorption in one
+        // undo step — one Ctrl+Z restores the whole pre-growth layout (array
+        // length back AND siblings back out of the union), instead of first
+        // undoing only the absorption and leaving the array grown with the
+        // overlapping siblings restored.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        // Union at 0x4 with an int8[4] array member (size 4).
+        Node u; u.kind = NodeKind::Struct; u.name = "u"; u.classKeyword = "union";
+        u.parentId = rootId; u.offset = 4;
+        uint64_t uid = m_doc->tree.nodes[m_doc->tree.addNode(u)].id;
+        Node arr; arr.kind = NodeKind::Array; arr.name = "arr";
+        arr.parentId = uid; arr.offset = 0;
+        arr.elementKind = NodeKind::Int8; arr.arrayLen = 4;
+        uint64_t arrId = m_doc->tree.nodes[m_doc->tree.addNode(arr)].id;
+
+        // Siblings after the union that the growth will swallow.
+        for (int off : {0xC, 0x10}) {
+            Node f; f.kind = NodeKind::Hex32;
+            f.name = QStringLiteral("f%1").arg(off, 0, 16);
+            f.parentId = rootId; f.offset = off;
+            m_doc->tree.addNode(f);
+        }
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        // +10h on the array member: 4 + 16 = 20 elements → member size 0x14
+        // → union span [0x4, 0x18) swallows 0xC and 0x10.
+        emit m_editor->appendBytesRequested(arrId, 0x10);
+
+        QCOMPARE(m_doc->tree.unionSize(uid), 0x14);
+        int at8 = 0, atC = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == uid && n.kind == NodeKind::Hex32) {
+                if (n.offset == 8)        at8++;   // 0xC - 4
+                else if (n.offset == 0xC) atC++;   // 0x10 - 4
+            }
+        }
+        QCOMPARE(at8, 1);
+        QCOMPARE(atC, 1);
+        QVERIFY(m_doc->tree.findOverlaps().isEmpty());
+
+        // ONE undo restores arrayLen AND pushes both siblings back out.
+        m_doc->undoStack.undo();
+        int ai = m_doc->tree.indexOfId(arrId);
+        QVERIFY(ai >= 0);
+        QCOMPARE(m_doc->tree.nodes[ai].arrayLen, 4);
+        QCOMPARE(m_doc->tree.unionSize(uid), 4);
+        int sibs = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == rootId && n.kind == NodeKind::Hex32) {
+                sibs++;
+                QVERIFY2(n.offset == 0xC || n.offset == 0x10,
+                    qPrintable(QString("sibling back at unexpected offset 0x%1")
+                                   .arg(n.offset, 0, 16)));
+            }
+        }
+        QCOMPARE(sibs, 2);
+    }
+
+    void testUnionAbsorbCascadesLargerSibling() {
+        // Finding 2 (scrutinize): absorbing a sibling LARGER than the
+        // union's current C-size grows the union (unionSize = max member
+        // size), exposing further siblings that were outside the old span.
+        // absorbUnionOverlaps must loop until a full pass absorbs nothing.
+        //
+        // Pre-state (broken layout, as produced by the old extent-based exe
+        // or a paste bug): union [0,4) with a Hex32 member, then a Hex128
+        // sibling at 4 sized 0x10 and a Hex32 sibling at 0xC overlapping it.
+        // Growing the member to Hex64 (span [0,8)) absorbs the Hex128 at 4;
+        // that 0x10 member grows the union to [0,0x10), which then swallows
+        // the sibling at 0xC — only reachable via a second pass.
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "R";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        Node u; u.kind = NodeKind::Struct; u.name = "u"; u.classKeyword = "union";
+        u.parentId = rootId; u.offset = 0;
+        uint64_t uid = m_doc->tree.nodes[m_doc->tree.addNode(u)].id;
+        Node a; a.kind = NodeKind::Hex32; a.name = "a";
+        a.parentId = uid; a.offset = 0;
+        m_doc->tree.addNode(a);
+
+        Node s1; s1.kind = NodeKind::Hex128; s1.name = "s1";
+        s1.parentId = rootId; s1.offset = 4;
+        m_doc->tree.addNode(s1);
+        Node s2; s2.kind = NodeKind::Hex32; s2.name = "s2";
+        s2.parentId = rootId; s2.offset = 0xC;
+        m_doc->tree.addNode(s2);
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        // Grow the member 4 → 8 (Hex64): first pass span [0, 8).
+        int mi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == "a") { mi = i; break; }
+        QVERIFY(mi >= 0);
+        m_ctrl->changeNodeKind(mi, NodeKind::Hex64);
+
+        // s1 absorbed (starts at 4 < 8) and — via the loop — s2 absorbed too
+        // (after s1 grows the union to [0, 0x10), s2 at 0xC is inside).
+        QCOMPARE(m_doc->tree.unionSize(uid), 0x10);
+        int inU = 0, rel4 = 0, relC = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == uid) {
+                inU++;
+                if (n.offset == 4)  rel4++;
+                if (n.offset == 0xC) relC++;
+            }
+        }
+        QCOMPARE(inU, 3);   // member a + s1 + s2 all inside the union
+        QCOMPARE(rel4, 1);
+        QCOMPARE(relC, 1);
+        QVERIFY(m_doc->tree.findOverlaps().isEmpty());
     }
 
     void testBatchChangeKind() {

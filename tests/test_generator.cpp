@@ -225,6 +225,66 @@ private slots:
         QVERIFY(!result.contains("_pad"));
     }
 
+    // ── Union sizeof: largest member, not member-offset extent ──
+
+    void testUnionSizeofIsLargestMember() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "SizeUnion";
+        root.structTypeName = "SizeUnion";
+        root.classKeyword = "union";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Members at offset 0 and 8 span 0x10...
+        rcx::Node f1;
+        f1.kind = rcx::NodeKind::UInt64;
+        f1.name = "lo";
+        f1.parentId = rootId;
+        f1.offset = 0;
+        tree.addNode(f1);
+        rcx::Node f2;
+        f2.kind = rcx::NodeKind::UInt64;
+        f2.name = "hi";
+        f2.parentId = rootId;
+        f2.offset = 8;
+        tree.addNode(f2);
+
+        // ...and a 0x10-byte struct member at offset 4 ends at 0x14. The
+        // union's sizeof stays 0x10 (largest member), so the emitted
+        // static_assert must say 0x10 — the extent (0x14) wouldn't compile.
+        rcx::Node inner;
+        inner.kind = rcx::NodeKind::Struct;
+        inner.name = "wide";
+        inner.structTypeName = "WideInner";
+        inner.parentId = rootId;
+        inner.offset = 4;
+        int ii = tree.addNode(inner);
+        uint64_t innerId = tree.nodes[ii].id;
+
+        rcx::Node ix;
+        ix.kind = rcx::NodeKind::UInt64;
+        ix.name = "x";
+        ix.parentId = innerId;
+        ix.offset = 0;
+        tree.addNode(ix);
+        rcx::Node iy;
+        iy.kind = rcx::NodeKind::UInt64;
+        iy.name = "y";
+        iy.parentId = innerId;
+        iy.offset = 8;
+        tree.addNode(iy);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true);
+
+        QVERIFY(result.contains("union SizeUnion\n{"));
+        QVERIFY(result.contains("// sizeof 0x10"));
+        QVERIFY(result.contains("static_assert(sizeof(SizeUnion) == 0x10"));
+        QVERIFY(!result.contains("static_assert(sizeof(SizeUnion) == 0x14"));
+    }
+
     // ── Nested struct: named sub-type referenced by name ──
 
     void testNestedStruct() {

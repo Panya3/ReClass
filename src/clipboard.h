@@ -34,21 +34,29 @@ struct ClipboardCodec {
 
     // Collect node + all descendants (iterative, cycle-safe).
     // roots are ids the user explicitly picked; we include their subtrees.
+    // Roots are emitted in the order given — the paste handler places
+    // pasted roots in the order they appear in the serialized blob, so the
+    // caller passes them in struct order (ascending offset). A single
+    // LIFO stack over all roots would reverse that and paste later
+    // siblings first, scrambling the pasted layout.
     static QVector<Node> collectSubtrees(const NodeTree& tree,
                                          const QVector<uint64_t>& roots)
     {
         QVector<Node> out;
         QSet<uint64_t> seen;
-        QVector<uint64_t> stack = roots;
-        while (!stack.isEmpty()) {
-            uint64_t id = stack.takeLast();
-            if (seen.contains(id)) continue;
-            seen.insert(id);
-            int idx = tree.indexOfId(id);
-            if (idx < 0) continue;
-            out.append(tree.nodes[idx]);
-            for (int ci : tree.childrenOf(id))
-                stack.append(tree.nodes[ci].id);
+        for (uint64_t r : roots) {
+            QVector<uint64_t> stack;
+            stack.append(r);
+            while (!stack.isEmpty()) {
+                uint64_t id = stack.takeLast();
+                if (seen.contains(id)) continue;
+                seen.insert(id);
+                int idx = tree.indexOfId(id);
+                if (idx < 0) continue;
+                out.append(tree.nodes[idx]);
+                for (int ci : tree.childrenOf(id))
+                    stack.append(tree.nodes[ci].id);
+            }
         }
         return out;
     }

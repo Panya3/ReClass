@@ -667,6 +667,171 @@ private slots:
         // Container span = array offset (8) + array size (80) = 88
         QCOMPARE(tree5.structSpan(containerId), 88);
     }
+    void testUnionSize() {
+        using namespace rcx;
+        // A union's size is the largest MEMBER, ignoring member offsets
+        // (C semantics). structSpan() reports that C-size footprint for
+        // unions (a member at offset 4 sized 0x10 keeps the union at
+        // 0x10); structExtent() reports the raw offset+size extent.
+        NodeTree tree;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "U";
+        root.classKeyword = "union";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Member at offset 0, 16 bytes total (two Hex64s)
+        Node a;
+        a.kind = NodeKind::Hex64;
+        a.name = "a";
+        a.parentId = rootId;
+        a.offset = 0;
+        tree.addNode(a);
+        Node b;
+        b.kind = NodeKind::Hex64;
+        b.name = "b";
+        b.parentId = rootId;
+        b.offset = 8;
+        tree.addNode(b);
+        // Member at offset 4, 16 bytes — its end (0x14) exceeds the
+        // 0x10-wide member at offset 0, but a union's size stays 0x10.
+        Node c;
+        c.kind = NodeKind::Hex128;
+        c.name = "c";
+        c.parentId = rootId;
+        c.offset = 4;
+        tree.addNode(c);
+
+        QCOMPARE(tree.structSpan(rootId), 0x10);   // footprint: C size (largest member)
+        QCOMPARE(tree.structExtent(rootId), 0x14); // raw extent: max(0x10, 4+0x10)
+        QCOMPARE(tree.unionSize(rootId), 0x10);    // size: max member size
+
+        // Nested struct member contributes its own span
+        NodeTree tree2;
+        Node u2;
+        u2.kind = NodeKind::Struct;
+        u2.name = "U2";
+        u2.classKeyword = "union";
+        u2.parentId = 0;
+        int u2i = tree2.addNode(u2);
+        uint64_t u2Id = tree2.nodes[u2i].id;
+
+        Node inner;
+        inner.kind = NodeKind::Struct;
+        inner.name = "Inner";
+        inner.parentId = u2Id;
+        inner.offset = 0;
+        int ini = tree2.addNode(inner);
+        uint64_t innerId = tree2.nodes[ini].id;
+
+        Node leaf;
+        leaf.kind = NodeKind::UInt64;
+        leaf.name = "x";
+        leaf.parentId = innerId;
+        leaf.offset = 0;
+        tree2.addNode(leaf);
+        Node small;
+        small.kind = NodeKind::UInt32;
+        small.name = "y";
+        small.parentId = u2Id;
+        small.offset = 0;
+        tree2.addNode(small);
+
+        // inner spans 8, small is 4 → union size 8
+        QCOMPARE(tree2.structSpan(innerId), 8);
+        QCOMPARE(tree2.unionSize(u2Id), 8);
+
+        // Empty union = 0
+        NodeTree tree3;
+        Node empty;
+        empty.kind = NodeKind::Struct;
+        empty.name = "Empty";
+        empty.classKeyword = "union";
+        empty.parentId = 0;
+        int ei = tree3.addNode(empty);
+        QCOMPARE(tree3.unionSize(tree3.nodes[ei].id), 0);
+
+        // Nested union member: recursion through unionSize, offset ignored
+        NodeTree tree4;
+        Node outer;
+        outer.kind = NodeKind::Struct;
+        outer.name = "OuterU";
+        outer.classKeyword = "union";
+        outer.parentId = 0;
+        int oi4 = tree4.addNode(outer);
+        uint64_t outerId = tree4.nodes[oi4].id;
+
+        Node innerU;
+        innerU.kind = NodeKind::Struct;
+        innerU.name = "InnerU";
+        innerU.classKeyword = "union";
+        innerU.parentId = outerId;
+        innerU.offset = 0;
+        int iui = tree4.addNode(innerU);
+        uint64_t innerUId = tree4.nodes[iui].id;
+
+        Node iu1; iu1.kind = NodeKind::Hex64; iu1.name = "x";
+        iu1.parentId = innerUId; iu1.offset = 0;
+        tree4.addNode(iu1);
+        Node iu2; iu2.kind = NodeKind::Hex128; iu2.name = "y";
+        iu2.parentId = innerUId; iu2.offset = 4;
+        tree4.addNode(iu2);
+
+        // inner union = max(8, 16) = 16 (offset 4 ignored); outer = 16
+        QCOMPARE(tree4.unionSize(innerUId), 0x10);
+        QCOMPARE(tree4.unionSize(outerId), 0x10);
+
+        // Union typed as a named struct (refId, no own children): its size
+        // is the referenced struct's span, not 0.
+        NodeTree tree5;
+        Node ref;
+        ref.kind = NodeKind::Struct;
+        ref.name = "Ref";
+        ref.parentId = 0;
+        int rfi = tree5.addNode(ref);
+        uint64_t refId = tree5.nodes[rfi].id;
+        Node rf1; rf1.kind = NodeKind::UInt64; rf1.name = "a";
+        rf1.parentId = refId; rf1.offset = 0;
+        tree5.addNode(rf1);
+        Node rf2; rf2.kind = NodeKind::UInt64; rf2.name = "b";
+        rf2.parentId = refId; rf2.offset = 8;
+        tree5.addNode(rf2);
+
+        Node u5;
+        u5.kind = NodeKind::Struct;
+        u5.name = "U5";
+        u5.classKeyword = "union";
+        u5.refId = refId;
+        u5.parentId = 0;
+        int u5i = tree5.addNode(u5);
+        QCOMPARE(tree5.unionSize(tree5.nodes[u5i].id), 0x10);
+
+        // A refId-backed union whose target is itself a union
+        NodeTree tree6;
+        Node innerRef;
+        innerRef.kind = NodeKind::Struct;
+        innerRef.name = "InnerRef";
+        innerRef.classKeyword = "union";
+        innerRef.parentId = 0;
+        int iri = tree6.addNode(innerRef);
+        uint64_t innerRefId = tree6.nodes[iri].id;
+        Node ir1; ir1.kind = NodeKind::Hex128; ir1.name = "w";
+        ir1.parentId = innerRefId; ir1.offset = 4;
+        tree6.addNode(ir1);
+
+        Node u6;
+        u6.kind = NodeKind::Struct;
+        u6.name = "U6";
+        u6.classKeyword = "union";
+        u6.refId = innerRefId;
+        u6.parentId = 0;
+        int u6i = tree6.addNode(u6);
+        // Referenced union's size = 0x10 (member size, offset ignored)
+        QCOMPARE(tree6.unionSize(innerRefId), 0x10);
+        QCOMPARE(tree6.unionSize(tree6.nodes[u6i].id), 0x10);
+    }
     void testNormalizePreferAncestors() {
         using namespace rcx;
         NodeTree tree;

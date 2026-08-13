@@ -117,20 +117,35 @@ private slots:
     }
 
     void multipleRootsPreserveOrder() {
-        // Copy two leaves — both should land in result.rootIds.
+        // Roots must serialize in the order given (struct order from the
+        // caller) — the paste handler places pasted roots in the order
+        // they appear in result.nodes, so a LIFO reversal would paste the
+        // later sibling first and scramble the pasted layout.
         NodeTree t = makeSimple();
-        uint64_t id1 = t.nodes[1].id;
-        uint64_t id2 = t.nodes[2].id;
+        uint64_t id0 = t.nodes[1].id;  // f0 @ 0
+        uint64_t id1 = t.nodes[2].id;  // f1 @ 4
+        uint64_t id2 = t.nodes[3].id;  // f2 @ 8
 
-        auto* mime = ClipboardCodec::serialize(t, {id1, id2});
+        auto* mime = ClipboardCodec::serialize(t, {id0, id1, id2});
         NodeTree target;
         target.m_nextId = 1;
         auto result = ClipboardCodec::deserialize(target, mime);
         delete mime;
 
-        QCOMPARE(result.rootIds.size(), 2);
+        QCOMPARE(result.rootIds.size(), 3);
         QVERIFY(result.rootIds[0] != 0);
         QVERIFY(result.rootIds[1] != 0);
+        QVERIFY(result.rootIds[2] != 0);
+
+        // The roots appear in result.nodes in the same order they were
+        // passed in (deserialize preserves the JSON array order).
+        QVector<uint64_t> inNodes;
+        for (const Node& n : result.nodes)
+            if (result.rootIds.contains(n.id)) inNodes.append(n.id);
+        QCOMPARE(inNodes.size(), 3);
+        QCOMPARE(inNodes[0], result.rootIds[0]);
+        QCOMPARE(inNodes[1], result.rootIds[1]);
+        QCOMPARE(inNodes[2], result.rootIds[2]);
     }
 };
 

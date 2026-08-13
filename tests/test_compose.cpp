@@ -406,6 +406,95 @@ private slots:
         QCOMPARE(result.meta[6].depth, 0);
     }
 
+    void testUnionFooterClosesAtUnionSize() {
+        // A union member placed at offset 4 with size 0x10 ends at 0x14,
+        // but the union's closing '}' must still close at the union's own
+        // size (largest member = 0x10), not at the extent of its offsets.
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "U";
+        root.classKeyword = "union";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node a; a.kind = NodeKind::Hex64; a.name = "a";
+        a.parentId = rootId; a.offset = 0;
+        tree.addNode(a);
+        Node b; b.kind = NodeKind::Hex64; b.name = "b";
+        b.parentId = rootId; b.offset = 8;
+        tree.addNode(b);
+        Node c; c.kind = NodeKind::Hex128; c.name = "c";
+        c.parentId = rootId; c.offset = 4;
+        tree.addNode(c);
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov);
+
+        // CommandRow + a + b + c + footer = 5
+        QCOMPARE(result.meta.size(), 5);
+
+        // The footer is the union's closing '}' — must close at 0x10,
+        // the union's size, not at 0x14 where member c ends.
+        const LineMeta& footer = result.meta[4];
+        QCOMPARE(footer.lineKind, LineKind::Footer);
+        QCOMPARE(footer.offsetAddr, (uint64_t)0x10);
+        QCOMPARE(footer.offsetText, QStringLiteral("0010 "));
+
+        // The visible footer line: size comment must read 0x10, never 0x14.
+        const QString footerLine = result.text.split(QChar('\n')).value(4);
+        QVERIFY2(footerLine.contains(QStringLiteral("0x10 (16)")),
+                 qPrintable(footerLine));
+        QVERIFY2(!footerLine.contains(QStringLiteral("0x14 (20)")),
+                 qPrintable(footerLine));
+    }
+
+    void testUnionRefIdFooterClosesAtReferencedSpan() {
+        // A union typed as a named struct (refId, no own children) expands
+        // the referenced struct's fields into its body; its closing '}'
+        // must close at that struct's span — not collapse to 0.
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node ref;
+        ref.kind = NodeKind::Struct;
+        ref.name = "Ref";
+        ref.parentId = 0;
+        int rfi = tree.addNode(ref);
+        uint64_t refId = tree.nodes[rfi].id;
+
+        Node rf1; rf1.kind = NodeKind::UInt64; rf1.name = "a";
+        rf1.parentId = refId; rf1.offset = 0;
+        tree.addNode(rf1);
+        Node rf2; rf2.kind = NodeKind::UInt64; rf2.name = "b";
+        rf2.parentId = refId; rf2.offset = 8;
+        tree.addNode(rf2);
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "U";
+        root.classKeyword = "union";
+        root.refId = refId;
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        NullProvider prov;
+        ComposeResult result = compose(tree, prov, rootId);
+
+        // CommandRow + a + b + footer = 4
+        QCOMPARE(result.meta.size(), 4);
+
+        const LineMeta& footer = result.meta[3];
+        QCOMPARE(footer.lineKind, LineKind::Footer);
+        QCOMPARE(footer.offsetAddr, (uint64_t)0x10);
+    }
+
     void testPointerDerefExpansion() {
         NodeTree tree;
         tree.baseAddress = 0;

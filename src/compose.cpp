@@ -1063,7 +1063,13 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.isRootHeader = isRootHeader;  // root footer: flush left (no fold prefix)
         lm.foldLevel  = computeFoldLevel(depth, false);
         lm.markerMask = 0;
-        int sz = tree.structSpan(node.id, &state.childMap);
+        // A union's closing '}' closes at its own size (largest member), not
+        // at the extent of its members' offsets — C semantics. Union members
+        // deliberately overlap, so a member at offset 4 sized 0x10 must not
+        // push the '}' past the union's 0x10.
+        int sz = node.isUnion()
+            ? tree.unionSize(node.id, &state.childMap)
+            : tree.structSpan(node.id, &state.childMap);
         lm.offsetText = fmt::fmtOffsetMargin(absAddr + sz, false, state.offsetHexDigits);
         lm.offsetAddr = absAddr + sz;
         lm.ptrBase    = state.currentPtrBase;

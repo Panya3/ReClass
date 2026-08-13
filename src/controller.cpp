@@ -824,13 +824,22 @@ void RcxController::connectEditor(RcxEditor* editor) {
             const Node& n = paste.nodes[idx];
             if (n.kind != NodeKind::Struct && n.kind != NodeKind::Array)
                 return n.byteSize();
-            int maxEnd = 0;
+            // A union reserves its C size (largest member) in a parent's
+            // layout — mirror structSpan()/unionSize() so pasting a union
+            // whose members sit at non-zero offsets doesn't over-reserve
+            // the member extent and leave a gap after the '}' (member at
+            // rel 4 sized 0x10 keeps the union at 0x10, so the next pasted
+            // root lands 0x10 past the union's start, not 0x14). Non-union
+            // containers keep extent semantics (their size == extent).
+            int maxSize = 0, maxEnd = 0;
             for (const Node& c : paste.nodes) {
                 if (c.parentId != id) continue;
-                int cend = c.offset + pastedSpan(c.id);
-                if (cend > maxEnd) maxEnd = cend;
+                int csz  = pastedSpan(c.id);
+                int cend = c.offset + csz;
+                if (csz  > maxSize) maxSize = csz;
+                if (cend > maxEnd)  maxEnd  = cend;
             }
-            return maxEnd;
+            return n.isUnion() ? maxSize : maxEnd;
         };
 
         // Total span the pasted roots will occupy, accounting for alignment
@@ -1347,7 +1356,12 @@ void RcxController::connectEditor(RcxEditor* editor) {
         // user expectations. Previous version appended a Hex64 (+8) which
         // surprised everyone. For grow-by-multiple-bytes use the +10h /
         // +100h / +1000h pills which call appendBytesRequested instead.
-        int align = alignmentFor(NodeKind::Hex8);
+        // Unions: members overlap deliberately, so alignment padding would
+        // skip bytes (a member ending at 0x14 must not force the next to
+        // 0x18) — append exactly after the last member's end.
+        int ti = m_doc->tree.indexOfId(targetId);
+        const bool unionTarget = (ti >= 0 && m_doc->tree.nodes[ti].isUnion());
+        int align = unionTarget ? 1 : alignmentFor(NodeKind::Hex8);
         Node n;
         n.kind     = NodeKind::Hex8;
         n.parentId = targetId;
@@ -1379,10 +1393,19 @@ void RcxController::connectEditor(RcxEditor* editor) {
             int elemSize = qMax(1, sizeForKind(arr.elementKind));
             int addCount = (byteCount + elemSize - 1) / elemSize;
             if (addCount <= 0) return;
+            const uint64_t arrParent = arr.parentId;
+            // One undo step: the array growth AND the absorption of any
+            // siblings it now swallows (a union member growing makes the
+            // union span cover following fields — they become members).
+            m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
             m_doc->undoStack.push(new RcxCommand(this,
                 cmd::ChangeArrayMeta{arr.id,
                     arr.elementKind, arr.elementKind,
                     arr.arrayLen, arr.arrayLen + addCount}));
+            int pi = m_doc->tree.indexOfId(arrParent);
+            if (pi >= 0 && m_doc->tree.nodes[pi].isUnion())
+                absorbUnionOverlaps(arrParent);
+            m_doc->undoStack.endMacro();
             return;
         }
 
@@ -2443,8 +2466,16 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
     } else {
         // Same size or larger: adjust sibling offsets as before
         int delta = newSize - oldSize;
+        const uint64_t parentId = node.parentId;
+        const int parentIdx = m_doc->tree.indexOfId(parentId);
+        const bool unionParent = parentIdx >= 0
+            && m_doc->tree.nodes[parentIdx].isUnion();
         QVector<cmd::OffsetAdj> adjs;
-        if (delta != 0 && oldSize > 0 && newSize > 0) {
+        // Union members keep their deliberate union-relative offsets —
+        // growing one member must NOT shift the others (they overlap by
+        // design); following siblings in the PARENT are absorbed into the
+        // union by absorbUnionOverlaps instead.
+        if (delta != 0 && oldSize > 0 && newSize > 0 && !unionParent) {
             int oldEnd = node.offset + oldSize;
             auto siblings = m_doc->tree.childrenOf(node.parentId);
             for (int si : siblings) {
@@ -2455,16 +2486,24 @@ void RcxController::changeNodeKind(int nodeIdx, NodeKind newKind) {
             }
         }
         bool needsRename = isHexNode(node.kind) && !isHexNode(newKind);
-        if (needsRename) {
+        // A union member growing (e.g. Hex32 → Hex128) makes the union
+        // span grow over following siblings — absorb the ones now inside
+        // so they become members instead of overlapping siblings. Keep the
+        // size change + absorption in one undo step.
+        const bool absorb = (newSize > oldSize) && unionParent;
+        if (needsRename || absorb) {
             m_doc->undoStack.beginMacro(QStringLiteral("Change type"));
         }
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeKind{node.id, node.kind, newKind, adjs}));
+        if (absorb) absorbUnionOverlaps(parentId);
         if (needsRename) {
             QString autoName = QStringLiteral("field_%1")
                 .arg(node.offset, 4, 16, QChar('0'));
             m_doc->undoStack.push(new RcxCommand(this,
                 cmd::Rename{node.id, node.name, autoName}));
+        }
+        if (needsRename || absorb) {
             m_doc->undoStack.endMacro();
         }
     }
@@ -2832,7 +2871,12 @@ void RcxController::insertNode(uint64_t parentId, int offset, NodeKind kind, con
             int end = sn.offset + sz;
             if (end > maxEnd) maxEnd = end;
         }
-        int align = alignmentFor(kind);
+        // Unions: members overlap deliberately, so alignment padding would
+        // skip bytes (a member ending at 0x14 must not force the next to
+        // 0x18) — append exactly after the last member's end.
+        int pi = m_doc->tree.indexOfId(parentId);
+        const bool unionParent = (pi >= 0 && m_doc->tree.nodes[pi].isUnion());
+        int align = unionParent ? 1 : alignmentFor(kind);
         n.offset = (maxEnd + align - 1) / align * align;
     } else {
         n.offset = offset;
@@ -3084,6 +3128,40 @@ void RcxController::dissolveUnion(uint64_t unionId) {
     m_doc->undoStack.endMacro();
     m_suppressRefresh = wasSuppressed;
     if (!m_suppressRefresh) refresh();
+}
+
+void RcxController::absorbUnionOverlaps(uint64_t unionId) {
+    int ui = m_doc->tree.indexOfId(unionId);
+    if (ui < 0) return;
+    const Node& un = m_doc->tree.nodes[ui];
+    if (!un.isUnion() || un.parentId == 0) return;
+
+    // A field whose START falls inside the union's span belongs to the
+    // union (members deliberately overlap). Fields starting exactly at the
+    // union's C-size end (right after '}') stay siblings.
+    //
+    // Absorbing a sibling LARGER than the union's current C-size grows the
+    // union (unionSize = max member size), which can expose further
+    // siblings that were outside the old span — loop until a full pass
+    // absorbs nothing. Terminates: each pass moves ≥1 sibling into the
+    // union, so the parent's sibling set strictly shrinks.
+    for (;;) {
+        const int size = m_doc->tree.unionSize(unionId);
+        if (size <= 0) return;
+        const int lo = un.offset, hi = un.offset + size;
+
+        bool absorbed = false;
+        auto sibs = m_doc->tree.childrenOf(un.parentId);
+        for (int si : sibs) {
+            const Node& sib = m_doc->tree.nodes[si];
+            if (sib.id == unionId) continue;
+            if (sib.offset < lo || sib.offset >= hi) continue;
+            m_doc->undoStack.push(new RcxCommand(this, cmd::ChangeParent{
+                sib.id, sib.parentId, unionId, sib.offset, sib.offset - lo}));
+            absorbed = true;
+        }
+        if (!absorbed) break;
+    }
 }
 
 void RcxController::toggleCollapse(int nodeIdx) {
@@ -3388,6 +3466,18 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
                 tree.nodes[idx].offset = isUndo ? c.oldOffset : c.newOffset;
             // Node and its descendants read from a different address now
             m_refreshGen++;  // discard in-flight async read (stale layout)
+            clearNodeHistory(c.nodeId);
+            for (int ci : tree.subtreeIndices(c.nodeId))
+                clearNodeHistory(tree.nodes[ci].id);
+        } else if constexpr (std::is_same_v<T, cmd::ChangeParent>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0) {
+                tree.nodes[idx].parentId = isUndo ? c.oldParentId : c.newParentId;
+                tree.nodes[idx].offset   = isUndo ? c.oldOffset : c.newOffset;
+                tree.invalidateIdCache();  // parent/child map changed
+            }
+            // Node + descendants read from a different address now
+            m_refreshGen++;
             clearNodeHistory(c.nodeId);
             for (int ci : tree.subtreeIndices(c.nodeId))
                 clearNodeHistory(tree.nodes[ci].id);
@@ -3953,6 +4043,14 @@ void RcxController::joinHexNodes(uint64_t nodeId, NodeKind targetKind) {
 
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Join Hex nodes"));
+
+    // mergeIndices is built as [startNode, ...scan hits] where the start
+    // node's index can be ANYWHERE in the vector (a previous join appends
+    // the joined node at the end). Removing in "reverse" of that order can
+    // therefore walk a stale out-of-range index. Sort ascending so the
+    // reverse walk removes the highest index first and every lower index
+    // stays valid while the vector shrinks.
+    std::sort(mergeIndices.begin(), mergeIndices.end());
 
     // Remove all nodes (in reverse to keep indices valid)
     for (int j = mergeIndices.size() - 1; j >= 0; j--) {
@@ -6225,6 +6323,17 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
         if (oldEffectiveSize == 0 && (nodeKind == NodeKind::Struct || nodeKind == NodeKind::Array))
             oldEffectiveSize = m_doc->tree.structSpan(nodeId);
 
+        // A union member growing (e.g. to int8_t[16] via the array paths
+        // below) makes the union span swallow following siblings — absorb
+        // the ones now inside as members, in the same undo step.
+        auto absorbIfUnionMember = [&](uint64_t id) {
+            int ii = m_doc->tree.indexOfId(id);
+            if (ii < 0) return;
+            int pi = m_doc->tree.indexOfId(m_doc->tree.nodes[ii].parentId);
+            if (pi >= 0 && m_doc->tree.nodes[pi].isUnion())
+                absorbUnionOverlaps(m_doc->tree.nodes[ii].parentId);
+        };
+
         if (resolved.entryKind == TypeEntry::Primitive) {
             if (spec.arrayCount > 0) {
                 // Primitive array: e.g. "int32_t[10]"
@@ -6241,6 +6350,7 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                             cmd::ChangeArrayMeta{nodeId, n.elementKind, resolved.primitiveKind,
                                                  n.arrayLen, spec.arrayCount}));
                 }
+                absorbIfUnionMember(nodeId);
                 m_doc->undoStack.endMacro();
                 m_suppressRefresh = wasSuppressed;
                 if (!m_suppressRefresh) refresh();
@@ -6345,6 +6455,7 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                         m_doc->undoStack.push(new RcxCommand(this,
                             cmd::ChangePointerRef{nodeId, n.refId, resolved.structId}));
                 }
+                // (absorbIfUnionMember runs once at the end of this block)
 
             } else if (isPointerKind(nodeKind)) {
                 // Composite picked on an existing Pointer node — set
@@ -6386,6 +6497,11 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                 }
             }
 
+            // A union member changed to a composite grows the union via the
+            // referenced span (refId fallback in unionSize) — absorb any
+            // siblings now inside, in the same undo step.
+            absorbIfUnionMember(nodeId);
+
             m_doc->undoStack.endMacro();
             m_suppressRefresh = wasSuppressed;
             if (!m_suppressRefresh) refresh();
@@ -6399,8 +6515,20 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
         // those cases would double-shift and break offsets of fields below.
         {
             int ni = m_doc->tree.indexOfId(nodeId);
-            if (ni >= 0 && (m_doc->tree.nodes[ni].kind == NodeKind::Struct
-                            || m_doc->tree.nodes[ni].kind == NodeKind::Array)) {
+            // Growing a UNION member must not run the generic sibling-offset
+            // adjustment: childrenOf(parentId) here is the union's own
+            // members (offsets are union-relative and overlap deliberately),
+            // so the shift would wrongly move them — including members just
+            // absorbed by absorbUnionOverlaps. Following siblings in the
+            // PARENT are absorbed into the union instead.
+            bool unionMember = false;
+            if (ni >= 0) {
+                int pj = m_doc->tree.indexOfId(m_doc->tree.nodes[ni].parentId);
+                unionMember = pj >= 0 && m_doc->tree.nodes[pj].isUnion();
+            }
+            if (ni >= 0 && !unionMember
+                && (m_doc->tree.nodes[ni].kind == NodeKind::Struct
+                    || m_doc->tree.nodes[ni].kind == NodeKind::Array)) {
                 const Node& updatedNode = m_doc->tree.nodes[ni];
                 int newEffectiveSize = updatedNode.byteSize();
                 if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Struct)

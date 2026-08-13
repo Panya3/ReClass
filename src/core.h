@@ -806,13 +806,23 @@ struct NodeTree {
         QSet<uint64_t> localVisited;
         if (!visited) visited = &localVisited;
 
-        if (visited->contains(structId)) return 0;  // Cycle detected
-        visited->insert(structId);
-
         int idx = indexOfId(structId);
         if (idx < 0) return 0;
 
         const Node& node = nodes[idx];
+
+        // A union occupies its C size (largest member) in a parent's layout:
+        // members placed at non-zero offsets overlap deliberately and must
+        // not inflate the footprint — a member at offset 4 sized 0x10 keeps
+        // the union at 0x10, so deleting it shifts later siblings by 0x10
+        // and the slot right after '}' stays usable. structExtent() still
+        // reports the raw max(offset+size) for explicit-layout backends.
+        if (node.isUnion())
+            return unionSize(structId, childMap, visited);
+
+        if (visited->contains(structId)) return 0;  // Cycle detected
+        visited->insert(structId);
+
         int declaredSize = node.byteSize();
 
         // Short-circuit: non-container nodes have no children to traverse
@@ -834,6 +844,99 @@ struct NodeTree {
             maxEnd = qMax(maxEnd, structSpan(node.refId, childMap, visited));
 
         return qMax(declaredSize, maxEnd);
+    }
+
+    // Raw physical extent of a container: max over children of (offset +
+    // size), ignoring C-size semantics. structSpan() now reports the C-size
+    // footprint (unions = largest member), but explicit-layout backends like
+    // the C# generator need Size= to cover the actual byte range members
+    // occupy — a member at offset 4 sized 0x10 spans to 0x14, and a named
+    // union type's Size must not be smaller than its fields' extent or
+    // C# throws a TypeLoadException.
+    int structExtent(uint64_t structId,
+                     const QHash<uint64_t, QVector<int>>* childMap = nullptr,
+                     QSet<uint64_t>* visited = nullptr) const {
+        QSet<uint64_t> localVisited;
+        if (!visited) visited = &localVisited;
+
+        if (visited->contains(structId)) return 0;  // Cycle detected
+        visited->insert(structId);
+
+        int idx = indexOfId(structId);
+        if (idx < 0) return 0;
+
+        const Node& node = nodes[idx];
+        int declaredSize = node.byteSize();
+
+        // Short-circuit: non-container nodes have no children to traverse
+        if (!isContainerKind(node.kind) && node.refId == 0)
+            return declaredSize;
+
+        int maxEnd = 0;
+        QVector<int> kids = childMap ? childMap->value(structId) : childrenOf(structId);
+        for (int ci : kids) {
+            const Node& c = nodes[ci];
+            int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
+                ? structExtent(c.id, childMap, visited) : c.byteSize();
+            int64_t end = (int64_t)c.offset + sz;
+            if (end > maxEnd) maxEnd = (int)qMin(end, (int64_t)INT_MAX);
+        }
+
+        // Embedded struct reference: no own children but refId points to a struct definition
+        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0)
+            maxEnd = qMax(maxEnd, structExtent(node.refId, childMap, visited));
+
+        return qMax(declaredSize, maxEnd);
+    }
+
+    // C-semantics size of a union: max over members of their SIZE, ignoring
+    // member offsets. This is the footprint a union occupies in its parent's
+    // layout — structSpan() delegates here for union nodes. Members placed
+    // at non-zero offsets overlap deliberately and must not inflate it (a
+    // member at offset 4 sized 0x10 inside a 0x10 union keeps the union at
+    // 0x10). Nested containers contribute their own span/size recursively;
+    // nested unions use unionSize.
+    int unionSize(uint64_t unionId,
+                  const QHash<uint64_t, QVector<int>>* childMap = nullptr,
+                  QSet<uint64_t>* visited = nullptr) const {
+        QSet<uint64_t> localVisited;
+        if (!visited) visited = &localVisited;
+
+        if (visited->contains(unionId)) return 0;  // Cycle detected
+        visited->insert(unionId);
+
+        int idx = indexOfId(unionId);
+        if (idx < 0) return 0;
+
+        const Node& node = nodes[idx];
+
+        int maxSize = 0;
+        QVector<int> kids = childMap ? childMap->value(unionId) : childrenOf(unionId);
+        for (int ci : kids) {
+            const Node& c = nodes[ci];
+            int sz;
+            if (c.isUnion())
+                sz = unionSize(c.id, childMap, visited);
+            else if (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
+                sz = structSpan(c.id, childMap, visited);
+            else
+                sz = c.byteSize();
+            maxSize = qMax(maxSize, sz);
+        }
+
+        // Embedded reference: no own children but refId points to a struct
+        // (or union) definition — same fallback structSpan has, so a union
+        // typed as a named struct still reports that definition's size
+        // instead of collapsing to 0.
+        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0) {
+            int refIdx = indexOfId(node.refId);
+            if (refIdx >= 0)
+                maxSize = qMax(maxSize, nodes[refIdx].isUnion()
+                    ? unionSize(node.refId, childMap, visited)
+                    : structSpan(node.refId, childMap, visited));
+        }
+
+        return maxSize;
     }
 
     // Batch selection normalizers
@@ -1197,6 +1300,12 @@ namespace cmd {
                              int oldArrayLen, newArrayLen; };
     struct ChangePointerRef { uint64_t nodeId;
                               uint64_t oldRefId, newRefId; };
+    // Re-parent a node into a different container (used to absorb a field
+    // that now falls inside a union's span into the union as a member).
+    // Keeps the node's id so refId links and selection survive.
+    struct ChangeParent { uint64_t nodeId;
+                          uint64_t oldParentId, newParentId;
+                          int oldOffset, newOffset; };
     struct ChangeStructTypeName { uint64_t nodeId; QString oldName, newName; };
     struct ChangeClassKeyword { uint64_t nodeId; QString oldKeyword, newKeyword; };
     struct ChangeOffset { uint64_t nodeId; int oldOffset, newOffset; };
@@ -1212,6 +1321,7 @@ using Command = std::variant<
     cmd::Insert, cmd::Remove, cmd::ChangeBase, cmd::WriteBytes,
     cmd::ChangeArrayMeta, cmd::ChangePointerRef, cmd::ChangeStructTypeName,
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
+    cmd::ChangeParent,
     cmd::ToggleRelative,
     cmd::ToggleBigEndian, cmd::ChangeComment
 >;
