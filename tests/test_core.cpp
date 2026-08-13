@@ -934,6 +934,15 @@ private slots:
         QVERIFY(!rcx::isPointerKind(rcx::NodeKind::Hex64));
     }
 
+    // Pointer kind must follow the target process width: 4-byte targets get
+    // Pointer32, 8-byte targets get Pointer64 (regression for uint8_t* on a
+    // 32-bit process growing to 8 bytes).
+    void testNativePointerKind() {
+        QCOMPARE(rcx::nativePointerKind(4), rcx::NodeKind::Pointer32);
+        QCOMPARE(rcx::nativePointerKind(8), rcx::NodeKind::Pointer64);
+        QCOMPARE(rcx::nativePointerKind(2), rcx::NodeKind::Pointer32);
+    }
+
     void testIsContainerKind() {
         QVERIFY(rcx::isContainerKind(rcx::NodeKind::Struct));
         QVERIFY(rcx::isContainerKind(rcx::NodeKind::Array));

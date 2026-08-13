@@ -3588,8 +3588,7 @@ void RcxController::convertToTypedPointer(uint64_t nodeId) {
     int ni = m_doc->tree.indexOfId(nodeId);
     if (ni < 0) return;
     const uint64_t oldRefId = m_doc->tree.nodes[ni].refId;
-    const NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
-        ? NodeKind::Pointer64 : NodeKind::Pointer32;
+    const NodeKind ptrKind = nativePointerKind(m_doc->tree.pointerSize);
 
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Change to ptr*"));
@@ -3613,8 +3612,7 @@ uint64_t RcxController::attachRttiClassToPointer(uint64_t nodeId,
     int ni = m_doc->tree.indexOfId(nodeId);
     if (ni < 0) return 0;
     const uint64_t oldRefId = m_doc->tree.nodes[ni].refId;
-    const NodeKind ptrKind = (m_doc->tree.pointerSize >= 8)
-        ? NodeKind::Pointer64 : NodeKind::Pointer32;
+    const NodeKind ptrKind = nativePointerKind(m_doc->tree.pointerSize);
 
     const QString typeName = uniqueStructName(baseName);  // RTTI name (or NewClass)
 
@@ -6214,6 +6212,11 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
     // Parse the full text for modifiers (e.g. "int32_t[10]", "Ball*")
     TypeSpec spec = parseTypeSpec(fullText);
 
+    // The "*" modifier / typed-pointer conversions below MUST honor the
+    // attached process width — hardcoding Pointer64 here made a uint8_t*
+    // on a 32-bit target grow to 8 bytes.
+    const NodeKind ptrKind = nativePointerKind(m_doc->tree.pointerSize);
+
     if (mode == TypePopupMode::FieldType) {
         // Capture old effective size before any mutations (for sibling offset adjustment)
         const uint64_t parentId = m_doc->tree.nodes[nodeIdx].parentId;
@@ -6244,8 +6247,8 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             } else if (spec.isPointer) {
                 if (!isValidPrimitivePtrTarget(resolved.primitiveKind)) {
                     // Hex, pointer, fnptr types with * → plain void pointer
-                    if (nodeKind != NodeKind::Pointer64)
-                        changeNodeKind(nodeIdx, NodeKind::Pointer64);
+                    if (nodeKind != ptrKind)
+                        changeNodeKind(nodeIdx, ptrKind);
                     int idx = m_doc->tree.indexOfId(nodeId);
                     if (idx >= 0) {
                         auto& n = m_doc->tree.nodes[idx];
@@ -6255,12 +6258,12 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                                 cmd::ChangePointerRef{nodeId, n.refId, 0}));
                     }
                 } else {
-                    // Primitive pointer: e.g. "int32*" or "f64**" → Pointer64 + elementKind + ptrDepth
+                    // Primitive pointer: e.g. "int32*" or "f64**" → ptrKind + elementKind + ptrDepth
                     bool wasSuppressed = m_suppressRefresh;
                     m_suppressRefresh = true;
                     m_doc->undoStack.beginMacro(QStringLiteral("Change to primitive pointer"));
-                    if (nodeKind != NodeKind::Pointer64)
-                        changeNodeKind(nodeIdx, NodeKind::Pointer64);
+                    if (nodeKind != ptrKind)
+                        changeNodeKind(nodeIdx, ptrKind);
                     int idx = m_doc->tree.indexOfId(nodeId);
                     if (idx >= 0) {
                         auto& n = m_doc->tree.nodes[idx];
@@ -6312,9 +6315,9 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
             m_doc->undoStack.beginMacro(QStringLiteral("Change to composite type"));
 
             if (spec.isPointer) {
-                // Pointer modifier: e.g. "Material*" or "Material**" → Pointer64 + refId + ptrDepth
-                if (nodeKind != NodeKind::Pointer64)
-                    changeNodeKind(nodeIdx, NodeKind::Pointer64);
+                // Pointer modifier: e.g. "Material*" or "Material**" → ptrKind + refId + ptrDepth
+                if (nodeKind != ptrKind)
+                    changeNodeKind(nodeIdx, ptrKind);
                 int idx = m_doc->tree.indexOfId(nodeId);
                 if (idx >= 0) {
                     auto& n = m_doc->tree.nodes[idx];

@@ -153,6 +153,13 @@ inline constexpr bool isFuncPtr(NodeKind k) {
 inline constexpr bool isPointerKind(NodeKind k) {
     return k == NodeKind::Pointer32 || k == NodeKind::Pointer64;
 }
+// Native pointer kind for a target process of the given pointer size:
+// Pointer32 (4 bytes) for 32-bit targets, Pointer64 (8 bytes) for 64-bit.
+// Single source of truth for the type chooser's "*" modifier, typed-pointer
+// conversions, and any other spot that must follow the attached process width.
+inline constexpr NodeKind nativePointerKind(int pointerSize) {
+    return pointerSize >= 8 ? NodeKind::Pointer64 : NodeKind::Pointer32;
+}
 inline constexpr bool isContainerKind(NodeKind k) {
     return k == NodeKind::Struct || k == NodeKind::Array;
 }

@@ -1791,6 +1791,157 @@ private slots:
         delete doc;
     }
 
+    // ── 32-bit target: the "*" modifier MUST yield Pointer32 (4 bytes),
+    // not Pointer64 — pointer size follows the attached process width ──
+
+    void testPrimitivePointerOn32BitTargetUsesPointer32() {
+#ifdef SKIP_GUI_INTEGRATION
+        QSKIP("GUI integration test disabled");
+#endif
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->tree.pointerSize = 4;   // 32-bit target process
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        int xIdx = -1;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            if (doc->tree.nodes[i].name == "x") { xIdx = i; break; }
+        }
+        QVERIFY(xIdx >= 0);
+        uint64_t xNodeId = doc->tree.nodes[xIdx].id;
+
+        // uint8_t* on a 32-bit target → Pointer32 + elementKind=UInt8 + ptrDepth=1
+        TypeEntry u8Entry;
+        u8Entry.entryKind = TypeEntry::Primitive;
+        u8Entry.primitiveKind = NodeKind::UInt8;
+        u8Entry.displayName = "uint8_t";
+
+        ctrl->applyTypePopupResult(TypePopupMode::FieldType, xIdx,
+                                   u8Entry, QStringLiteral("uint8_t*"));
+        QApplication::processEvents();
+
+        int idx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(idx >= 0);
+        QCOMPARE(doc->tree.nodes[idx].kind, NodeKind::Pointer32);
+        QCOMPARE(doc->tree.nodes[idx].ptrDepth, 1);
+        QCOMPARE(doc->tree.nodes[idx].elementKind, NodeKind::UInt8);
+        QCOMPARE(doc->tree.nodes[idx].refId, uint64_t(0));
+        QCOMPARE(doc->tree.nodes[idx].byteSize(), 4);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    void testVoidPointerFallbackOn32BitTargetUsesPointer32() {
+#ifdef SKIP_GUI_INTEGRATION
+        QSKIP("GUI integration test disabled");
+#endif
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->tree.pointerSize = 4;   // 32-bit target process
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        int xIdx = -1;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            if (doc->tree.nodes[i].name == "x") { xIdx = i; break; }
+        }
+        QVERIFY(xIdx >= 0);
+        uint64_t xNodeId = doc->tree.nodes[xIdx].id;
+
+        // hex8* is not a valid primitive pointer target → void pointer.
+        // On a 32-bit target the void pointer must be Pointer32.
+        TypeEntry hexEntry;
+        hexEntry.entryKind = TypeEntry::Primitive;
+        hexEntry.primitiveKind = NodeKind::Hex8;
+        hexEntry.displayName = "hex8";
+
+        ctrl->applyTypePopupResult(TypePopupMode::FieldType, xIdx,
+                                   hexEntry, QStringLiteral("hex8*"));
+        QApplication::processEvents();
+
+        int idx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(idx >= 0);
+        QCOMPARE(doc->tree.nodes[idx].kind, NodeKind::Pointer32);
+        QCOMPARE(doc->tree.nodes[idx].ptrDepth, 0);
+        QCOMPARE(doc->tree.nodes[idx].refId, uint64_t(0));
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
+    void testCompositePointerOn32BitTargetUsesPointer32() {
+#ifdef SKIP_GUI_INTEGRATION
+        QSKIP("GUI integration test disabled");
+#endif
+        auto* doc = new RcxDocument();
+        buildTwoRootTree(doc->tree);
+        doc->tree.pointerSize = 4;   // 32-bit target process
+        doc->provider = std::make_unique<BufferProvider>(makeBuffer());
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->addSplitEditor(splitter);
+
+        splitter->resize(800, 600);
+        splitter->show();
+        QVERIFY(QTest::qWaitForWindowExposed(splitter));
+        ctrl->refresh();
+        QApplication::processEvents();
+
+        int xIdx = -1;
+        uint64_t bravoId = 0;
+        for (int i = 0; i < doc->tree.nodes.size(); i++) {
+            const auto& n = doc->tree.nodes[i];
+            if (n.name == "x" && n.kind == NodeKind::Int32) xIdx = i;
+            if (n.name == "Bravo" && n.kind == NodeKind::Struct) bravoId = n.id;
+        }
+        QVERIFY(xIdx >= 0);
+        QVERIFY(bravoId != 0);
+        uint64_t xNodeId = doc->tree.nodes[xIdx].id;
+
+        // Bravo* on a 32-bit target → Pointer32 + refId (target stays wired)
+        TypeEntry bravoEntry;
+        bravoEntry.entryKind = TypeEntry::Composite;
+        bravoEntry.structId = bravoId;
+        bravoEntry.displayName = "Bravo";
+
+        ctrl->applyTypePopupResult(TypePopupMode::FieldType, xIdx,
+                                   bravoEntry, QStringLiteral("Bravo*"));
+        QApplication::processEvents();
+
+        int idx = doc->tree.indexOfId(xNodeId);
+        QVERIFY(idx >= 0);
+        QCOMPARE(doc->tree.nodes[idx].kind, NodeKind::Pointer32);
+        QCOMPARE(doc->tree.nodes[idx].ptrDepth, 0);
+        QCOMPARE(doc->tree.nodes[idx].refId, bravoId);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
     void testDoubleDoubleStarStillCreatesPrimitivePointer() {
 #ifdef SKIP_GUI_INTEGRATION
         QSKIP("GUI integration test disabled");
