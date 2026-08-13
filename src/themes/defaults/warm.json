@@ -24,6 +24,7 @@
     "indDataChanged": "#6B959F",
     "indHintGreen": "#688A58",
     "indRttiHint": "#C0825A",
+    "indOverlap": "#E05252",
     "markerPtr": "#B85A42",
     "markerCycle": "#AA9565",
     "markerError": "#3C2121"

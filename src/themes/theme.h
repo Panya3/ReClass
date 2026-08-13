@@ -50,6 +50,7 @@ struct Theme {
     QColor indHeatHot;      // heatmap level 3 (frequent changes)
     QColor indHintGreen;    // comment/hint text
     QColor indRttiHint;     // RTTI vtable name hint (distinct from indHintGreen)
+    QColor indOverlap;      // full-row overlap/draft warning band (red = layout error)
 
     // ── Markers ──
     QColor markerPtr;       // null pointer

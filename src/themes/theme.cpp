@@ -34,6 +34,7 @@ const ThemeFieldMeta kThemeFields[] = {
     {"indHeatHot",    "Heat Hot",       "Indicators",  &Theme::indHeatHot},
     {"indHintGreen",  "Hint Green",     "Indicators",  &Theme::indHintGreen},
     {"indRttiHint",   "RTTI Hint",      "Indicators",  &Theme::indRttiHint},
+    {"indOverlap",    "Overlap",        "Indicators",  &Theme::indOverlap},
     {"markerPtr",     "Pointer",        "Markers",     &Theme::markerPtr},
     {"markerCycle",   "Cycle",          "Markers",     &Theme::markerCycle},
     {"markerError",   "Error",          "Markers",     &Theme::markerError},
@@ -89,6 +90,12 @@ Theme Theme::fromJson(const QJsonObject& o) {
     // via the JSON key; this only fires for themes that don't ship the field.
     if (!t.indRttiHint.isValid())
         t.indRttiHint = QColor("#d19a66");
+
+    // Overlap band is a LAYOUT-ERROR signal, so it defaults to red (not
+    // amber): a draft / overlapping field reads as "broken" while heat
+    // stays amber "activity". Themes can override via the JSON key.
+    if (!t.indOverlap.isValid())
+        t.indOverlap = QColor(224, 82, 82);
 
     // Marker defaults — every shipped theme defines these, but user-supplied
     // themes may omit one or more. Provide sane fallbacks so destructive-action
