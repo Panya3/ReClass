@@ -5,6 +5,7 @@
 #include <QSplitter>
 #include <QTemporaryFile>
 #include <QTemporaryDir>
+#include <QJsonDocument>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <Qsci/qsciscintilla.h>
@@ -159,6 +160,61 @@ private slots:
 
         delete doc;
         delete doc2;
+    }
+
+    // ── File-format version key ──
+    // save() stamps fileVersion; load() tolerates a missing key (legacy
+    // file) and flags files written by a NEWER build (best-effort load
+    // with a loud flag) instead of silently mis-reading them.
+    void testFileVersionHandling() {
+        auto* doc = new RcxDocument();
+        Node root; root.kind = NodeKind::Struct; root.name = "Root"; root.parentId = 0;
+        doc->tree.addNode(root);
+
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        const QString path = f.fileName();
+        f.close();
+
+        // 1. save() stamps the current version; the raw JSON carries it.
+        QVERIFY(doc->save(path));
+        {
+            QFile rf(path);
+            QVERIFY(rf.open(QIODevice::ReadOnly));
+            const QJsonObject saved = QJsonDocument::fromJson(rf.readAll()).object();
+            QCOMPARE(saved["fileVersion"].toInt(-1), rcx::kRcxFileVersion);
+        }
+
+        // 2. A legacy file (no key) loads cleanly and is not flagged.
+        {
+            QFile wf(path);
+            QVERIFY(wf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QJsonObject o;
+            o["baseAddress"] = QStringLiteral("400000");
+            o["nodes"] = QJsonArray();
+            wf.write(QJsonDocument(o).toJson());
+        }
+        auto* legacy = new RcxDocument();
+        QVERIFY(legacy->load(path));
+        QCOMPARE(legacy->m_loadFileVersionTooNew, 0);
+
+        // 3. A file claiming a newer version loads best-effort + flags.
+        {
+            QFile wf(path);
+            QVERIFY(wf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QJsonObject o;
+            o["baseAddress"] = QStringLiteral("400000");
+            o["fileVersion"] = rcx::kRcxFileVersion + 1;
+            o["nodes"] = QJsonArray();
+            wf.write(QJsonDocument(o).toJson());
+        }
+        auto* future = new RcxDocument();
+        QVERIFY(future->load(path));
+        QCOMPARE(future->m_loadFileVersionTooNew, rcx::kRcxFileVersion + 1);
+
+        delete doc;
+        delete legacy;
+        delete future;
     }
 
     // ── Draft lifecycle (automatic system) ──

@@ -7498,7 +7498,14 @@ QDockWidget* MainWindow::project_open(const QString& path, bool interactive) {
         if (n.parentId == 0 && n.kind == NodeKind::Struct) classCount++;
     QString loadedMsg = QStringLiteral("Loaded %1 (%2 classes, %3 nodes)")
         .arg(QFileInfo(filePath).fileName()).arg(classCount).arg(nodeCount);
-    if (doc->m_loadOverlapCount > 0) {
+    if (doc->m_loadFileVersionTooNew > 0) {
+        // A file from a newer build: warn loudly — best-effort load may
+        // have dropped fields this build doesn't know yet.
+        setAppStatus(loadedMsg,
+            QStringLiteral(" — saved by a newer REECLASS (file version %1); "
+                           "loaded best-effort \u2014 newer fields may be lost")
+                .arg(doc->m_loadFileVersionTooNew));
+    } else if (doc->m_loadOverlapCount > 0) {
         // Tools → Validate Project (Ctrl+Shift+V) opens the dialog that
         // enumerates each pair — the load path only owns the summary.
         setAppStatus(loadedMsg,

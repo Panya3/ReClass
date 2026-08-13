@@ -72,6 +72,11 @@ public:
     // logged via qWarning for console post-mortem). Zero on clean trees /
     // freshly-created docs.
     int                        m_loadOverlapCount = 0;
+    // Set to the .rcx's "fileVersion" when it was written by a NEWER
+    // build than this one (loaded best-effort, may lose newer fields).
+    // Zero on legacy files (no key) and current-version files. Surfaced
+    // by the main window post-load.
+    int                        m_loadFileVersionTooNew = 0;
 
     QString resolveTypeName(NodeKind kind) const {
         auto it = typeAliases.find(kind);

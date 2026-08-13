@@ -19,6 +19,14 @@
 
 namespace rcx {
 
+// On-disk .rcx format version. Bump ONLY on breaking schema changes
+// (renamed/removed keys, changed value semantics). Additive keys — e.g.
+// the per-field "draft" flag — need no bump: loaders ignore unknown JSON
+// keys, so old builds still read new files (and new builds default the
+// missing keys on old files). load() warns when a file claims a newer
+// version and proceeds best-effort.
+constexpr int kRcxFileVersion = 1;
+
 // ── Node kind enum ──
 
 enum class NodeKind : uint8_t {

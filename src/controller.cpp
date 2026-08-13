@@ -183,6 +183,12 @@ ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
 bool RcxDocument::saveCopy(const QString& path) {
     QJsonObject json = tree.toJson();
 
+    // Format version (see rcx::kRcxFileVersion): stamped on every save so
+    // a future breaking schema change can detect and migrate old files,
+    // and a file from a newer build can warn instead of silently
+    // mis-reading.
+    json["fileVersion"] = rcx::kRcxFileVersion;
+
     // Save type aliases
     if (!typeAliases.isEmpty()) {
         QJsonObject aliasObj;
@@ -242,6 +248,22 @@ bool RcxDocument::load(const QString& path) {
 
     undoStack.clear();
     QJsonObject root = jdoc.object();
+
+    // File-format version: a missing key is a legacy file (version 0) —
+    // loads fine, defaults everywhere. A file stamped with a NEWER
+    // version loads best-effort with a loud flag (surfaced by the main
+    // window) instead of being refused — the user can still inspect it,
+    // and only newer-only fields are at risk of being lost.
+    m_loadFileVersionTooNew = 0;
+    const int fileVersion = root["fileVersion"].toInt(0);
+    if (fileVersion > rcx::kRcxFileVersion) {
+        m_loadFileVersionTooNew = fileVersion;
+        qWarning().noquote() << "[load]" << path
+            << "was saved by a newer REECLASS (file version" << fileVersion
+            << "> supported" << rcx::kRcxFileVersion
+            << ") — loading best-effort; newer fields may be lost";
+    }
+
     {
         PROFILE_SCOPE("RcxDocument::load.tree-from-json");
         tree = NodeTree::fromJson(root);
