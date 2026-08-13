@@ -10223,9 +10223,14 @@ int MainWindow::loadDockSize(QDockWidget* dock, int fallback) const {
 
 void MainWindow::autosaveAllModifiedDocs() {
     // Walk every open doc once (multiple tabs can share a doc — dedup) and
-    // shadow-save any that have unsaved changes AND a known filePath. We
-    // do NOT clear doc->modified — this is a recovery snapshot, not a real
-    // save. A real saveFile / saveFileAs removes the .autosave file.
+    // shadow-save any that have unsaved changes AND a known filePath. This
+    // is a recovery snapshot, not a real save: saveCopy() leaves
+    // doc->filePath, doc->modified and the undo stack untouched, so the
+    // next autosave round (and any Ctrl+S) still targets the real file.
+    // autosaveShadowPath() also strips any existing ".autosave" suffix, so
+    // the shadow name can never stack into
+    // foo.rcx.autosave.autosave.autosave… A real saveFile / saveFileAs
+    // removes the .autosave file.
     QSet<RcxDocument*> seen;
     int wrote = 0;
     for (auto it = m_tabs.constBegin(); it != m_tabs.constEnd(); ++it) {
@@ -10234,7 +10239,7 @@ void MainWindow::autosaveAllModifiedDocs() {
         seen.insert(doc);
         if (!doc->modified) continue;
         if (doc->filePath.isEmpty()) continue;
-        if (doc->save(doc->filePath + QStringLiteral(".autosave")))
+        if (doc->saveCopy(autosaveShadowPath(doc->filePath)))
             ++wrote;
     }
     if (wrote > 0)

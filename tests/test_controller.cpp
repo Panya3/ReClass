@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QSplitter>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QMouseEvent>
 #include <QKeyEvent>
 #include <Qsci/qsciscintilla.h>
@@ -2216,6 +2217,86 @@ private slots:
         delete ctrl;
         delete splitter;
         delete doc;
+    }
+
+    // ── Autosave shadow path: must NEVER stack ".autosave" suffixes ──
+    void testAutosaveShadowPath() {
+        // Plain project file → single suffix
+        QCOMPARE(autosaveShadowPath(QStringLiteral("C:/data/foo.rcx")),
+                 QStringLiteral("C:/data/foo.rcx.autosave"));
+        // A shadow opened directly → stays a single suffix, no stacking
+        QCOMPARE(autosaveShadowPath(QStringLiteral("C:/data/foo.rcx.autosave")),
+                 QStringLiteral("C:/data/foo.rcx.autosave"));
+        // Path already clobbered by the old buggy autosave → collapsed
+        QCOMPARE(autosaveShadowPath(
+                     QStringLiteral("C:/data/foo.rcx.autosave.autosave.autosave")),
+                 QStringLiteral("C:/data/foo.rcx.autosave"));
+        // ".autosave" in the middle of the name is not a suffix → untouched
+        QCOMPARE(autosaveShadowPath(QStringLiteral("C:/data/foo.autosave.rcx")),
+                 QStringLiteral("C:/data/foo.autosave.rcx.autosave"));
+        // Windows-style path
+        QCOMPARE(autosaveShadowPath(QStringLiteral("C:\\data\\foo.rcx")),
+                 QStringLiteral("C:\\data\\foo.rcx.autosave"));
+    }
+
+    // The autosave writer must be a pure snapshot: it leaves filePath,
+    // modified and the undo stack untouched, so repeated rounds write the
+    // same shadow file instead of stacking suffixes and a later Ctrl+S
+    // still targets the real file.
+    void testAutosaveDoesNotMutateDocument() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString real = dir.filePath(QStringLiteral("foo.rcx"));
+
+        RcxDocument doc;
+        doc.filePath = real;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "T"; root.name = "t";
+        doc.tree.addNode(root);
+        // Dirty undo stack → doc counts as modified
+        doc.undoStack.push(new QUndoCommand(QStringLiteral("edit")));
+        QVERIFY(doc.modified);
+        QVERIFY(doc.undoStack.canUndo());
+
+        // Round 1 — the exact call MainWindow::autosaveAllModifiedDocs makes
+        QVERIFY(doc.saveCopy(autosaveShadowPath(doc.filePath)));
+        QVERIFY(QFile::exists(real + QStringLiteral(".autosave")));
+        QCOMPARE(doc.filePath, real);              // still points at the real file
+        QVERIFY(doc.modified);                     // still dirty (snapshot, not save)
+        QVERIFY(doc.undoStack.canUndo());          // undo history preserved
+
+        // Round 2 — same shadow path, no stacked suffix
+        QVERIFY(doc.saveCopy(autosaveShadowPath(doc.filePath)));
+        QVERIFY(QFile::exists(real + QStringLiteral(".autosave")));
+        QVERIFY(!QFile::exists(real + QStringLiteral(".autosave.autosave")));
+        QCOMPARE(doc.filePath, real);
+
+        // Round 3 — even a doc opened from a shadow (filePath ending in
+        // .autosave) writes that same path instead of stacking
+        doc.filePath = real + QStringLiteral(".autosave");
+        QVERIFY(doc.saveCopy(autosaveShadowPath(doc.filePath)));
+        QVERIFY(!QFile::exists(real + QStringLiteral(".autosave.autosave")));
+        QCOMPARE(doc.filePath, real + QStringLiteral(".autosave"));
+    }
+
+    // save() keeps its original contract: write the file AND make the
+    // document reflect that save (filePath retargeted, undo stack clean).
+    void testSaveStillRetargetsDocument() {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString real = dir.filePath(QStringLiteral("foo.rcx"));
+
+        RcxDocument doc;
+        doc.filePath = real;
+        rcx::Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "T"; root.name = "t";
+        doc.tree.addNode(root);
+
+        QVERIFY(doc.save(real));
+        QVERIFY(QFile::exists(real));
+        QCOMPARE(doc.filePath, real);
+        QVERIFY(!doc.modified);
+        QVERIFY(!doc.undoStack.canUndo());
     }
 };
 

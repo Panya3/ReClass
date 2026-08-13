@@ -24,6 +24,18 @@ enum class TypePopupMode;
 
 // ── Document ──
 
+// Autosave shadow path for a real project file. Repeated autosave rounds
+// must never stack suffixes: any trailing ".autosave" is stripped first so
+// foo.rcx → foo.rcx.autosave, while foo.rcx.autosave (a shadow opened
+// directly, or a filePath retargeted by an older buggy autosave) stays
+// foo.rcx.autosave instead of growing into foo.rcx.autosave.autosave…
+inline QString autosaveShadowPath(QString path) {
+    static const QString kSuffix = QStringLiteral(".autosave");
+    while (path.endsWith(kSuffix))
+        path.chop(kSuffix.size());
+    return path + kSuffix;
+}
+
 class RcxDocument : public QObject {
     Q_OBJECT
 public:
@@ -74,6 +86,11 @@ public:
                           bool typeHints = false, bool showComments = true,
                           SymbolLookupFn symbolLookup = {}) const;
     bool save(const QString& path);
+    // Serialize to `path` WITHOUT any document-state side effects: unlike
+    // save(), filePath, modified and the undo stack are left untouched.
+    // Used by the autosave shadow writer so a recovery snapshot can never
+    // retarget the document's real file or clear its dirty state.
+    bool saveCopy(const QString& path);
     bool load(const QString& path);
     void loadData(const QString& binaryPath);
     void loadData(const QByteArray& data);

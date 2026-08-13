@@ -177,7 +177,7 @@ ComposeResult RcxDocument::compose(uint64_t viewRootId, bool compactColumns,
                         showComments, std::move(symbolLookup));
 }
 
-bool RcxDocument::save(const QString& path) {
+bool RcxDocument::saveCopy(const QString& path) {
     QJsonObject json = tree.toJson();
 
     // Save type aliases
@@ -193,6 +193,12 @@ bool RcxDocument::save(const QString& path) {
     if (!file.open(QIODevice::WriteOnly))
         return false;
     file.write(jdoc.toJson(QJsonDocument::Indented));
+    return true;
+}
+
+bool RcxDocument::save(const QString& path) {
+    if (!saveCopy(path))
+        return false;
     filePath = path;
     undoStack.setClean();
     modified = false;
