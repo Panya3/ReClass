@@ -13,6 +13,9 @@
 #include "controller.h"
 #include "core.h"
 #include "typeselectorpopup.h"
+#include "widgets/fieldlayoutdialog.h"
+#include <QLineEdit>
+#include <QPushButton>
 
 using namespace rcx;
 
@@ -156,6 +159,158 @@ private slots:
 
         delete doc;
         delete doc2;
+    }
+
+    // ── Two delete modes ──
+    // removeNode(idx, keepOffsets=true) leaves the remaining siblings' offsets
+    // untouched (the deleted span stays as a gap); the default compacts them
+    // up by the deleted size. Both must undo cleanly.
+    void testDeleteKeepOffsets() {
+        auto idxOf = [&](const QString& name) {
+            for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+                if (m_doc->tree.nodes[i].name == name) return i;
+            return -1;
+        };
+        int u8 = idxOf(QStringLiteral("field_u8"));  // offset 8, 1 byte
+        QVERIFY(u8 >= 0);
+
+        // Mode 2: keep offsets
+        m_ctrl->removeNode(u8, /*keepOffsets=*/true);
+        QCOMPARE(m_doc->tree.nodes[idxOf(QStringLiteral("pad0"))].offset, 9);
+        QCOMPARE(m_doc->tree.nodes[idxOf(QStringLiteral("field_hex"))].offset, 12);
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[idxOf(QStringLiteral("field_u8"))].offset, 8);
+
+        // Mode 1: compact (default) — later siblings shift up by 1
+        int u8b = idxOf(QStringLiteral("field_u8"));
+        m_ctrl->removeNode(u8b);
+        QCOMPARE(m_doc->tree.nodes[idxOf(QStringLiteral("pad0"))].offset, 8);
+        QCOMPARE(m_doc->tree.nodes[idxOf(QStringLiteral("field_hex"))].offset, 11);
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes[idxOf(QStringLiteral("field_u8"))].offset, 8);
+    }
+
+    // ── Offset conflict descriptions for the insert/edit dialogs ──
+    // buildSmallTree: field_u32 @0 (4B), field_float @4 (4B), ...
+    void testDescribeOffsetConflict() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;  // TestStruct
+        // Duplicate start offset
+        QVERIFY(!m_ctrl->describeOffsetConflict(rootId, 0, 4).isEmpty());
+        // Different offset but size eats into a neighbour
+        QVERIFY(!m_ctrl->describeOffsetConflict(rootId, 2, 4).isEmpty());
+        // Free slot → empty description
+        QVERIFY(m_ctrl->describeOffsetConflict(rootId, 0x20, 4).isEmpty());
+        // Zero-sized placements never conflict (containers being drafted)
+        QVERIFY(m_ctrl->describeOffsetConflict(rootId, 0, 0).isEmpty());
+        // Root-level (parentId 0) is exempt
+        QVERIFY(m_ctrl->describeOffsetConflict(0, 0, 4).isEmpty());
+        // Moving a node onto its own slot is fine (excludeId)
+        int fi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == QStringLiteral("field_u32")) { fi = i; break; }
+        QVERIFY(fi >= 0);
+        QVERIFY(m_ctrl->describeOffsetConflict(rootId, 0, 4,
+                    m_doc->tree.nodes[fi].id).isEmpty());
+    }
+
+    // ── Shift-offsets selection collection: array-element / member rows
+    //    all decode to the SAME node id, so the collected index list must
+    //    be deduped — otherwise the shift delta would apply twice and
+    //    double-move the node. Cross-parent selections must be refused.
+    void testCollectSameParentIndicesDedupes() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;  // TestStruct
+
+        // Add an array field to TestStruct
+        rcx::Node arr;
+        arr.kind = NodeKind::Array;
+        arr.name = QStringLiteral("arr");
+        arr.parentId = rootId;
+        arr.offset = 0x30;
+        arr.arrayLen = 4;
+        arr.elementKind = NodeKind::UInt32;
+        m_doc->tree.addNode(arr);
+        uint64_t arrId = m_doc->tree.nodes.last().id;
+
+        // Two element rows of the same array in one selection
+        QSet<uint64_t> sel;
+        sel.insert(rcx::makeArrayElemSelId(arrId, 0));
+        sel.insert(rcx::makeArrayElemSelId(arrId, 1));
+
+        QVector<int> indices;
+        uint64_t parent = 0;
+        QVERIFY(m_ctrl->collectSameParentIndices(sel, indices, parent));
+        QCOMPARE(indices.size(), 1);              // deduped to the array node
+        QCOMPARE(m_doc->tree.nodes[indices[0]].id, arrId);
+        QCOMPARE(parent, rootId);
+
+        // Mixed selection: an element row + a real sibling field → same parent
+        int fieldIdx = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == QStringLiteral("field_u32")) { fieldIdx = i; break; }
+        QVERIFY(fieldIdx >= 0);
+        QSet<uint64_t> mixed;
+        mixed.insert(rcx::makeArrayElemSelId(arrId, 2));
+        mixed.insert(m_doc->tree.nodes[fieldIdx].id);
+        QVERIFY(m_ctrl->collectSameParentIndices(mixed, indices, parent));
+        QCOMPARE(indices.size(), 2);
+
+        // Cross-parent selection → refused
+        rcx::Node other;
+        other.kind = NodeKind::Struct;
+        other.name = QStringLiteral("Other");
+        other.parentId = 0;  // a second top-level class
+        other.offset = 0x40;
+        m_doc->tree.addNode(other);
+        uint64_t otherId = m_doc->tree.nodes.last().id;
+        QSet<uint64_t> cross;
+        cross.insert(rcx::makeArrayElemSelId(arrId, 0));
+        cross.insert(otherId);
+        QVERIFY(!m_ctrl->collectSameParentIndices(cross, indices, parent));
+    }
+
+    // ── Insert dialog button honesty: a malformed / negative offset must
+    //    disable OK (nothing committable) instead of offering a misleading
+    //    "Insert as Draft" that silently no-ops on click. Only a real
+    //    overlap gets the draft escape hatch.
+    void testFieldDialogOkDisabledOnBadOffset() {
+        using rcx::FieldLayoutDialog;
+        FieldLayoutDialog dlg(FieldLayoutDialog::InsertField, 0x10,
+                              NodeKind::Hex32, QStringLiteral("f"),
+                              [](int off, NodeKind) -> QString {
+                                  return off == 0x10
+                                      ? QStringLiteral("0x10 is taken")
+                                      : QString();
+                              },
+                              QStringLiteral("Insert Field"));
+
+        auto* offsetEdit = dlg.findChild<QLineEdit*>();
+        QVERIFY(offsetEdit);
+        QPushButton* ok = nullptr;
+        for (auto* b : dlg.findChildren<QPushButton*>()) {
+            if (b->text() == QStringLiteral("Insert")
+                || b->text() == QStringLiteral("Insert as Draft")) {
+                ok = b;
+                break;
+            }
+        }
+        QVERIFY(ok);
+
+        // Default offset conflicts → draft escape hatch offered
+        QVERIFY(ok->isEnabled());
+        QCOMPARE(ok->text(), QStringLiteral("Insert as Draft"));
+
+        // Malformed offset → OK disabled, no misleading draft label
+        offsetEdit->setText(QStringLiteral("zzz"));
+        QVERIFY(!ok->isEnabled());
+
+        // Negative offset → OK disabled
+        offsetEdit->setText(QStringLiteral("-0x4"));
+        QVERIFY(!ok->isEnabled());
+
+        // Free offset → plain "Insert", enabled
+        offsetEdit->setText(QStringLiteral("0x20"));
+        QVERIFY(ok->isEnabled());
+        QCOMPARE(ok->text(), QStringLiteral("Insert"));
     }
 
     // ── Repro: renaming a field around a virtually-expanded typed pointer

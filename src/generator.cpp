@@ -243,6 +243,10 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
 
     while (i < children.size()) {
         const Node& child = tree.nodes[children[i]];
+        // Draft fields are acknowledged-broken placeholders: never emitted.
+        // Their bytes fall into the pad/gap runs below, so the generated
+        // layout stays contiguous without the conflicting field.
+        if (child.draft) { i++; continue; }
         int childSize;
         if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
             childSize = tree.structSpan(child.id, &ctx.childMap);

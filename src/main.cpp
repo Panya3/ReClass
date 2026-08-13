@@ -5535,8 +5535,10 @@ void MainWindow::showShortcutsDialog() {
         {QStringLiteral(";"),                   QStringLiteral("Edit comment")},
         {QStringLiteral("Ctrl+Shift+↑/↓"), QStringLiteral("Reorder field")},
         {QStringLiteral("Ctrl+D"),              QStringLiteral("Duplicate node")},
-        {QStringLiteral("Delete"),              QStringLiteral("Delete selected node(s)")},
-        {QStringLiteral("Insert / Shift+Ins"),  QStringLiteral("Insert hex64 / hex32 above")},
+        {QStringLiteral("Delete"),              QStringLiteral("Delete selected node(s) (shift up)")},
+        {QStringLiteral("Shift+Del"),           QStringLiteral("Delete selected node(s), keep offsets")},
+        {QStringLiteral("Insert / Shift+Ins"),  QStringLiteral("Insert field… (offset, type, name)")},
+        {QStringLiteral("O"),                   QStringLiteral("Edit offset")},
 
         {QStringLiteral("Type changes"),       {}, true},
         {QStringLiteral("1 – 5"),          QStringLiteral("Hex8 / Hex16 / Hex32 / Hex64 / Hex128")},

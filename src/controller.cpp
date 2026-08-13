@@ -16,6 +16,7 @@
 #include "widgets/themed_inputdialog.h"
 #include "widgets/dialog_button.h"
 #include "widgets/enum_picker_popup.h"
+#include "widgets/fieldlayoutdialog.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
@@ -1108,15 +1109,35 @@ void RcxController::connectEditor(RcxEditor* editor) {
         if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
     });
 
-    // Insert key shortcut
+    // Insert key shortcut — opens the Insert Field dialog (offset, type,
+    // name) instead of the old blind insert-above-and-shift. The dialog
+    // live-checks the offset against siblings; a conflicting offset commits
+    // as a draft or is cancelled.
     connect(editor, &RcxEditor::insertAboveRequested,
             this, [this](int nodeIdx, NodeKind kind) {
-        if (nodeIdx >= 0)
-            insertNodeAbove(nodeIdx, kind, QStringLiteral("field"));
-        else {
-            uint64_t target = m_viewRootId ? m_viewRootId : 0;
-            insertNode(target, -1, kind, QStringLiteral("field"));
+        insertNodeFromDialog(nodeIdx, kind);
+    });
+
+    // Shift+Delete — delete without shifting remaining siblings up
+    // (leaves a gap at the old offsets).
+    connect(editor, &RcxEditor::deleteSelectedKeepOffsetsRequested,
+            this, [this]() {
+        QSet<uint64_t> ids = m_selIds;
+        QVector<int> indices;
+        for (uint64_t id : ids) {
+            int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(id));
+            if (idx >= 0) indices.append(idx);
         }
+        if (indices.size() > 1)
+            batchRemoveNodes(indices, /*keepOffsets=*/true);
+        else if (indices.size() == 1)
+            removeNode(indices.first(), /*keepOffsets=*/true);
+    });
+
+    // O — Edit Offset… on the current field
+    connect(editor, &RcxEditor::editOffsetRequested,
+            this, [this](int nodeIdx) {
+        editNodeOffset(nodeIdx);
     });
 
     // Ctrl+Shift+Up/Down: reorder field among siblings
@@ -2913,7 +2934,277 @@ void RcxController::insertNodeAbove(int beforeIdx, NodeKind kind, const QString&
     m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, adjs}));
 }
 
-void RcxController::removeNode(int nodeIdx) {
+// ── New-field / layout dialog flow ──
+
+int RcxController::structEndAligned(uint64_t parentId, NodeKind kind) const {
+    int maxEnd = 0;
+    auto siblings = m_doc->tree.childrenOf(parentId);
+    for (int si : siblings) {
+        const Node& sn = m_doc->tree.nodes[si];
+        if (sn.draft) continue;  // drafts aren't counted
+        int sz = (sn.kind == NodeKind::Struct || sn.kind == NodeKind::Array)
+            ? m_doc->tree.structSpan(sn.id) : sn.byteSize();
+        int end = sn.offset + sz;
+        if (end > maxEnd) maxEnd = end;
+    }
+    int align = alignmentFor(kind);
+    if (align <= 1) return maxEnd;
+    return (maxEnd + align - 1) / align * align;
+}
+
+int RcxController::suggestedInsertOffset(uint64_t parentId, int nodeIdx,
+                                         NodeKind kind) const {
+    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size())
+        return structEndAligned(parentId, kind);
+    const Node& before = m_doc->tree.nodes[nodeIdx];
+    int size = sizeForKind(kind);
+    if (size <= 0) size = 8;  // containers have dynamic size — assume 8 for the slot fit
+    int align = alignmentFor(kind);
+    if (align <= 1) align = 1;
+
+    // Latest end among non-draft siblings strictly before `before`.
+    int prevEnd = 0;
+    auto siblings = m_doc->tree.childrenOf(parentId);
+    for (int si : siblings) {
+        if (si == nodeIdx) continue;
+        const Node& sib = m_doc->tree.nodes[si];
+        if (sib.draft) continue;
+        if (sib.offset >= before.offset) continue;
+        int sz = (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array)
+            ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
+        int end = sib.offset + sz;
+        if (end > prevEnd) prevEnd = end;
+    }
+    int candidate = (prevEnd + align - 1) / align * align;
+    if (candidate + size <= before.offset)
+        return candidate;
+    return structEndAligned(parentId, kind);
+}
+
+QString RcxController::describeOffsetConflict(uint64_t parentId, int offset,
+                                              int size,
+                                              uint64_t excludeId) const {
+    if (parentId == 0 || size <= 0) return QString();
+    int pi = m_doc->tree.indexOfId(parentId);
+    if (pi >= 0 && m_doc->tree.nodes[pi].isUnion())
+        return QString();  // union members overlap by design
+    int64_t lo = offset;
+    int64_t hi = (int64_t)offset + size;
+    auto siblings = m_doc->tree.childrenOf(parentId);
+    for (int si : siblings) {
+        const Node& sib = m_doc->tree.nodes[si];
+        if (sib.id == excludeId) continue;
+        if (sib.draft) continue;  // drafts are acknowledged placeholders
+        int sz = (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array)
+            ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
+        if (sz <= 0) continue;
+        int64_t slo = sib.offset;
+        int64_t shi = (int64_t)sib.offset + sz;
+        if (lo < shi && slo < hi) {
+            QString name = sib.name.isEmpty()
+                ? QStringLiteral("field_%1").arg(sib.offset, 2, 16, QChar('0'))
+                : sib.name;
+            if (lo == slo)
+                return QStringLiteral("Offset 0x%1 is already used by '%2'")
+                    .arg(offset, 0, 16).arg(name);
+            return QStringLiteral("0x%1\u2013%2 overlaps '%3' (0x%4\u2013%5)")
+                .arg(offset, 0, 16).arg(hi, 0, 16)
+                .arg(name).arg(slo, 0, 16).arg(shi, 0, 16);
+        }
+    }
+    return QString();
+}
+
+void RcxController::insertNodeFromDialog(int nodeIdx, NodeKind defaultKind) {
+    // A structural insert shifts the layout: drop any armed byte selection
+    // so it doesn't re-paint onto the fresh field's address range (the
+    // delete paths clear it for the same reason).
+    for (auto* ed : m_editors)
+        if (ed) ed->clearByteSelection();
+
+    uint64_t parentId;
+    int defaultOffset;
+    if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+        const Node& before = m_doc->tree.nodes[nodeIdx];
+        parentId = before.parentId;
+        defaultOffset = suggestedInsertOffset(parentId, nodeIdx, defaultKind);
+    } else {
+        parentId = m_viewRootId ? m_viewRootId : 0;
+        defaultOffset = (parentId == 0) ? 0 : structEndAligned(parentId, defaultKind);
+    }
+
+    auto validate = [this, parentId](int offset, NodeKind kind) -> QString {
+        int size = sizeForKind(kind);
+        if (size <= 0) size = 8;  // containers: span check happens post-insert
+        return describeOffsetConflict(parentId, offset, size);
+    };
+
+    FieldLayoutDialog dlg(FieldLayoutDialog::InsertField, defaultOffset,
+                          defaultKind, QStringLiteral("field"), validate,
+                          QStringLiteral("Insert Field"),
+                          qobject_cast<QWidget*>(parent()));
+    if (dlg.exec() != QDialog::Accepted) return;
+    auto r = dlg.result();
+
+    Node n;
+    n.kind     = r.kind;
+    n.name     = r.name.isEmpty() ? QStringLiteral("field") : r.name;
+    n.parentId = parentId;
+    n.offset   = r.offset;
+    n.draft    = r.asDraft;
+    n.id       = m_doc->tree.reserveId();
+
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+    refresh();
+
+    // Select the fresh field so the user sees what just landed. refresh()
+    // (above) painted the OLD selection, so re-apply the overlay here —
+    // otherwise the new row stays unpainted until the next ~200 ms tick.
+    int ni = m_doc->tree.indexOfId(n.id);
+    if (ni >= 0) {
+        m_selIds.clear();
+        m_selIds.insert(n.id);
+        m_anchorLine = -1;
+        applySelectionOverlays();
+        emit selectionChanged(1);
+        emit nodeSelected(ni);
+    }
+    if (n.draft)
+        emit statusHint(QStringLiteral(
+            "Inserted as draft \u2014 offset conflicts with an existing field; "
+            "not counted or emitted until the offset is fixed."));
+}
+
+void RcxController::editNodeOffset(int nodeIdx) {
+    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+    const Node& node = m_doc->tree.nodes[nodeIdx];
+
+    auto validate = [this, node](int offset, NodeKind) -> QString {
+        int sz = (node.kind == NodeKind::Struct || node.kind == NodeKind::Array)
+            ? m_doc->tree.structSpan(node.id) : node.byteSize();
+        return describeOffsetConflict(node.parentId, offset, sz, node.id);
+    };
+
+    FieldLayoutDialog dlg(FieldLayoutDialog::EditOffset, node.offset, node.kind,
+                          QString(), validate, QStringLiteral("Edit Offset"),
+                          qobject_cast<QWidget*>(parent()));
+    if (dlg.exec() != QDialog::Accepted) return;
+    auto r = dlg.result();
+    if (r.offset == node.offset && r.asDraft == node.draft) return;
+
+    m_doc->undoStack.beginMacro(QStringLiteral("Edit offset"));
+    if (r.offset != node.offset)
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeOffset{node.id, node.offset, r.offset}));
+    // A field whose offset is fixed to a valid position becomes usable
+    // again immediately; saving it onto a conflicting position marks draft.
+    if (node.draft != r.asDraft)
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::SetDraft{node.id, node.draft, r.asDraft}));
+    m_doc->undoStack.endMacro();
+    refresh();
+}
+
+bool RcxController::collectSameParentIndices(const QSet<uint64_t>& selIds,
+                                             QVector<int>& outIndices,
+                                             uint64_t& parentId) const {
+    outIndices.clear();
+    parentId = 0;
+    QSet<uint64_t> seenIds;
+    bool first = true;
+    for (uint64_t id : selIds) {
+        int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(id));
+        if (idx < 0) continue;
+        const uint64_t nid = m_doc->tree.nodes[idx].id;
+        // Encoded rows (array elements / enum members / footers) all decode
+        // to the same base node — dedupe so the shift delta applies once.
+        if (seenIds.contains(nid)) continue;
+        seenIds.insert(nid);
+        if (first) { parentId = m_doc->tree.nodes[idx].parentId; first = false; }
+        else if (m_doc->tree.nodes[idx].parentId != parentId) return false;
+        outIndices.append(idx);
+    }
+    return !outIndices.isEmpty();
+}
+
+void RcxController::shiftSelectedOffsets(int anchorIdx) {
+    Q_UNUSED(anchorIdx);
+    QVector<int> indices;
+    uint64_t parentId = 0;
+    if (!collectSameParentIndices(m_selIds, indices, parentId) || parentId == 0) {
+        emit statusHint(QStringLiteral(
+            "Shift offsets works on selected fields of one struct "
+            "(root-level classes are excluded)"));
+        return;
+    }
+    std::sort(indices.begin(), indices.end(), [&](int a, int b) {
+        return m_doc->tree.nodes[a].offset < m_doc->tree.nodes[b].offset;
+    });
+    const int curStart = m_doc->tree.nodes[indices.first()].offset;
+
+    auto validate = [this, indices, curStart, parentId](int targetStart, NodeKind) -> QString {
+        if (targetStart < 0) return QStringLiteral("Target start must be >= 0");
+        QSet<uint64_t> moved;
+        for (int idx : indices) moved.insert(m_doc->tree.nodes[idx].id);
+        for (int idx : indices) {
+            const Node& n = m_doc->tree.nodes[idx];
+            int newOff = n.offset - curStart + targetStart;
+            int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
+                ? m_doc->tree.structSpan(n.id) : n.byteSize();
+            if (sz <= 0) continue;
+            int64_t lo = newOff;
+            int64_t hi = (int64_t)newOff + sz;
+            auto siblings = m_doc->tree.childrenOf(parentId);
+            for (int si : siblings) {
+                const Node& sib = m_doc->tree.nodes[si];
+                if (moved.contains(sib.id)) continue;
+                if (sib.draft) continue;
+                int ssz = (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array)
+                    ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
+                if (ssz <= 0) continue;
+                int64_t slo = sib.offset;
+                int64_t shi = (int64_t)sib.offset + ssz;
+                if (lo < shi && slo < hi) {
+                    QString name = sib.name.isEmpty()
+                        ? QStringLiteral("field_%1").arg(sib.offset, 2, 16, QChar('0'))
+                        : sib.name;
+                    return QStringLiteral("Block would overlap '%1' (0x%2\u2013%3)")
+                        .arg(name).arg(slo, 0, 16).arg(shi, 0, 16);
+                }
+            }
+        }
+        return QString();
+    };
+
+    FieldLayoutDialog dlg(FieldLayoutDialog::ShiftOffsets, curStart,
+                          NodeKind::Hex64, QString(), validate,
+                          QStringLiteral("Shift Offsets"),
+                          qobject_cast<QWidget*>(parent()));
+    if (dlg.exec() != QDialog::Accepted) return;
+    auto r = dlg.result();
+    if (r.offset == curStart) return;
+
+    const int delta = r.offset - curStart;
+    m_doc->undoStack.beginMacro(QStringLiteral("Shift offsets"));
+    for (int idx : indices) {
+        const Node& n = m_doc->tree.nodes[idx];
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeOffset{n.id, n.offset, n.offset + delta}));
+    }
+    m_doc->undoStack.endMacro();
+    refresh();
+}
+
+void RcxController::setNodeDraft(uint64_t nodeId, bool draft) {
+    int idx = m_doc->tree.indexOfId(nodeId);
+    if (idx < 0) return;
+    bool old = m_doc->tree.nodes[idx].draft;
+    if (old == draft) return;
+    m_doc->undoStack.push(new RcxCommand(this, cmd::SetDraft{nodeId, old, draft}));
+    refresh();
+}
+
+void RcxController::removeNode(int nodeIdx, bool keepOffsets) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
     const Node& node = m_doc->tree.nodes[nodeIdx];
     uint64_t nodeId = node.id;
@@ -2924,9 +3215,11 @@ void RcxController::removeNode(int nodeIdx) {
         ? m_doc->tree.structSpan(node.id) : node.byteSize();
     int deletedEnd = node.offset + deletedSize;
 
-    // Find siblings after this node and compute offset adjustments
+    // Find siblings after this node and compute offset adjustments. The
+    // keepOffsets variant deletes WITHOUT shifting the remaining siblings
+    // up — the deleted span stays as a gap at the old offsets.
     QVector<cmd::OffsetAdj> adjs;
-    if (parentId != 0) {  // only adjust if not root-level
+    if (parentId != 0 && !keepOffsets) {  // only adjust if not root-level
         auto siblings = m_doc->tree.childrenOf(parentId);
         for (int si : siblings) {
             if (si == nodeIdx) continue;
@@ -3497,6 +3790,10 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].comment = isUndo ? c.oldComment : c.newComment;
+        } else if constexpr (std::is_same_v<T, cmd::SetDraft>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0)
+                tree.nodes[idx].draft = isUndo ? c.oldVal : c.newVal;
         }
     }, command);
 
@@ -4502,14 +4799,26 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 }
             }
             auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
-            insertMenu->addAction("Insert 4 Above\tShift+Ins", [this, firstIdx]() {
-                if (firstIdx >= 0)
-                    insertNodeAbove(firstIdx, NodeKind::Hex32, QStringLiteral("field"));
+            insertMenu->addAction("Insert Field...", [this, firstIdx]() {
+                insertNodeFromDialog(firstIdx, NodeKind::Hex64);
             });
-            insertMenu->addAction("Insert 8 Above\tIns", [this, firstIdx]() {
-                if (firstIdx >= 0)
-                    insertNodeAbove(firstIdx, NodeKind::Hex64, QStringLiteral("field"));
-            });
+        }
+
+        // ── Shift Offsets (same-parent selection) ──
+        {
+            bool sameParent = true;
+            uint64_t firstParent = 0;
+            bool fp = true;
+            for (uint64_t id : ids) {
+                int idx = m_doc->tree.indexOfId(id);
+                if (idx < 0) { sameParent = false; break; }
+                if (fp) { firstParent = m_doc->tree.nodes[idx].parentId; fp = false; }
+                else if (m_doc->tree.nodes[idx].parentId != firstParent) { sameParent = false; break; }
+            }
+            if (sameParent && firstParent != 0)
+                menu.addAction(icon("edit.svg"), "Shift Offsets...", [this]() {
+                    shiftSelectedOffsets(-1);
+                });
         }
 
         // Check if all selected nodes share the same parent (required for grouping)
@@ -4573,6 +4882,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
         menu.addAction(icon("trash.svg"), QString("Delete %1 nodes").arg(count), [this, collectIndices]() {
             batchRemoveNodes(collectIndices());
+        });
+        menu.addAction(icon("trash.svg"),
+                       QString("Delete %1 nodes (keep offsets)\tShift+Del").arg(count),
+                       [this, collectIndices]() {
+            batchRemoveNodes(collectIndices(), /*keepOffsets=*/true);
         });
 
         menu.addSeparator();
@@ -5036,13 +5350,8 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // ── Insert ► submenu ──
         {
             auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
-            insertMenu->addAction("Insert 4 Above\tShift+Ins",
-                [this, nodeIdx]() {
-                insertNodeAbove(nodeIdx, NodeKind::Hex32, QStringLiteral("field"));
-            });
-            insertMenu->addAction("Insert 8 Above\tIns",
-                [this, nodeIdx]() {
-                insertNodeAbove(nodeIdx, NodeKind::Hex64, QStringLiteral("field"));
+            insertMenu->addAction("Insert Field...\tIns", [this, nodeIdx]() {
+                insertNodeFromDialog(nodeIdx, NodeKind::Hex64);
             });
             insertMenu->addSeparator();
             insertMenu->addAction("Append bytes...", [this, &menu]() {
@@ -5257,6 +5566,13 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 
         menu.addSeparator();
 
+        // ── Edit Offset ──
+        menu.addAction(icon("edit.svg"), "Edit Offset...\tO", [this, nodeId]() {
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni >= 0) editNodeOffset(ni);
+        });
+        menu.addSeparator();
+
         // ── Duplicate / Delete ──
         menu.addAction(icon("files.svg"), "D&uplicate\tCtrl+D", [this, nodeId]() {
             int ni = m_doc->tree.indexOfId(nodeId);
@@ -5270,6 +5586,13 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             // batchRemoveNodes). No-op when nothing is byte-selected.
             if (editor) editor->clearByteSelection();
             removeNode(ni);
+        });
+        menu.addAction(icon("trash.svg"), "&Delete (keep offsets)\tShift+Del",
+                       [this, nodeId, editor]() {
+            int ni = m_doc->tree.indexOfId(nodeId);
+            if (ni < 0) return;
+            if (editor) editor->clearByteSelection();
+            removeNode(ni, /*keepOffsets=*/true);
         });
 
 
@@ -5505,6 +5828,11 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
 }
 
 void RcxController::batchRemoveNodes(const QVector<int>& nodeIndices) {
+    batchRemoveNodes(nodeIndices, /*keepOffsets=*/false);
+}
+
+void RcxController::batchRemoveNodes(const QVector<int>& nodeIndices,
+                                     bool keepOffsets) {
     QSet<uint64_t> idSet;
     for (int idx : nodeIndices) {
         if (idx >= 0 && idx < m_doc->tree.nodes.size())
@@ -5528,7 +5856,7 @@ void RcxController::batchRemoveNodes(const QVector<int>& nodeIndices) {
     m_doc->undoStack.beginMacro(QString("Delete %1 nodes").arg(idSet.size()));
     for (uint64_t id : idSet) {
         int idx = m_doc->tree.indexOfId(id);
-        if (idx >= 0) removeNode(idx);
+        if (idx >= 0) removeNode(idx, keepOffsets);
     }
     m_doc->undoStack.endMacro();
     m_suppressRefresh = false;

@@ -79,6 +79,46 @@ private slots:
         QVERIFY(!noAsserts.contains("static_assert"));
     }
 
+    // ── Draft fields are excluded from generated code ──
+    // A field whose offset conflicts with a sibling (and is flagged draft)
+    // must not appear in the output, and its bytes must not inflate the
+    // struct — the footprint stays the active layout's.
+
+    void testDraftFieldSkipped() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "DraftStruct";
+        root.structTypeName = "DraftStruct";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        auto add = [&](int off, rcx::NodeKind k, const char* name, bool draft = false) {
+            rcx::Node n;
+            n.kind = k;
+            n.name = name;
+            n.parentId = rootId;
+            n.offset = off;
+            n.draft = draft;
+            tree.addNode(n);
+        };
+
+        add(0, rcx::NodeKind::Int32, "a");
+        // Draft overlapping `a` (same offset) — must not be emitted
+        add(0, rcx::NodeKind::Int64, "draft_overlap", /*draft=*/true);
+        add(4, rcx::NodeKind::Float, "b");
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true);
+
+        QVERIFY(result.contains("int32_t a;"));
+        QVERIFY(result.contains("float b;"));
+        QVERIFY(!result.contains("draft_overlap"));
+        // Footprint stays 8 bytes — the draft doesn't count
+        QVERIFY(result.contains("// sizeof 0x8"));
+    }
+
     // ── Padding gap detection ──
 
     void testPaddingGaps() {

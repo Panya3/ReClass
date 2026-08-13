@@ -32,6 +32,73 @@ private slots:
         }
     }
 
+    void testDraftSerializationRoundTrip() {
+        // Draft=true must serialize and come back
+        rcx::Node n;
+        n.kind = rcx::NodeKind::Hex32;
+        n.name = QStringLiteral("f");
+        n.offset = 0x10;
+        n.draft = true;
+        QJsonObject o = n.toJson();
+        QCOMPARE(o["draft"].toBool(false), true);
+        rcx::Node back = rcx::Node::fromJson(o);
+        QCOMPARE(back.draft, true);
+
+        // Draft=false must not emit the key (keeps old files byte-identical)
+        rcx::Node plain;
+        plain.kind = rcx::NodeKind::Hex64;
+        QVERIFY(!plain.toJson().contains("draft"));
+        QCOMPARE(rcx::Node::fromJson(plain.toJson()).draft, false);
+    }
+
+    void testStructSpanSkipsDraftChildren() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "R";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node a; a.kind = rcx::NodeKind::UInt64; a.name = "a"; a.parentId = rootId; a.offset = 0;
+        tree.addNode(a);
+        // Draft at 0x8 sized 8 would end at 0x10 — must NOT inflate the span
+        rcx::Node d; d.kind = rcx::NodeKind::UInt64; d.name = "d"; d.parentId = rootId; d.offset = 8; d.draft = true;
+        tree.addNode(d);
+        rcx::Node b; b.kind = rcx::NodeKind::UInt32; b.name = "b"; b.parentId = rootId; b.offset = 8;
+        tree.addNode(b);
+
+        // Active layout: a ends 0x8, b ends 0xC → span 0xC
+        QCOMPARE(tree.structSpan(rootId), 12);
+
+        // Same layout, draft flag cleared → the draft's extent counts
+        tree.nodes[2].draft = false;
+        QCOMPARE(tree.structSpan(rootId), 16);
+    }
+
+    void testFindOverlapsSkipsDraft() {
+        auto build = [](bool draftFlag) {
+            rcx::NodeTree tree;
+            rcx::Node root;
+            root.kind = rcx::NodeKind::Struct;
+            root.name = "R";
+            root.parentId = 0;
+            int ri = tree.addNode(root);
+            uint64_t rootId = tree.nodes[ri].id;
+            rcx::Node a; a.kind = rcx::NodeKind::UInt64; a.name = "a"; a.parentId = rootId; a.offset = 0;
+            tree.addNode(a);
+            rcx::Node d; d.kind = rcx::NodeKind::UInt64; d.name = "d"; d.parentId = rootId; d.offset = 0;
+            d.draft = draftFlag;
+            tree.addNode(d);
+            return tree;
+        };
+
+        // Acknowledged draft overlap → not reported
+        QCOMPARE(build(true).findOverlaps().size(), 0);
+        // Same layout without the draft flag → reported
+        QCOMPARE(build(false).findOverlaps().size(), 1);
+    }
+
     void testNodeTree_addAndChildren() {
         rcx::NodeTree tree;
         rcx::Node root;

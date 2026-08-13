@@ -5741,14 +5741,19 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         return false;
     case Qt::Key_Delete:
         // Byte selection → zero-fill the range. Node selection →
-        // existing delete-node behaviour. No selection at all → silent
-        // consume (matches today).
+        // delete-node behaviour: plain Delete shifts remaining siblings up,
+        // Shift+Delete keeps their offsets (leaves a gap at the old
+        // position). No selection at all → silent consume (matches today).
         if (m_byteSel.has_value()) {
             emit byteZeroFillRequested();
             return true;
         }
-        if (!m_currentSelIds.isEmpty())
-            emit deleteSelectedRequested();
+        if (!m_currentSelIds.isEmpty()) {
+            if (ke->modifiers() & Qt::ShiftModifier)
+                emit deleteSelectedKeepOffsetsRequested();
+            else
+                emit deleteSelectedRequested();
+        }
         return true;
     case Qt::Key_D:
         if ((ke->modifiers() & Qt::ControlModifier) && !m_currentSelIds.isEmpty()) {
@@ -5966,6 +5971,14 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
             NodeKind::Hex64, NodeKind::Hex128
         };
         emit quickTypeChangeRequested(ni, sizes[ke->key() - Qt::Key_1]);
+        return true;
+    }
+    case Qt::Key_O: {
+        // O = Edit Offset… — dialog with live conflict check against siblings
+        if (ke->modifiers() != Qt::NoModifier) return false;
+        int ni = currentNodeIndex();
+        if (ni < 0) return false;
+        emit editOffsetRequested(ni);
         return true;
     }
     case Qt::Key_P: {

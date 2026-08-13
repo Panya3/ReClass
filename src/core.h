@@ -255,6 +255,11 @@ struct Node {
     QVector<BitfieldMember> bitfieldMembers;       // Bitfield: per-bit member definitions
     QString  comment;          // User annotation (displayed as "// text" in comment column)
     bool     bigEndian  = false;   // Scalar value is big-endian (swap on display/parse)
+    // Draft: the field's offset conflicts with a sibling (duplicate offset
+    // or size eating into another field) and the user chose to keep it as a
+    // placeholder. Draft fields are excluded from the struct footprint
+    // (structSpan) and from generated code until the offset is fixed.
+    bool     draft      = false;
 
     // Leaf-only byte size. Returns 0 for Struct (container, unless it's a
     // bitfield which has a fixed container size) and Array-of-Struct/Array
@@ -331,6 +336,8 @@ struct Node {
             o["comment"] = comment;
         if (bigEndian)
             o["bigEndian"] = true;
+        if (draft)
+            o["draft"] = true;
         return o;
     }
     static Node fromJson(const QJsonObject& o) {
@@ -370,6 +377,7 @@ struct Node {
         }
         n.comment = o["comment"].toString();
         n.bigEndian = o["bigEndian"].toBool(false);
+        n.draft     = o["draft"].toBool(false);
         return n;
     }
 
@@ -614,6 +622,10 @@ struct NodeTree {
             ranges.reserve(it.value().size());
             for (int ci : it.value()) {
                 const Node& n = nodes[ci];
+                // Draft fields are acknowledged-broken placeholders — their
+                // overlap is intentional and already surfaced, so don't
+                // re-flag them in findOverlaps()/Ctrl+Shift+V reviews.
+                if (n.draft) continue;
                 int sz = (n.kind == NodeKind::Struct || n.kind == NodeKind::Array)
                     ? structSpan(n.id) : n.byteSize();
                 // Zero-sized nodes (unfinished containers etc.) can't
@@ -833,6 +845,9 @@ struct NodeTree {
         QVector<int> kids = childMap ? childMap->value(structId) : childrenOf(structId);
         for (int ci : kids) {
             const Node& c = nodes[ci];
+            // Draft children are acknowledged-broken placeholders: they must
+            // not inflate the footprint until their offset is fixed.
+            if (c.draft) continue;
             int sz = (c.kind == NodeKind::Struct || c.kind == NodeKind::Array)
                 ? structSpan(c.id, childMap, visited) : c.byteSize();
             int64_t end = (int64_t)c.offset + sz;
@@ -914,6 +929,9 @@ struct NodeTree {
         QVector<int> kids = childMap ? childMap->value(unionId) : childrenOf(unionId);
         for (int ci : kids) {
             const Node& c = nodes[ci];
+            // Draft members are placeholders — not counted toward the
+            // union's C size until their offset is fixed.
+            if (c.draft) continue;
             int sz;
             if (c.isUnion())
                 sz = unionSize(c.id, childMap, visited);
@@ -1314,6 +1332,7 @@ namespace cmd {
     struct ToggleRelative   { uint64_t nodeId; bool oldVal, newVal; };
     struct ToggleBigEndian  { uint64_t nodeId; bool oldVal, newVal; };
     struct ChangeComment    { uint64_t nodeId; QString oldComment, newComment; };
+    struct SetDraft         { uint64_t nodeId; bool oldVal, newVal; };
 }
 
 using Command = std::variant<
@@ -1323,7 +1342,7 @@ using Command = std::variant<
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
     cmd::ChangeParent,
     cmd::ToggleRelative,
-    cmd::ToggleBigEndian, cmd::ChangeComment
+    cmd::ToggleBigEndian, cmd::ChangeComment, cmd::SetDraft
 >;
 
 // ── Column spans (for inline editing) ──

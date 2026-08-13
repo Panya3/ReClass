@@ -140,7 +140,50 @@ public:
     void renameNode(int nodeIdx, const QString& newName);
     void insertNode(uint64_t parentId, int offset, NodeKind kind, const QString& name);
     void insertNodeAbove(int beforeIdx, NodeKind kind, const QString& name);
-    void removeNode(int nodeIdx);
+    // ── New-field / layout dialog flow ──
+    // Open the Insert Field dialog for the node at `nodeIdx` (or the view
+    // root when -1), pre-filled with the first free slot before it. On
+    // commit: exact placement (no sibling shifting); a conflicting offset
+    // commits the field as a DRAFT unless the user cancels.
+    void insertNodeFromDialog(int nodeIdx, NodeKind defaultKind);
+    // Open the Edit Offset dialog for an existing field. A valid new offset
+    // applies immediately (and clears any draft flag — a fixed field is
+    // usable again); a conflicting one offers "Save as Draft".
+    void editNodeOffset(int nodeIdx);
+    // Open the Shift Offsets dialog for the current multi-selection (all
+    // selected fields must share one parent). Moves the block so its first
+    // field lands at the given offset, preserving relative gaps; a block
+    // that would collide with unselected siblings is refused entirely.
+    void shiftSelectedOffsets(int anchorIdx);
+    // Resolve a set of encoded row selIds (array-element / enum-member /
+    // footer rows collapse to their base node via baseNodeIdFromSelId) into
+    // unique node indices that all share one parent. Returns false when the
+    // selection contains nodes with different parents or resolves empty.
+    // Deduping is load-bearing for the shift flow: two selected element rows
+    // of one array decode to the SAME node, and applying the delta twice
+    // would double-shift it.
+    bool collectSameParentIndices(const QSet<uint64_t>& selIds,
+                                  QVector<int>& outIndices,
+                                  uint64_t& parentId) const;
+    // Toggle the draft flag (context-menu "Mark as draft / active").
+    void setNodeDraft(uint64_t nodeId, bool draft);
+    // Human-readable conflict description for a candidate placement, or an
+    // empty string when [offset, offset+size) is free among non-draft
+    // siblings. Skips root-level parents and union containers (overlap is
+    // by design there). excludeId is the node being moved (edit/shift).
+    QString describeOffsetConflict(uint64_t parentId, int offset, int size,
+                                   uint64_t excludeId = 0) const;
+    // First aligned offset where a field of `kind` fits strictly before the
+    // node at `nodeIdx`; falls back to the struct's aligned end.
+    int suggestedInsertOffset(uint64_t parentId, int nodeIdx, NodeKind kind) const;
+    // Aligned offset just past the last (non-draft) sibling of `parentId`.
+    int structEndAligned(uint64_t parentId, NodeKind kind) const;
+    // keepOffsets=true deletes without shifting remaining siblings up
+    // (leaves a gap at the old offsets).
+    void removeNode(int nodeIdx, bool keepOffsets = false);
+    // keepOffsets overload (no default arg: the 1-arg batchRemoveNodes below
+    // must stay the single-argument entry point for existing callers).
+    void batchRemoveNodes(const QVector<int>& nodeIndices, bool keepOffsets);
     // Break bytes [selLo, selHi) into a new root class, inserting an
     // embedded Struct field at selLo in the original parent. Splits any
     // partially-overlapped hex siblings into left / right hex pads.

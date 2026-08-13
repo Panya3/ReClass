@@ -168,6 +168,8 @@ signals:
     void typePickerRequested(EditTarget target, int nodeIdx, QPoint globalPos);
     void sourcePopupRequested(QPoint globalPos);
     void insertAboveRequested(int nodeIdx, NodeKind kind);
+    // O — open the Edit Offset dialog for the current field.
+    void editOffsetRequested(int nodeIdx);
     void commentEditRequested();
     void relativeOffsetsChanged(bool relative);
     // Footer "✕ Hide popups" clicked — MainWindow persists "valuePopups"=false,
@@ -199,6 +201,9 @@ signals:
     // (or one enum member, when the parent is an enum) at the end.
     void appendSingleFieldRequested(uint64_t structId);
     void deleteSelectedRequested();
+    // Shift+Delete — delete without shifting remaining siblings up
+    // (the deleted span stays as a gap at the old offsets).
+    void deleteSelectedKeepOffsetsRequested();
     void duplicateSelectedRequested();
     // Real clipboard (rcx-clipboard/v1 MIME + plaintext fallback). Controller
     // handles the actual serialization/paste + undo; editor just signals.
