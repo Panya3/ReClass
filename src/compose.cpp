@@ -511,16 +511,23 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 if (refIdx >= 0) {
                     const Node& refNode = tree.nodes[refIdx];
                     if (refNode.isEnum() && !refNode.enumMembers.isEmpty()) {
+                        // Read the value exactly as the value column renders
+                        // it (readValueImpl honors node.bigEndian) so a match
+                        // can never contradict the displayed number.
+                        const bool be = node.bigEndian;
+                        auto rU16 = [&](uint64_t a) { uint16_t v = prov.readU16(a); return be ? qbswap(v) : v; };
+                        auto rU32 = [&](uint64_t a) { uint32_t v = prov.readU32(a); return be ? qbswap(v) : v; };
+                        auto rU64 = [&](uint64_t a) { uint64_t v = prov.readU64(a); return be ? qbswap(v) : v; };
                         int64_t v = 0;
                         switch (node.kind) {
                         case NodeKind::UInt8:  v = (int64_t)prov.readU8 (absAddr); break;
-                        case NodeKind::UInt16: v = (int64_t)prov.readU16(absAddr); break;
-                        case NodeKind::UInt32: v = (int64_t)prov.readU32(absAddr); break;
-                        case NodeKind::UInt64: v = (int64_t)prov.readU64(absAddr); break;
+                        case NodeKind::UInt16: v = (int64_t)rU16(absAddr); break;
+                        case NodeKind::UInt32: v = (int64_t)rU32(absAddr); break;
+                        case NodeKind::UInt64: v = (int64_t)rU64(absAddr); break;
                         case NodeKind::Int8:   v = (int8_t) prov.readU8 (absAddr); break;
-                        case NodeKind::Int16:  v = (int16_t)prov.readU16(absAddr); break;
-                        case NodeKind::Int32:  v = (int32_t)prov.readU32(absAddr); break;
-                        case NodeKind::Int64:  v = (int64_t)prov.readU64(absAddr); break;
+                        case NodeKind::Int16:  v = (int16_t)rU16(absAddr); break;
+                        case NodeKind::Int32:  v = (int32_t)rU32(absAddr); break;
+                        case NodeKind::Int64:  v = (int64_t)rU64(absAddr); break;
                         default: break;
                         }
                         QString memberName;
@@ -528,12 +535,59 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                             if (m.second == v) { memberName = m.first; break; }
                         }
                         if (!memberName.isEmpty()) {
-                            QString chipText = QStringLiteral("(") + memberName
-                                             + QStringLiteral(")");
-                            pushChip(ChipKind::Enum, chipText, [&](LineChip& c) {
-                                c.enumCurrentValue = v;
-                                c.enumRefNodeId    = node.refId;
-                            });
+                            // Match → the value column shows the member NAME
+                            // instead of the raw number, with the decimal
+                            // value in parens, all as ONE clickable pill:
+                            //   `RUNNING (1)`  (was: value `1` + `(RUNNING)`
+                            //   chip). The number is always non-negative —
+                            // signed fields display their unsigned
+                            // reinterpretation (Int32 -1 → 4294967295). No
+                            // match → the number renders as plain value,
+                            // no pill.
+                            quint64 unsignedV = (quint64)v;
+                            switch (node.kind) {
+                            case NodeKind::Int8:  unsignedV = (quint8) v; break;
+                            case NodeKind::Int16: unsignedV = (quint16)v; break;
+                            case NodeKind::Int32: unsignedV = (quint32)v; break;
+                            default: break;  // UInt kinds / Int64 already unsigned-widened
+                            }
+                            // Remove the numeric value from lineText (the
+                            // trailing non-space run — fmtNodeLine appends
+                            // the fitted value at the end; compose passes
+                            // carry no comment suffix) so the pill replaces
+                            // the number instead of duplicating it.
+                            int segEnd = lineText.size();
+                            while (segEnd > 0 && lineText.at(segEnd - 1) == QLatin1Char(' '))
+                                --segEnd;
+                            int segStart = segEnd;
+                            while (segStart > 0 && lineText.at(segStart - 1) != QLatin1Char(' '))
+                                --segStart;
+                            lineText = lineText.left(segStart);
+
+                            QString chipText = sanitizeChip(memberName
+                                             + QStringLiteral(" (")
+                                             + QString::number(unsignedV)
+                                             + QStringLiteral(")"));
+                            // Append the pill DIRECTLY after the retained
+                            // value-column padding (the name keeps its
+                            // column width + separator). pushChip would
+                            // trim that padding and glue the pill to the
+                            // name, leaving the value column visually
+                            // blank — the row would read as "no value"
+                            // instead of showing the name where the number
+                            // used to be. Appending in place keeps the
+                            // pill aligned with sibling rows' values.
+                            lineText += chipText;
+                            LineChip c;
+                            c.kind = ChipKind::Enum;
+                            c.text = chipText;
+                            c.startCol = LineGeometry::forLine(lm)
+                                             .documentColumn(lineText.size() - chipText.size());
+                            c.endCol   = LineGeometry::forLine(lm)
+                                             .documentColumn(lineText.size());
+                            c.enumCurrentValue = v;
+                            c.enumRefNodeId    = node.refId;
+                            lm.chips.push_back(std::move(c));
                         }
                     }
                 }
@@ -812,6 +866,108 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             lm.effectiveNameW = nameW;
             headerText = fmt::fmtStructHeader(node, depth, node.collapsed, typeW, nameW, state.compactColumns);
         }
+
+        // Enum-typed struct leaf: a Struct field whose refId points at an
+        // enum (the chooser models an enum pick as an inline Struct ref, so
+        // composeLeaf's enum chip never sees it and the header row would
+        // render with NO value at all). Resolve the member name here and
+        // attach the same clickable pill to the header line. Reading width
+        // comes from enumFieldStorageKind (shared with setNodeValue so
+        // display and edit can never diverge). Skipped once the field has
+        // real children — that shape is a container, not an enum pick.
+        if (state.showEnumChips && node.refId != 0
+            && node.kind == NodeKind::Struct
+            && childIndices(state, node.id).isEmpty()) {
+            int refIdx = tree.indexOfId(node.refId);
+            if (refIdx >= 0) {
+                const Node& refNode = tree.nodes[refIdx];
+                if (refNode.isEnum() && !refNode.enumMembers.isEmpty()) {
+                    NodeKind readKind = enumFieldStorageKind(node, refNode);
+                    int readSz = sizeForKind(readKind);
+                    if (readSz > 0 && prov.isReadable(absAddr, readSz)) {
+                        const bool be = node.bigEndian;
+                        auto rU16 = [&](uint64_t a) { uint16_t x = prov.readU16(a); return be ? qbswap(x) : x; };
+                        auto rU32 = [&](uint64_t a) { uint32_t x = prov.readU32(a); return be ? qbswap(x) : x; };
+                        auto rU64 = [&](uint64_t a) { uint64_t x = prov.readU64(a); return be ? qbswap(x) : x; };
+                        int64_t v = 0;
+                        switch (readKind) {
+                        case NodeKind::UInt8:  v = (int64_t)prov.readU8 (absAddr); break;
+                        case NodeKind::UInt16: v = (int64_t)rU16(absAddr); break;
+                        case NodeKind::UInt32: v = (int64_t)rU32(absAddr); break;
+                        case NodeKind::UInt64: v = (int64_t)rU64(absAddr); break;
+                        case NodeKind::Int8:   v = (int8_t) prov.readU8 (absAddr); break;
+                        case NodeKind::Int16:  v = (int16_t)rU16(absAddr); break;
+                        case NodeKind::Int32:  v = (int32_t)rU32(absAddr); break;
+                        case NodeKind::Int64:  v = (int64_t)rU64(absAddr); break;
+                        default: break;
+                        }
+                        QString memberName;
+                        for (const auto& m : refNode.enumMembers) {
+                            if (m.second == v) { memberName = m.first; break; }
+                        }
+                        // Match → "MEMBER (value)". No match → the raw
+                        // number, formatted exactly like the value column
+                        // (hex for UInt, decimal for Int) — a blank header
+                        // would re-create the "no value shown" report for
+                        // the most common case (uninitialized bytes like
+                        // 0xFF that are not members). Both render as the
+                        // same clickable pill so the value stays visible
+                        // AND editable via the picker's custom-value row.
+                        QString chipText;
+                        if (!memberName.isEmpty()) {
+                            quint64 unsignedV = (quint64)v;
+                            switch (readKind) {
+                            case NodeKind::Int8:  unsignedV = (quint8) v; break;
+                            case NodeKind::Int16: unsignedV = (quint16)v; break;
+                            case NodeKind::Int32: unsignedV = (quint32)v; break;
+                            default: break;
+                            }
+                            chipText = memberName
+                                     + QStringLiteral(" (")
+                                     + QString::number(unsignedV)
+                                     + QStringLiteral(")");
+                        } else {
+                            switch (readKind) {
+                            case NodeKind::UInt8:  chipText = fmt::fmtUInt8 ((uint8_t) v); break;
+                            case NodeKind::UInt16: chipText = fmt::fmtUInt16((uint16_t)v); break;
+                            case NodeKind::UInt32: chipText = fmt::fmtUInt32((uint32_t)v); break;
+                            case NodeKind::UInt64: chipText = fmt::fmtUInt64((uint64_t)v); break;
+                            case NodeKind::Int8:   chipText = fmt::fmtInt8 ((int8_t) v); break;
+                            case NodeKind::Int16:  chipText = fmt::fmtInt16((int16_t)v); break;
+                            case NodeKind::Int32:  chipText = fmt::fmtInt32((int32_t)v); break;
+                            case NodeKind::Int64:  chipText = fmt::fmtInt64((int64_t)v); break;
+                            default:               chipText = QString::number((qulonglong)v); break;
+                            }
+                        }
+                        if (chipText.contains(QChar('\n'))
+                            || chipText.contains(QChar('\r'))) {
+                            chipText.replace(QChar('\r'), QChar(' '));
+                            chipText.replace(QChar('\n'), QStringLiteral(" · "));
+                        }
+                            // Insert the pill before a trailing '{' (expanded
+                            // case) so it reads as the row's value; trim the
+                            // header padding like pushChip does.
+                            bool hadBrace = headerText.endsWith(QChar('{'));
+                            if (hadBrace) headerText.chop(1);
+                            while (headerText.endsWith(QLatin1Char(' ')))
+                                headerText.chop(1);
+                            headerText += QStringLiteral("  ") + chipText;
+                            LineChip c;
+                            c.kind = ChipKind::Enum;
+                            c.text = chipText;
+                            c.startCol = LineGeometry::forLine(lm)
+                                             .documentColumn(headerText.size() - chipText.size());
+                            c.endCol   = LineGeometry::forLine(lm)
+                                             .documentColumn(headerText.size());
+                            c.enumCurrentValue = v;
+                            c.enumRefNodeId    = node.refId;
+                            lm.chips.push_back(std::move(c));
+                            if (hadBrace) headerText += QStringLiteral(" {");
+                    }
+                }
+            }
+        }
+
         // Brace wrapping: move trailing '{' to its own line
         if (state.braceWrap && !node.collapsed && headerText.endsWith(QChar('{'))) {
             headerText.chop(1);

@@ -333,19 +333,45 @@ private:
 
     void applyFilter() {
         QString pat = m_filter->text().trimmed();
+        // A numeric query ("7", "0x10", "-1") can target a value that has
+        // no member — offer it as a custom row so the user can still set
+        // undocumented / out-of-enum values (mouse clicks on the enum pill
+        // route to this picker, so there is no other way to type one).
+        bool numeric = false;
+        int64_t numVal = 0;
+        if (!pat.isEmpty())
+            numVal = pat.toLongLong(&numeric, 0);
+        m_hasCustomRow = false;
+
         QVector<Member> visible;
         QVector<QVector<int>> mp;
         QVector<int> scores;
+        bool hasValueMatch = false;
         for (const auto& m : m_allMembers) {
             QVector<int> hits;
             int sc = 1;
             if (!pat.isEmpty()) {
                 sc = fuzzyScore(pat, m.name, &hits);
-                if (sc == 0) continue;
+                if (numeric && m.value == numVal) {
+                    // Numeric query matching a member by VALUE: keep the
+                    // row (fuzzy name matching would drop it) and rank it
+                    // top so Enter picks it directly.
+                    sc = 1;
+                    hits.clear();
+                    hasValueMatch = true;
+                } else if (sc == 0) {
+                    continue;
+                }
             }
             visible.append(m);
             mp.append(std::move(hits));
             scores.append(sc);
+        }
+        if (numeric && !hasValueMatch) {
+            visible.append(Member{QStringLiteral("= %1").arg(numVal), numVal});
+            mp.append(QVector<int>{});
+            scores.append(1);
+            m_hasCustomRow = true;
         }
         // Sort by score (search active) else by value ascending.
         QVector<int> order(visible.size());
@@ -367,6 +393,7 @@ private:
 
     void updateFooter() {
         int vis = m_model->rowCount();
+        if (m_hasCustomRow) vis -= 1;  // the custom row is not a member
         int tot = m_allMembers.size();
         const auto& t = ThemeManager::instance().current();
         if (tot == 0) {
@@ -447,6 +474,7 @@ private:
     int64_t m_currentValue = 0;
     QColor m_accent;
     ChosenFn m_onChosen;
+    bool m_hasCustomRow = false;
 };
 
 } // namespace rcx

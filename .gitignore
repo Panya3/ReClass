@@ -24,6 +24,10 @@ plugins/RcNetPluginCompatLayer/bridge/bin
 /CMakeFiles/
 /Testing/
 
+# ── Local-only build/test helpers (not committed) ──
+/build.py
+/test.py
+
 # ── Crash dumps ──
 *.dmp
 

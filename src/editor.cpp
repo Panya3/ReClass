@@ -4414,6 +4414,12 @@ static ColumnSpan narrowPtrValueSpan(const LineMeta& lm, const ColumnSpan& vs,
     if (!vs.valid) return vs;
     int clipEnd = vs.end;
     for (const auto& c : lm.chips) {
+        // Enum chips REPLACED the numeric value — the pill IS the value
+        // display, so clipping the editable span at it would collapse the
+        // span to nothing (breaking inline value editing + the heatmap
+        // change-highlight on enum rows). Pill clicks are still routed to
+        // the picker by the chip router before edit-target resolution.
+        if (c.kind == ChipKind::Enum) continue;
         if (c.startCol > vs.start && c.startCol < clipEnd)
             clipEnd = c.startCol;
     }

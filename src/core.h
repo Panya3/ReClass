@@ -171,6 +171,7 @@ inline constexpr NodeKind nativePointerKind(int pointerSize) {
 inline constexpr bool isContainerKind(NodeKind k) {
     return k == NodeKind::Struct || k == NodeKind::Array;
 }
+
 inline constexpr bool isStringKind(NodeKind k) {
     return k == NodeKind::UTF8 || k == NodeKind::UTF16;
 }
@@ -397,6 +398,31 @@ struct Node {
     bool isBitfield() const { return classKeyword == QStringLiteral("bitfield"); }
     bool isEnum() const { return resolvedClassKeyword() == QStringLiteral("enum"); }
 };
+
+// The scalar integer kinds that can back an enum's storage (8/16/32/64-bit,
+// signed or unsigned). UInt128/Int128 are excluded: enum member values are
+// int64_t, so wider kinds can never match a member anyway.
+inline constexpr bool isIntegerKind(NodeKind k) {
+    switch (k) {
+    case NodeKind::UInt8:  case NodeKind::UInt16:
+    case NodeKind::UInt32: case NodeKind::UInt64:
+    case NodeKind::Int8:   case NodeKind::Int16:
+    case NodeKind::Int32:  case NodeKind::Int64:
+        return true;
+    default:
+        return false;
+    }
+}
+// Storage kind of an enum-typed field that the chooser modeled as
+// Struct+refId→enum: the field's own elementKind when it's an integer kind
+// (the pick width), else the enum's underlying elementKind, else UInt32.
+// Single source of truth shared by compose (display) and setNodeValue
+// (picker commit) so the two can never read/write different widths.
+inline NodeKind enumFieldStorageKind(const Node& field, const Node& enumNode) {
+    NodeKind k = isIntegerKind(field.elementKind) ? field.elementKind
+                                                  : enumNode.elementKind;
+    return isIntegerKind(k) ? k : NodeKind::UInt32;
+}
 
 // ── Bookmark (named address, persists with the project) ──
 

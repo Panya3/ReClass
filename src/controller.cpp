@@ -3921,6 +3921,17 @@ void RcxController::setNodeValue(int nodeIdx, int subLine, const QString& text,
 
     // For vector components, redirect to float parsing at sub-offset
     NodeKind editKind = node.kind;
+    // Enum-typed struct leaf (kind=Struct + refId→enum — the chooser models
+    // an enum pick as an inline Struct ref): the underlying storage is an
+    // int, so write with enumFieldStorageKind — the SAME width compose uses
+    // to display the pill, so a pick can never read one size and write
+    // another. Without this redirect the enum picker's commit would parse
+    // against Struct (size 0) and silently no-op.
+    if (node.kind == NodeKind::Struct && node.refId != 0) {
+        int refIdx = m_doc->tree.indexOfId(node.refId);
+        if (refIdx >= 0 && m_doc->tree.nodes[refIdx].isEnum())
+            editKind = enumFieldStorageKind(node, m_doc->tree.nodes[refIdx]);
+    }
     if ((node.kind == NodeKind::Vec2 || node.kind == NodeKind::Vec3 ||
          node.kind == NodeKind::Vec4) && subLine >= 0) {
         addr += subLine * 4;

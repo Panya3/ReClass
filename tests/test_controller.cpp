@@ -887,6 +887,74 @@ private slots:
         QVERIFY(newIdx >= 0);
     }
 
+    // ── Test: setNodeValue on a Struct-kind enum ref (the shape the type
+    //    chooser produces for an enum pick) writes through the field's
+    //    elementKind width — without the redirect it would parse against
+    //    Struct (size 0) and silently no-op. Also covers the fallback to
+    //    the enum's own underlying kind when the field's elementKind isn't
+    //    an integer kind.
+    void testSetNodeValueStructEnumRef() {
+        auto* doc = new RcxDocument();
+        doc->tree.baseAddress = 0;
+
+        Node enumNode;
+        enumNode.kind = NodeKind::Struct;
+        enumNode.classKeyword = QStringLiteral("enum");
+        enumNode.structTypeName = QStringLiteral("XmlObjectID");
+        enumNode.name = QStringLiteral("UnnamedEnum2");
+        enumNode.elementKind = NodeKind::UInt8;
+        enumNode.enumMembers = {
+            {QStringLiteral("ID_NONE"), 0},
+            {QStringLiteral("ID_PC"),   1},
+            {QStringLiteral("ID_NPC"),  2},
+        };
+        int ei = doc->tree.addNode(enumNode);
+        uint64_t enumId = doc->tree.nodes[ei].id;
+
+        Node root; root.kind = NodeKind::Struct; root.name = "R";
+        root.parentId = 0; root.offset = 0;
+        int ri = doc->tree.addNode(root);
+        uint64_t rootId = doc->tree.nodes[ri].id;
+
+        Node field;
+        field.kind = NodeKind::Struct;
+        field.name = QStringLiteral("m_eID");
+        field.parentId = rootId;
+        field.offset = 8;
+        field.refId = enumId;
+        field.structTypeName = QStringLiteral("XmlObjectID");
+        // elementKind left at Struct on purpose: exercises the fallback to
+        // the enum's underlying UInt8 (the chooser usually sets UInt8, but
+        // legacy/foreign files can omit it).
+        field.elementKind = NodeKind::Struct;
+        int fi = doc->tree.addNode(field);
+        QVERIFY(fi >= 0);
+
+        QByteArray buf(32, '\0');
+        buf[8] = 1;  // ID_PC
+        doc->provider = std::make_unique<BufferProvider>(buf);
+
+        auto* splitter = new QSplitter();
+        auto* ctrl = new RcxController(doc, nullptr);
+        ctrl->setWindowState(false, false);
+        ctrl->addSplitEditor(splitter);
+
+        // Commit a picker selection (what the enum pill's onChosen does).
+        ctrl->setNodeValue(fi, 0, QString::number(2));
+        QApplication::processEvents();
+        QCOMPARE(doc->provider->readBytes(8, 1)[0], (char)2);
+        QCOMPARE(doc->provider->readBytes(9, 1)[0], (char)0);  // no overflow
+
+        // Undo restores the original byte.
+        doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(doc->provider->readBytes(8, 1)[0], (char)1);
+
+        delete ctrl;
+        delete splitter;
+        delete doc;
+    }
+
     // ── Test: setNodeValue with Hex32 (space-separated hex bytes) ──
     void testSetNodeValueHex() {
         int idx = -1;
