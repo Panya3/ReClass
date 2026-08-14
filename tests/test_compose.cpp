@@ -2458,6 +2458,69 @@ private slots:
         QVERIFY(result.text.contains("Flags"));
     }
 
+    // An enum pick (Struct + refId→enum, no children) renders as a flat
+    // variable row — no '{', no fold arrow, no member lines, no '};' footer
+    // — even when the node is stored expanded. Members live on the referenced
+    // enum definition (which keeps its own expandable view); here the row is
+    // just "type name" (+ the value pill when memory is readable).
+    void testEnumPickLeafRendersFlat() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node enumNode;
+        enumNode.kind = NodeKind::Struct;
+        enumNode.classKeyword = QStringLiteral("enum");
+        enumNode.structTypeName = QStringLiteral("Status");
+        enumNode.name = QStringLiteral("Status");
+        enumNode.enumMembers = {{"READY", 0}, {"RUNNING", 1}};
+        int ei = tree.addNode(enumNode);
+        uint64_t enumId = tree.nodes[ei].id;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder");
+        root.name = QStringLiteral("Holder");
+        root.collapsed = false;  // render the root so its children compose
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node field;
+        field.kind = NodeKind::Struct;
+        field.name = QStringLiteral("status");
+        field.parentId = rootId;
+        field.offset = 0;
+        field.refId = enumId;
+        field.structTypeName = QStringLiteral("Status");
+        field.collapsed = false;  // stored expanded — must still render flat
+        int fi = tree.addNode(field);
+        uint64_t fieldId = tree.nodes[fi].id;
+
+        NullProvider prov;
+        auto result = compose(tree, prov);
+
+        // Exactly one line for the field, a flat header: no fold arrow, no
+        // brace, no footer pills.
+        int headerCount = 0;
+        for (int i = 0; i < result.meta.size(); i++) {
+            const auto& lm = result.meta[i];
+            if (lm.nodeId != fieldId) continue;
+            QCOMPARE((int)lm.lineKind, (int)LineKind::Header);
+            QVERIFY2(!lm.foldHead, "enum pick leaf must not be expandable");
+            int ls = result.lineStarts[i];
+            int le = (i + 1 < result.lineStarts.size()) ? result.lineStarts[i + 1] - 1
+                                                        : result.text.size();
+            QString lineText = result.text.mid(ls, le - ls);
+            QVERIFY2(!lineText.contains(QLatin1Char('{')),
+                     qPrintable("enum pick leaf must not show '{'; line was: " + lineText));
+            QVERIFY2(lineText.contains(QStringLiteral("Status")),
+                     qPrintable("type name missing; line was: " + lineText));
+            QVERIFY2(lineText.contains(QStringLiteral("status")),
+                     qPrintable("field name missing; line was: " + lineText));
+            headerCount++;
+        }
+        QCOMPARE(headerCount, 1);
+    }
+
     // ═════════════════════════════════════════════════════════════
     // Compact columns: load EPROCESS.rcx and compare output
     // ═════════════════════════════════════════════════════════════

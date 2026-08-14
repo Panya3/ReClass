@@ -822,6 +822,23 @@ void composeParent(ComposeState& state, const NodeTree& tree,
     if (isRootHeader)
         state.baseEmitted = true;
 
+    // Enum pick leaf: a Struct field whose refId points at an enum definition
+    // and that has no children of its own. The chooser models an enum pick as
+    // an inline Struct ref, so this row is really a typed variable — its
+    // members live on the referenced enum, not here. Render it as a flat leaf:
+    // no braces, no fold arrow, no expandable body, no footer pills. Members
+    // stay reachable via the value pill (picker) and the enum definition's own
+    // view. A Struct+refId field WITH children is a container, not an enum
+    // pick, and keeps the normal struct rendering.
+    bool isEnumPickLeaf = node.kind == NodeKind::Struct
+        && node.refId != 0
+        && childIndices(state, node.id).isEmpty();
+    if (isEnumPickLeaf) {
+        int refIdx = tree.indexOfId(node.refId);
+        if (refIdx < 0 || !tree.nodes[refIdx].isEnum())
+            isEnumPickLeaf = false;
+    }
+
     // Header line (skip for array element structs and root struct)
     // Root struct header is on CommandRow (type + name + {)
     if (!isArrayChild && !isRootHeader) {
@@ -839,9 +856,11 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         lm.ptrBase    = state.currentPtrBase;
         lm.nodeKind   = node.kind;
         lm.isRootHeader = false;
-        lm.foldHead      = true;
-        lm.foldCollapsed = node.collapsed;
-        lm.foldLevel  = computeFoldLevel(depth, true);
+        // Enum pick leaf: no fold arrow — nothing to expand into, so the row
+        // behaves like a plain variable (no margin arrow, no click-to-fold).
+        lm.foldHead      = !isEnumPickLeaf;
+        lm.foldCollapsed = isEnumPickLeaf ? true : node.collapsed;
+        lm.foldLevel  = computeFoldLevel(depth, !isEnumPickLeaf);
         lm.markerMask = (1u << M_STRUCT_BG);
 
         QString headerText;
@@ -864,7 +883,11 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             bool overflow = state.compactColumns && rawType.size() > typeW;
             lm.effectiveTypeW = overflow ? rawType.size() : typeW;
             lm.effectiveNameW = nameW;
-            headerText = fmt::fmtStructHeader(node, depth, node.collapsed, typeW, nameW, state.compactColumns);
+            // Enum pick leaf: always render the header without the trailing
+            // '{' — the row is a flat variable, not an expandable container.
+            headerText = fmt::fmtStructHeader(node, depth,
+                isEnumPickLeaf ? true : node.collapsed,
+                typeW, nameW, state.compactColumns);
         }
 
         // Enum-typed struct leaf: a Struct field whose refId points at an
@@ -988,7 +1011,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         }
     }
 
-    if (!node.collapsed || isArrayChild || isRootHeader) {
+    if (!isEnumPickLeaf && (!node.collapsed || isArrayChild || isRootHeader)) {
         // Enum with members: render name = value lines instead of offset-based fields
         if (node.isEnum() && !node.enumMembers.isEmpty()) {
             int childDepth = depth + 1;
@@ -1226,7 +1249,7 @@ void composeParent(ComposeState& state, const NodeTree& tree,
     }
 
     // Footer line: skip when collapsed or for array element structs
-    if (!isArrayChild && (!node.collapsed || isRootHeader)) {
+    if (!isArrayChild && !isEnumPickLeaf && (!node.collapsed || isRootHeader)) {
         LineMeta lm;
         lm.nodeIdx   = nodeIdx;
         lm.nodeId    = node.id;
