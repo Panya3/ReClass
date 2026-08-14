@@ -86,6 +86,23 @@ private slots:
 
     // Round-trip test (requires generator.h)
     void basicRoundTrip();
+
+    // Template tests
+    void templateBasic();
+    void templateSelfReference();
+    void templateNParams();
+    void templateStructArg();
+    void templatePointerArg();
+    void templatePointerField();
+    void templateNested();
+    void templateDedup();
+    void templateNotInstantiated();
+    void templateOnlySourceMessage();
+    void templateArgCountMismatchWarning();
+    void templateUnsupportedSkipped();
+    void templateRecursionCycle();
+    void templateParamArgsInBody();
+    void templateTemplatedSelfRef();
 };
 
 // ── Helper ──
@@ -102,6 +119,12 @@ static QVector<int> childrenOf(const NodeTree& tree, uint64_t parentId) {
     for (int i = 0; i < tree.nodes.size(); i++)
         if (tree.nodes[i].parentId == parentId) result.append(i);
     return result;
+}
+
+static int rootByName(const NodeTree& tree, const QString& name) {
+    for (int i = 0; i < tree.nodes.size(); i++)
+        if (tree.nodes[i].parentId == 0 && tree.nodes[i].name == name) return i;
+    return -1;
 }
 
 // ── Tests ──
@@ -969,6 +992,344 @@ void TestImportSource::basicRoundTrip() {
         QCOMPARE(reimported.nodes[reimpKids[i]].name, original.nodes[origKids[i]].name);
         QCOMPARE(reimported.nodes[reimpKids[i]].offset, original.nodes[origKids[i]].offset);
     }
+}
+
+// ── Template tests ──
+
+void TestImportSource::templateBasic() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename KEY, typename VALUE>\n"
+        "struct StdMap {\n"
+        "    StdMap* left;\n"
+        "    StdMap* parent;\n"
+        "    StdMap* right;\n"
+        "    KEY k;\n"
+        "    VALUE v;\n"
+        "    uint8_t color;\n"
+        "    uint8_t isnil;\n"
+        "};\n"
+        "struct Holder {\n"
+        "    StdMap<uint64_t, uint32_t> map;\n"
+        "};"));
+
+    // Holder + one instantiated class
+    QCOMPARE(countRoots(tree), 2);
+
+    int holderIdx = rootByName(tree, QStringLiteral("Holder"));
+    QVERIFY(holderIdx >= 0);
+    auto holderKids = childrenOf(tree, tree.nodes[holderIdx].id);
+    QCOMPARE(holderKids.size(), 1);
+
+    // The map field is a Struct node linked to the instantiated class
+    const auto& mapNode = tree.nodes[holderKids[0]];
+    QCOMPARE(mapNode.kind, NodeKind::Struct);
+    QCOMPARE(mapNode.name, QStringLiteral("map"));
+    QCOMPARE(mapNode.structTypeName, QStringLiteral("StdMap<uint64_t,uint32_t>"));
+    QVERIFY(mapNode.refId != 0);
+
+    int mapClassIdx = tree.indexOfId(mapNode.refId);
+    QVERIFY(mapClassIdx >= 0);
+    QCOMPARE(tree.nodes[mapClassIdx].parentId, uint64_t(0));
+    QCOMPARE(tree.nodes[mapClassIdx].structTypeName, QStringLiteral("StdMap<uint64_t,uint32_t>"));
+
+    // Template substituted layout: left, parent, right (self ptrs), k, v, color, isnil
+    auto kids = childrenOf(tree, tree.nodes[mapClassIdx].id);
+    QCOMPARE(kids.size(), 7);
+    QCOMPARE(tree.nodes[kids[0]].name, QStringLiteral("left"));
+    QCOMPARE(tree.nodes[kids[0]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[kids[1]].name, QStringLiteral("parent"));
+    QCOMPARE(tree.nodes[kids[2]].name, QStringLiteral("right"));
+    QCOMPARE(tree.nodes[kids[3]].name, QStringLiteral("k"));
+    QCOMPARE(tree.nodes[kids[3]].kind, NodeKind::UInt64);  // KEY -> uint64_t
+    QCOMPARE(tree.nodes[kids[4]].name, QStringLiteral("v"));
+    QCOMPARE(tree.nodes[kids[4]].kind, NodeKind::UInt32);  // VALUE -> uint32_t
+    QCOMPARE(tree.nodes[kids[5]].name, QStringLiteral("color"));
+    QCOMPARE(tree.nodes[kids[5]].kind, NodeKind::UInt8);
+    QCOMPARE(tree.nodes[kids[6]].name, QStringLiteral("isnil"));
+    QCOMPARE(tree.nodes[kids[6]].kind, NodeKind::UInt8);
+
+    // Computed offsets: 0, 8, 16, 24, 32, 36, 37
+    QCOMPARE(tree.nodes[kids[0]].offset, 0);
+    QCOMPARE(tree.nodes[kids[1]].offset, 8);
+    QCOMPARE(tree.nodes[kids[2]].offset, 16);
+    QCOMPARE(tree.nodes[kids[3]].offset, 24);
+    QCOMPARE(tree.nodes[kids[4]].offset, 32);
+    QCOMPARE(tree.nodes[kids[5]].offset, 36);
+    QCOMPARE(tree.nodes[kids[6]].offset, 37);
+}
+
+void TestImportSource::templateSelfReference() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename KEY, typename VALUE>\n"
+        "struct StdMap {\n"
+        "    StdMap* left;\n"
+        "    StdMap* right;\n"
+        "    KEY k;\n"
+        "    VALUE v;\n"
+        "};\n"
+        "struct Holder {\n"
+        "    StdMap<uint64_t, uint32_t> map;\n"
+        "};"));
+
+    int mapClassIdx = rootByName(tree, QStringLiteral("StdMap<uint64_t,uint32_t>"));
+    QVERIFY(mapClassIdx >= 0);
+    auto kids = childrenOf(tree, tree.nodes[mapClassIdx].id);
+    QCOMPARE(kids.size(), 4);
+
+    // left/right are pointers that resolve back to the same instantiation
+    uint64_t selfId = tree.nodes[mapClassIdx].id;
+    QCOMPARE(tree.nodes[kids[0]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[kids[0]].refId, selfId);
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[kids[1]].refId, selfId);
+}
+
+void TestImportSource::templateNParams() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename T1, typename T2, typename T3, typename T4>\n"
+        "struct Quad {\n"
+        "    T1 a; T2 b; T3 c; T4 d;\n"
+        "};\n"
+        "struct Use {\n"
+        "    Quad<uint8_t, uint16_t, uint32_t, uint64_t> q;\n"
+        "};"));
+
+    int quadIdx = rootByName(tree, QStringLiteral("Quad<uint8_t,uint16_t,uint32_t,uint64_t>"));
+    QVERIFY(quadIdx >= 0);
+    auto kids = childrenOf(tree, tree.nodes[quadIdx].id);
+    QCOMPARE(kids.size(), 4);
+    QCOMPARE(tree.nodes[kids[0]].kind, NodeKind::UInt8);
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::UInt16);
+    QCOMPARE(tree.nodes[kids[2]].kind, NodeKind::UInt32);
+    QCOMPARE(tree.nodes[kids[3]].kind, NodeKind::UInt64);
+
+    int useIdx = rootByName(tree, QStringLiteral("Use"));
+    QVERIFY(useIdx >= 0);
+    auto useKids = childrenOf(tree, tree.nodes[useIdx].id);
+    QCOMPARE(useKids.size(), 1);
+    QCOMPARE(tree.nodes[useKids[0]].refId, tree.nodes[quadIdx].id);
+}
+
+void TestImportSource::templateStructArg() {
+    auto tree = importFromSource(QStringLiteral(
+        "struct Item { int x; };\n"
+        "template<typename K, typename V> struct Pair { K k; V v; };\n"
+        "struct Use { Pair<uint32_t, Item> p; };"));
+
+    int pairIdx = rootByName(tree, QStringLiteral("Pair<uint32_t,Item>"));
+    QVERIFY(pairIdx >= 0);
+    auto kids = childrenOf(tree, tree.nodes[pairIdx].id);
+    QCOMPARE(kids.size(), 2);
+    QCOMPARE(tree.nodes[kids[0]].kind, NodeKind::UInt32);
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Struct);
+    QCOMPARE(tree.nodes[kids[1]].structTypeName, QStringLiteral("Item"));
+
+    int itemIdx = rootByName(tree, QStringLiteral("Item"));
+    QVERIFY(itemIdx >= 0);
+    QCOMPARE(tree.nodes[kids[1]].refId, tree.nodes[itemIdx].id);
+}
+
+void TestImportSource::templatePointerArg() {
+    auto tree = importFromSource(QStringLiteral(
+        "struct Foo { int x; };\n"
+        "template<typename KEY, typename VALUE> struct StdMap { KEY k; VALUE v; };\n"
+        "struct Use { StdMap<Foo*, uint32_t> m; };"));
+
+    int mapIdx = rootByName(tree, QStringLiteral("StdMap<Foo*,uint32_t>"));
+    QVERIFY(mapIdx >= 0);
+    auto kids = childrenOf(tree, tree.nodes[mapIdx].id);
+    QCOMPARE(kids.size(), 2);
+    // KEY -> Foo* : k is a pointer to Foo
+    QCOMPARE(tree.nodes[kids[0]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[kids[0]].name, QStringLiteral("k"));
+    int fooIdx = rootByName(tree, QStringLiteral("Foo"));
+    QVERIFY(fooIdx >= 0);
+    QCOMPARE(tree.nodes[kids[0]].refId, tree.nodes[fooIdx].id);
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::UInt32);
+}
+
+void TestImportSource::templatePointerField() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename K, typename V> struct Map { K k; V v; };\n"
+        "struct Foo { int x; };\n"
+        "struct Use { Map<int, Foo>* pm; };"));
+
+    int mapIdx = rootByName(tree, QStringLiteral("Map<int,Foo>"));
+    QVERIFY(mapIdx >= 0);
+
+    int useIdx = rootByName(tree, QStringLiteral("Use"));
+    QVERIFY(useIdx >= 0);
+    auto useKids = childrenOf(tree, tree.nodes[useIdx].id);
+    QCOMPARE(useKids.size(), 1);
+    QCOMPARE(tree.nodes[useKids[0]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[useKids[0]].name, QStringLiteral("pm"));
+    QCOMPARE(tree.nodes[useKids[0]].refId, tree.nodes[mapIdx].id);
+}
+
+void TestImportSource::templateNested() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename A, typename B> struct Pair { A first; B second; };\n"
+        "template<typename K, typename V> struct Map { K key; V val; };\n"
+        "struct Use { Map<int, Pair<int, uint32_t>> m; };"));
+
+    int mapIdx = rootByName(tree, QStringLiteral("Map<int,Pair<int,uint32_t>>"));
+    QVERIFY(mapIdx >= 0);
+    int pairIdx = rootByName(tree, QStringLiteral("Pair<int,uint32_t>"));
+    QVERIFY(pairIdx >= 0);
+    QCOMPARE(countRoots(tree), 3); // Use + Map + Pair
+
+    auto mapKids = childrenOf(tree, tree.nodes[mapIdx].id);
+    QCOMPARE(mapKids.size(), 2);
+    QCOMPARE(tree.nodes[mapKids[0]].kind, NodeKind::Int32);
+    QCOMPARE(tree.nodes[mapKids[1]].kind, NodeKind::Struct);
+    QCOMPARE(tree.nodes[mapKids[1]].structTypeName, QStringLiteral("Pair<int,uint32_t>"));
+    QCOMPARE(tree.nodes[mapKids[1]].refId, tree.nodes[pairIdx].id);
+
+    auto pairKids = childrenOf(tree, tree.nodes[pairIdx].id);
+    QCOMPARE(pairKids.size(), 2);
+    QCOMPARE(tree.nodes[pairKids[0]].kind, NodeKind::Int32);
+    QCOMPARE(tree.nodes[pairKids[1]].kind, NodeKind::UInt32);
+}
+
+void TestImportSource::templateDedup() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename K, typename V> struct Map { K k; V v; };\n"
+        "struct Use {\n"
+        "    Map<int, uint32_t> a;\n"
+        "    Map<int, uint32_t> b;\n"
+        "    Map<int, uint32_t>* c;\n"
+        "};"));
+
+    // Only one instantiated class for repeated usage
+    QCOMPARE(countRoots(tree), 2); // Use + Map<int,uint32_t>
+    int mapIdx = rootByName(tree, QStringLiteral("Map<int,uint32_t>"));
+    QVERIFY(mapIdx >= 0);
+    uint64_t mapId = tree.nodes[mapIdx].id;
+
+    int useIdx = rootByName(tree, QStringLiteral("Use"));
+    QVERIFY(useIdx >= 0);
+    auto useKids = childrenOf(tree, tree.nodes[useIdx].id);
+    QCOMPARE(useKids.size(), 3);
+    QCOMPARE(tree.nodes[useKids[0]].refId, mapId); // a (by value)
+    QCOMPARE(tree.nodes[useKids[1]].refId, mapId); // b (by value)
+    QCOMPARE(tree.nodes[useKids[2]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[useKids[2]].refId, mapId); // c (pointer)
+}
+
+void TestImportSource::templateNotInstantiated() {
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename T> struct Never { T x; };\n"
+        "struct Plain { uint32_t x; };"));
+
+    // Defined but never used -> no class created
+    QCOMPARE(countRoots(tree), 1);
+    QVERIFY(rootByName(tree, QStringLiteral("Never")) < 0);
+}
+
+void TestImportSource::templateOnlySourceMessage() {
+    QString err;
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename T> struct Only { T x; };\n"), &err);
+    QVERIFY(tree.nodes.isEmpty());
+    QVERIFY(err.contains(QStringLiteral("instantiated only when")));
+}
+
+void TestImportSource::templateArgCountMismatchWarning() {
+    QString err;
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename K, typename V> struct Map { K k; V v; };\n"
+        "struct Use { Map<int> m; };\n"), &err);
+
+    // Field skipped, warning reported, no broken class created
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains(QStringLiteral("argument")));
+    int useIdx = rootByName(tree, QStringLiteral("Use"));
+    QVERIFY(useIdx >= 0);
+    QVERIFY(childrenOf(tree, tree.nodes[useIdx].id).isEmpty());
+    QVERIFY(rootByName(tree, QStringLiteral("Map<int>")) < 0);
+}
+
+void TestImportSource::templateUnsupportedSkipped() {
+    QString err;
+    auto tree = importFromSource(QStringLiteral(
+        "template<int N> struct Bad { char buf[N]; };\n"
+        "struct Ok { uint32_t x; };\n"), &err);
+
+    QVERIFY(!err.isEmpty());
+    QVERIFY(err.contains(QStringLiteral("unsupported template")));
+    QCOMPARE(countRoots(tree), 1);
+    QVERIFY(rootByName(tree, QStringLiteral("Ok")) >= 0);
+}
+
+void TestImportSource::templateParamArgsInBody() {
+    // A template body referencing another template with PARAMETER arguments:
+    // Map's Pair<A, B> must resolve to Pair<int, uint32_t>, not Pair<A,B>.
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename A, typename B> struct Pair { A first; B second; };\n"
+        "template<typename K, typename V> struct Map { Pair<K, V> p; K key; V val; };\n"
+        "struct Use { Map<int, uint32_t> m; };"));
+
+    int mapIdx = rootByName(tree, QStringLiteral("Map<int,uint32_t>"));
+    QVERIFY(mapIdx >= 0);
+    int pairIdx = rootByName(tree, QStringLiteral("Pair<int,uint32_t>"));
+    QVERIFY(pairIdx >= 0);
+
+    auto mapKids = childrenOf(tree, tree.nodes[mapIdx].id);
+    QCOMPARE(mapKids.size(), 3);
+    QCOMPARE(tree.nodes[mapKids[0]].name, QStringLiteral("p"));
+    QCOMPARE(tree.nodes[mapKids[0]].kind, NodeKind::Struct);
+    QCOMPARE(tree.nodes[mapKids[0]].structTypeName, QStringLiteral("Pair<int,uint32_t>"));
+    QCOMPARE(tree.nodes[mapKids[0]].refId, tree.nodes[pairIdx].id);
+    QCOMPARE(tree.nodes[mapKids[1]].kind, NodeKind::Int32);    // key
+    QCOMPARE(tree.nodes[mapKids[2]].kind, NodeKind::UInt32);   // val
+
+    auto pairKids = childrenOf(tree, tree.nodes[pairIdx].id);
+    QCOMPARE(pairKids.size(), 2);
+    QCOMPARE(tree.nodes[pairKids[0]].kind, NodeKind::Int32);
+    QCOMPARE(tree.nodes[pairKids[1]].kind, NodeKind::UInt32);
+}
+
+void TestImportSource::templateTemplatedSelfRef() {
+    // Node<T>* next inside Node's body must point back to the SAME
+    // instantiation (Node<int>), not spawn a separate class.
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename T> struct Node { Node<T>* next; T v; };\n"
+        "struct Use { Node<int> n; };"));
+
+    int nodeIdx = rootByName(tree, QStringLiteral("Node<int>"));
+    QVERIFY(nodeIdx >= 0);
+    uint64_t nodeId = tree.nodes[nodeIdx].id;
+
+    // Only one Node class: the self-reference dedups to itself
+    int count = 0;
+    for (const auto& n : tree.nodes)
+        if (n.parentId == 0 && n.name.startsWith(QStringLiteral("Node<"))) count++;
+    QCOMPARE(count, 1);
+
+    auto kids = childrenOf(tree, nodeId);
+    QCOMPARE(kids.size(), 2);
+    QCOMPARE(tree.nodes[kids[0]].name, QStringLiteral("next"));
+    QCOMPARE(tree.nodes[kids[0]].kind, NodeKind::Pointer64);
+    QCOMPARE(tree.nodes[kids[0]].refId, nodeId);
+    QCOMPARE(tree.nodes[kids[1]].name, QStringLiteral("v"));
+    QCOMPARE(tree.nodes[kids[1]].kind, NodeKind::Int32);
+}
+
+void TestImportSource::templateRecursionCycle() {
+    // A<T> -> B<T> -> A<T*> -> B<T*> -> ... — canonical names grow forever,
+    // so dedup alone cannot stop this. The depth guard must cut it off
+    // instead of recursing into a stack overflow.
+    QString err;
+    auto tree = importFromSource(QStringLiteral(
+        "template<typename T> struct A { B<T> b; };\n"
+        "template<typename T> struct B { A<T*> a; };\n"
+        "struct Use { A<int> x; };\n"), &err);
+
+    // Import completes (no crash) and the outer instantiation exists
+    QVERIFY(rootByName(tree, QStringLiteral("Use")) >= 0);
+    QVERIFY(rootByName(tree, QStringLiteral("A<int>")) >= 0);
+    // The depth guard reported the runaway instantiation
+    QVERIFY(err.contains(QStringLiteral("nested too deeply")));
 }
 
 // ── Enum tests ──

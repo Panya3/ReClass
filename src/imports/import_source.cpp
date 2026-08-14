@@ -128,7 +128,7 @@ static QHash<QString, TypeInfo> buildTypeTable(int ptrSize = 8) {
 enum class TokKind {
     Ident, Number, Star, Semi, LBrace, RBrace,
     LBracket, RBracket, LParen, RParen, Comma, Colon,
-    Equals, Hash, Eof, Other
+    Equals, Hash, Less, Greater, Eof, Other
 };
 
 struct Token {
@@ -198,6 +198,8 @@ struct Tokenizer {
             case ',': tk = TokKind::Comma;    break;
             case ':': tk = TokKind::Colon;    break;
             case '=': tk = TokKind::Equals;   break;
+            case '<': tk = TokKind::Less;     break;
+            case '>': tk = TokKind::Greater;  break;
             default:  tk = TokKind::Other;    break;
             }
             tokens.push_back(Token{tk, QString(c), line});
@@ -282,6 +284,31 @@ private:
 
 // ── Parser ──
 
+// A type expression — used for template arguments (and to carry a
+// template instantiation through substitution). A chain like
+// "Foo<int, Bar*>*" is name=Foo, isTemplate, args=[int, Bar*], ptrDepth=1.
+struct ParsedTypeExpr {
+    QString name;                 // base name (primitive, typedef, struct, or template name)
+    int     ptrDepth = 0;         // number of '*' levels applied to this expression
+    bool    isTemplate = false;   // name is a template that carries args
+    QVector<ParsedTypeExpr> args; // template arguments (when isTemplate)
+};
+
+// Canonical string form of a type expression, e.g. "StdMap<uint64_t,FOO>*"
+static QString typeExprToString(const ParsedTypeExpr& t) {
+    QString s = t.name;
+    if (t.isTemplate) {
+        s += '<';
+        for (int i = 0; i < t.args.size(); ++i) {
+            if (i) s += ',';
+            s += typeExprToString(t.args[i]);
+        }
+        s += '>';
+    }
+    for (int i = 0; i < t.ptrDepth; ++i) s += '*';
+    return s;
+}
+
 struct ParsedField {
     QString typeName;      // base type name (resolved through multi-word merge)
     QString name;
@@ -293,6 +320,9 @@ struct ParsedField {
     QString pointerTarget;     // for Type* -> the type name
     bool    isUnion = false;               // union container
     QVector<ParsedField> unionMembers;     // children of union
+    bool    isTemplate = false;            // type is a template instantiation Name<...>
+    QString templateName;                  // base template name (when isTemplate)
+    QVector<ParsedTypeExpr> templateArgs;  // concrete arguments (when isTemplate)
 };
 
 struct ParsedStruct {
@@ -301,6 +331,14 @@ struct ParsedStruct {
     QVector<ParsedField> fields;
 //TODO-DELETE(ParsedStruct::declaredSize)     int declaredSize = -1; // from static_assert
     QVector<QPair<QString, int64_t>> enumValues; // for keyword="enum"
+};
+
+// A parsed template declaration: parameter names plus the generic body.
+// The body's fields may reference the parameters (KEY k;) — those are
+// substituted with concrete arguments at instantiation time.
+struct TemplateDef {
+    QVector<QString> params; // template parameter names (typename T1 ... Tn)
+    ParsedStruct body;       // the generic struct body
 };
 
 struct PendingRef {
@@ -337,6 +375,8 @@ struct Parser {
     QHash<QString, QVector<int>> arrayTypedefs; // aliases that are array types (alias -> dimensions)
     QHash<QString, int> sizeAsserts;  // struct name -> declared size
     QHash<QString, int> structAlignments; // struct name -> ALIGN(N) value
+    QHash<QString, TemplateDef> templates; // template name -> generic definition
+    QVector<QString> warnings;            // non-fatal issues collected during parse
 
     explicit Parser(const QVector<Token>& t, const QVector<LineOffset>& lo)
         : tokens(t), lineOffsets(lo) {}
@@ -426,7 +466,9 @@ struct Parser {
 
     void parse() {
         while (peek().kind != TokKind::Eof) {
-            if (checkIdent("struct") || checkIdent("class")) {
+            if (checkIdent("template")) {
+                parseTemplateDef();
+            } else if (checkIdent("struct") || checkIdent("class")) {
                 parseStructOrForward();
             } else if (checkIdent("union")) {
                 parseTopLevelUnion();
@@ -691,10 +733,20 @@ struct Parser {
         QString typeName = parseTypeName();
         if (typeName.isEmpty()) { cur = startPos; return false; }
 
+        // Template instantiation: Name<Arg1, ..., ArgN>
+        bool isTemplate = false;
+        QString templateName;
+        QVector<ParsedTypeExpr> templateArgs;
+        if (check(TokKind::Less)) {
+            templateName = typeName;
+            templateArgs = parseTemplateArgs();
+            isTemplate = true;
+        }
+
         // Resolve typedef — track pointer and array typedefs in the chain
         bool typedefPointer = false;
         QVector<int> typedefArrayDims;
-        {
+        if (!isTemplate) {
             QString resolved = typeName;
             QSet<QString> seen;
             while (typedefs.contains(resolved) && !seen.contains(resolved)) {
@@ -787,6 +839,9 @@ struct Parser {
         field.isPointer = isPointer;
         field.pointerDepth = ptrDepth;
         if (isPointer) field.pointerTarget = typeName;
+        field.isTemplate = isTemplate;
+        field.templateName = templateName;
+        field.templateArgs = templateArgs;
 
         return true;
     }
@@ -822,6 +877,141 @@ struct Parser {
         // Simple identifier type
         advance();
         return first;
+    }
+
+    // Parse template arguments: Name<A1, ..., An>. Arguments may be
+    // primitives, typedefs, struct refs, pointers (Foo*), or nested
+    // template instantiations (Name<A, Name<B, C>> — the tokenizer emits
+    // one '>' per nesting level, so '>>' resolves naturally).
+    QVector<ParsedTypeExpr> parseTemplateArgs() {
+        QVector<ParsedTypeExpr> args;
+        if (!match(TokKind::Less)) return args;
+        while (peek().kind != TokKind::Greater && peek().kind != TokKind::Eof) {
+            while (checkIdent("const") || checkIdent("volatile")) advance();
+
+            ParsedTypeExpr arg;
+            QString first = parseTypeName();
+            if (first.isEmpty()) break;
+            arg.name = first;
+
+            // Nested template instantiation as an argument
+            if (check(TokKind::Less)) {
+                arg.isTemplate = true;
+                arg.args = parseTemplateArgs();
+            }
+
+            // Pointer stars on the argument (Foo*)
+            while (match(TokKind::Star)) arg.ptrDepth++;
+            while (checkIdent("const") || checkIdent("volatile")) advance();
+            while (match(TokKind::Star)) arg.ptrDepth++;
+
+            args.append(arg);
+            if (!match(TokKind::Comma)) break;
+        }
+        match(TokKind::Greater);
+        return args;
+    }
+
+    // Skip the remainder of a (possibly unsupported) template declaration:
+    // an optional '>' header terminator, then the balanced struct body
+    // up to the terminating ';'.
+    void skipTemplateDeclaration() {
+        if (check(TokKind::Greater)) advance(); // close '<...>' header if present
+        int depth = 0;
+        while (peek().kind != TokKind::Eof) {
+            if (peek().kind == TokKind::LBrace) { depth++; advance(); }
+            else if (peek().kind == TokKind::RBrace) { advance(); if (depth == 0) break; depth--; }
+            else if (peek().kind == TokKind::Semi && depth == 0) { advance(); return; }
+            else advance();
+        }
+    }
+
+    // template<typename T1, ..., typename Tn> struct Name { ... };
+    // The generic body is stored in `templates` (keyed by Name) and only
+    // turned into real classes when a field uses Name<...>.
+    void parseTemplateDef() {
+        advance(); // "template"
+        if (!match(TokKind::Less)) {
+            warnings.append(QStringLiteral("Skipped malformed template declaration"));
+            skipToSemiOrBrace();
+            return;
+        }
+
+        QVector<QString> params;
+        bool ok = true;
+        while (peek().kind != TokKind::Greater && peek().kind != TokKind::Eof) {
+            if (checkIdent("typename") || checkIdent("class")) {
+                advance();
+                if (check(TokKind::Ident)) {
+                    params.append(advance().text);
+                    // Default arguments (template<typename T = int>) are unsupported
+                    if (check(TokKind::Equals)) {
+                        ok = false;
+                        advance();
+                        while (peek().kind != TokKind::Comma &&
+                               peek().kind != TokKind::Greater &&
+                               peek().kind != TokKind::Eof)
+                            advance();
+                    }
+                } else {
+                    ok = false;
+                }
+            } else {
+                ok = false; // non-type parameter, e.g. template<int N>
+                break;
+            }
+            match(TokKind::Comma);
+        }
+        if (!check(TokKind::Greater)) ok = false;
+        else advance();
+
+        if (!ok || params.isEmpty()) {
+            warnings.append(QStringLiteral("Skipped unsupported template declaration (non-type or default parameters)"));
+            skipTemplateDeclaration();
+            return;
+        }
+
+        if (!(checkIdent("struct") || checkIdent("class") || checkIdent("union"))) {
+            warnings.append(QStringLiteral("Skipped unsupported template declaration (not a struct/class/union)"));
+            skipTemplateDeclaration();
+            return;
+        }
+
+        QString keyword = advance().text;
+        int alignVal = skipAlignMacro();
+        if (!check(TokKind::Ident)) { skipTemplateDeclaration(); return; }
+        QString name = advance().text;
+        if (alignVal > 0)
+            structAlignments[name] = alignVal;
+
+        // Skip inheritance clause: template<typename T> struct Foo : Base {
+        if (check(TokKind::Colon)) {
+            advance();
+            while (peek().kind != TokKind::LBrace && peek().kind != TokKind::Semi &&
+                   peek().kind != TokKind::Eof)
+                advance();
+        }
+
+        // Forward declaration: template<typename T> struct Foo;
+        if (check(TokKind::Semi)) {
+            advance();
+            forwardDecls.insert(name);
+            return;
+        }
+
+        if (!match(TokKind::LBrace)) { skipTemplateDeclaration(); return; }
+
+        ParsedStruct ps;
+        ps.name = name;
+        ps.keyword = keyword;
+        parseStructBody(ps);
+        if (!match(TokKind::RBrace)) { skipTemplateDeclaration(); return; }
+        match(TokKind::Semi);
+
+        TemplateDef def;
+        def.params = params;
+        def.body = ps;
+        templates[name] = def;
     }
 
     void parseStaticAssert() {
@@ -1134,6 +1324,9 @@ struct BuildContext {
     int ptrSize = 8;          // target pointer size (4 or 8)
     const QHash<QString, int>& sizeAsserts; // declared struct sizes from static_assert
     const QHash<QString, int>& structAlignments; // struct name -> ALIGN(N) value
+    const QHash<QString, TemplateDef>& templates; // generic template definitions
+    QVector<QString>& warnings;                   // collected import warnings
+    int templateDepth = 0;                        // recursion guard for nested instantiations
 };
 
 // Forward declaration
@@ -1196,6 +1389,146 @@ static int clampedArrayElements(const QVector<int>& dims, int maxElements = 1000
         if (total > maxElements) return maxElements;
     }
     return (int)total;
+}
+
+static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
+                        const QVector<ParsedField>& fields);
+
+// Resolve template parameters inside a type expression's arguments. A param
+// name (KEY) is replaced by its concrete argument, keeping the expression's
+// own stars on top (KEY* -> uint64_t*). Nested template arguments recurse.
+static void substituteTypeExpr(ParsedTypeExpr& t, const QHash<QString, ParsedTypeExpr>& subst) {
+    auto it = subst.find(t.name);
+    if (it != subst.end()) {
+        t.name = it.value().name;
+        t.isTemplate = it.value().isTemplate;
+        if (it.value().isTemplate)
+            t.args = it.value().args;
+        t.ptrDepth += it.value().ptrDepth;
+    }
+    for (auto& a : t.args)
+        substituteTypeExpr(a, subst);
+}
+
+// Substitute template parameters in a field's type. `selfName` is the
+// template's own name: a plain reference to it (StdMap* left;) resolves to
+// this instantiation, while a templated self-reference (Node<T>* next;)
+// keeps the template name with its (now concrete) arguments so it dedups
+// back to this class. Template fields get their arguments resolved
+// recursively (Pair<K,V> inside a Map body -> Pair<int,Foo>); non-template
+// fields whose type is a parameter (KEY k; or KEY* p;) get the concrete
+// argument expression with pointer depth combined. Unions recurse.
+static void substituteField(ParsedField& f, const QHash<QString, ParsedTypeExpr>& subst,
+                            const QString& selfName, const QString& canonical) {
+    if (f.isUnion) {
+        for (auto& m : f.unionMembers) substituteField(m, subst, selfName, canonical);
+        return;
+    }
+
+    // Template instantiation: resolve parameters inside the arguments only.
+    // The base name stays (it is a concrete template name — or the template
+    // itself, which then dedups to this instantiation).
+    if (f.isTemplate) {
+        for (auto& a : f.templateArgs)
+            substituteTypeExpr(a, subst);
+        return;
+    }
+
+    auto it = subst.find(f.typeName);
+    if (it != subst.end()) {
+        const ParsedTypeExpr& arg = it.value();
+        f.typeName = arg.name;
+        f.isTemplate = arg.isTemplate;
+        f.templateName = arg.isTemplate ? arg.name : QString();
+        f.templateArgs = arg.args;
+
+        int total = arg.ptrDepth + f.pointerDepth;
+        f.isPointer = total > 0;
+        f.pointerDepth = total;
+        f.pointerTarget = f.isPointer ? arg.name : QString();
+        return;
+    }
+
+    // Plain self-reference: StdMap* left; inside StdMap's body. Resolve to
+    // this instantiation's canonical name so the deferred ref links back.
+    if (f.typeName == selfName) {
+        f.typeName = canonical;
+        f.pointerTarget = f.isPointer ? canonical : QString();
+        return;
+    }
+}
+
+// Instantiate a template with concrete arguments: create a top-level class
+// named "Name<Arg1,...,ArgN>" (canonical string form), substitute the
+// parameters in the generic body, and build its fields. Returns the new
+// node id, or 0 if the instantiation failed (warning already emitted).
+// Deduplicated: repeated Name<A,B> usage reuses the same class.
+static uint64_t instantiateTemplate(BuildContext& ctx, const QString& templateName,
+                                    const QVector<ParsedTypeExpr>& args) {
+    // Guard against unbounded recursion from template cycles whose canonical
+    // names keep growing (A<T> -> B<T> -> A<T*> -> ...). Dedup alone can't
+    // stop those because every level produces a different class name.
+    if (ctx.templateDepth >= 32) {
+        ParsedTypeExpr expr;
+        expr.name = templateName;
+        expr.isTemplate = true;
+        expr.args = args;
+        ctx.warnings.append(QStringLiteral("Template '%1' nested too deeply — skipped")
+            .arg(typeExprToString(expr)));
+        return 0;
+    }
+
+    ParsedTypeExpr expr;
+    expr.name = templateName;
+    expr.isTemplate = true;
+    expr.args = args;
+    QString canonical = typeExprToString(expr);
+
+    auto classIt = ctx.classIds.find(canonical);
+    if (classIt != ctx.classIds.end()) return classIt.value();
+
+    auto tIt = ctx.templates.find(templateName);
+    if (tIt == ctx.templates.end()) {
+        ctx.warnings.append(QStringLiteral("Unknown template '%1' — field skipped").arg(templateName));
+        return 0;
+    }
+    const TemplateDef& def = tIt.value();
+    if (def.params.size() != args.size()) {
+        ctx.warnings.append(QStringLiteral("Template '%1' used with %2 argument(s) but declares %3 — field skipped")
+            .arg(templateName).arg(args.size()).arg(def.params.size()));
+        return 0;
+    }
+
+    // Create the class node first so self-referencing pointers inside the
+    // body (Name* left;) can resolve back to this instantiation.
+    Node structNode;
+    structNode.kind = NodeKind::Struct;
+    structNode.name = canonical;
+    structNode.structTypeName = canonical;
+    structNode.classKeyword = QStringLiteral("struct");
+    structNode.parentId = 0;
+    structNode.offset = 0;
+    structNode.collapsed = true;
+    int idx = ctx.tree.addNode(structNode);
+    uint64_t nodeId = ctx.tree.nodes[idx].id;
+    ctx.classIds[canonical] = nodeId;
+
+    QHash<QString, ParsedTypeExpr> subst;
+    for (int i = 0; i < def.params.size(); ++i)
+        subst[def.params[i]] = args[i];
+
+    QVector<ParsedField> fields;
+    fields.reserve(def.body.fields.size());
+    for (const auto& f : def.body.fields) {
+        ParsedField copy = f;
+        substituteField(copy, subst, templateName, canonical);
+        fields.append(copy);
+    }
+
+    ctx.templateDepth++;
+    buildFields(ctx, nodeId, 0, fields);
+    ctx.templateDepth--;
+    return nodeId;
 }
 
 static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
@@ -1284,6 +1617,22 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
         if (field.isPointer) {
             NodeKind ptrKind = (ctx.ptrSize >= 8) ? NodeKind::Pointer64 : NodeKind::Pointer32;
 
+            // Resolve a template instantiation target first (creates the class)
+            QString target = field.pointerTarget;
+            if (field.isTemplate) {
+                uint64_t instId = instantiateTemplate(ctx, field.templateName, field.templateArgs);
+                if (instId == 0) {
+                    // Warning already emitted; skip the field (pointer bytes remain)
+                    computedOffset = fieldOffset + ctx.ptrSize;
+                    continue;
+                }
+                ParsedTypeExpr expr;
+                expr.name = field.templateName;
+                expr.isTemplate = true;
+                expr.args = field.templateArgs;
+                target = typeExprToString(expr);
+            }
+
             // Array of pointers: PVOID arr[N]
             if (!field.arraySizes.isEmpty()) {
                 int totalElements = clampedArrayElements(field.arraySizes);
@@ -1310,9 +1659,9 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             int nodeIdx = ctx.tree.addNode(n);
             uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
 
-            if (!field.pointerTarget.isEmpty() &&
-                field.pointerTarget != QStringLiteral("void")) {
-                ctx.pendingRefs.push_back(PendingRef{nodeId, field.pointerTarget});
+            if (!target.isEmpty() &&
+                target != QStringLiteral("void")) {
+                ctx.pendingRefs.push_back(PendingRef{nodeId, target});
             }
 
             computedOffset = fieldOffset + ctx.ptrSize;
@@ -1444,7 +1793,22 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
 
         // Struct-type field
         if (isStructType) {
-            int elemSize = structTypeSize(field.typeName, ctx);
+            // Resolve a template instantiation field to its concrete class
+            QString resolvedType = field.typeName;
+            if (field.isTemplate) {
+                uint64_t instId = instantiateTemplate(ctx, field.templateName, field.templateArgs);
+                if (instId == 0) {
+                    // Warning already emitted; skip the field
+                    continue;
+                }
+                ParsedTypeExpr expr;
+                expr.name = field.templateName;
+                expr.isTemplate = true;
+                expr.args = field.templateArgs;
+                resolvedType = typeExprToString(expr);
+            }
+
+            int elemSize = structTypeSize(resolvedType, ctx);
 
             if (!field.arraySizes.isEmpty()) {
                 int totalElements = clampedArrayElements(field.arraySizes);
@@ -1456,12 +1820,12 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
                 n.offset = fieldOffset;
                 n.arrayLen = totalElements;
                 n.elementKind = NodeKind::Struct;
-                n.structTypeName = field.typeName;
+                n.structTypeName = resolvedType;
                 n.collapsed = true;
 
                 int nodeIdx = ctx.tree.addNode(n);
                 uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
-                ctx.pendingRefs.push_back(PendingRef{nodeId, field.typeName});
+                ctx.pendingRefs.push_back(PendingRef{nodeId, resolvedType});
                 if (elemSize > 0)
                     computedOffset = fieldOffset + totalElements * elemSize;
                 continue;
@@ -1472,12 +1836,12 @@ static void buildFields(BuildContext& ctx, uint64_t parentId, int baseOffset,
             n.name = field.name;
             n.parentId = parentId;
             n.offset = fieldOffset;
-            n.structTypeName = field.typeName;
+            n.structTypeName = resolvedType;
             n.collapsed = true;
 
             int nodeIdx = ctx.tree.addNode(n);
             uint64_t nodeId = ctx.tree.nodes[nodeIdx].id;
-            ctx.pendingRefs.push_back(PendingRef{nodeId, field.typeName});
+            ctx.pendingRefs.push_back(PendingRef{nodeId, resolvedType});
             if (elemSize > 0)
                 computedOffset = fieldOffset + elemSize;
             continue;
@@ -1521,7 +1885,15 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int poin
     parser.parse();
 
     if (parser.structs.isEmpty()) {
-        if (errorMsg) *errorMsg = QStringLiteral("No struct or enum definitions found");
+        if (errorMsg) {
+            if (!parser.templates.isEmpty()) {
+                *errorMsg = QStringLiteral("Template definitions found but no struct or enum definitions — "
+                                            "templates are instantiated only when a field uses them "
+                                            "(e.g. Name<Arg1, Arg2>)");
+            } else {
+                *errorMsg = QStringLiteral("No struct or enum definitions found");
+            }
+        }
         return {};
     }
 
@@ -1542,10 +1914,16 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int poin
     QHash<QString, uint64_t> classIds;
     QVector<PendingRef> pendingRefs;
 
-    // Determine offset mode: if ANY field in ANY struct has a comment offset, use comment mode
+    // Determine offset mode: if ANY field in ANY struct (or template body)
+    // has a comment offset, use comment mode
     bool useCommentOffsets = false;
     for (const auto& ps : parser.structs) {
         if (hasAnyCommentOffset(ps.fields)) { useCommentOffsets = true; break; }
+    }
+    if (!useCommentOffsets) {
+        for (auto it = parser.templates.constBegin(); it != parser.templates.constEnd(); ++it) {
+            if (hasAnyCommentOffset(it.value().body.fields)) { useCommentOffsets = true; break; }
+        }
     }
 
     // Collect enum type names for field-type detection
@@ -1555,7 +1933,9 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int poin
             enumNames.insert(ps.name);
     }
 
-    BuildContext ctx{tree, typeTable, classIds, pendingRefs, useCommentOffsets, enumNames, pointerSize, parser.sizeAsserts, parser.structAlignments};
+    BuildContext ctx{tree, typeTable, classIds, pendingRefs, useCommentOffsets, enumNames,
+                     pointerSize, parser.sizeAsserts, parser.structAlignments,
+                     parser.templates, parser.warnings};
 
     // Build nodes for each struct/enum
     for (const auto& ps : parser.structs) {
@@ -1617,6 +1997,11 @@ NodeTree importFromSource(const QString& sourceCode, QString* errorMsg, int poin
             tree.nodes[nodeIdx].refId = it.value();
         }
     }
+
+    // Non-fatal warnings ride along in errorMsg on success so callers can
+    // surface them (templates that were skipped, etc.)
+    if (errorMsg && !parser.warnings.isEmpty())
+        *errorMsg = parser.warnings.join(QStringLiteral("\n"));
 
     return tree;
 }

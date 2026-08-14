@@ -6999,7 +6999,10 @@ void MainWindow::importFromSource() {
       createTab(doc);
     }
     rebuildWorkspaceModel();
-    setAppStatus(QStringLiteral("Imported %1 classes from source").arg(classCount));
+    QString status = QStringLiteral("Imported %1 classes from source").arg(classCount);
+    if (!error.isEmpty())
+        status += QStringLiteral("\n") + error;
+    setAppStatus(status);
 }
 
 // ── Import PDB ──

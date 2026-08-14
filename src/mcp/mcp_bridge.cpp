@@ -3114,6 +3114,8 @@ QJsonObject McpBridge::toolAnalysisImportHeader(const QJsonObject& args) {
     out["typesImported"] = classCount;
     out["nodesImported"] = importedTree.nodes.size();
     out["typeNames"] = QJsonArray::fromStringList(typeNames);
+    if (!parseError.isEmpty())
+        out["warnings"] = parseError; // templates skipped etc.
     return makeTextResult(QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Indented)));
 }
 
