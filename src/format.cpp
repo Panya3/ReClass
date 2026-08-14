@@ -137,10 +137,10 @@ QString fmtInt8(int8_t v)     { return QString::number(v); }
 QString fmtInt16(int16_t v)   { return QString::number(v); }
 QString fmtInt32(int32_t v)   { return QString::number(v); }
 QString fmtInt64(int64_t v)   { return QString::number((qlonglong)v); }
-QString fmtUInt8(uint8_t v)   { return hexVal(v); }
-QString fmtUInt16(uint16_t v) { return hexVal(v); }
-QString fmtUInt32(uint32_t v) { return hexVal(v); }
-QString fmtUInt64(uint64_t v) { return hexVal(v); }
+QString fmtUInt8(uint8_t v)   { return QString::number(v); }
+QString fmtUInt16(uint16_t v) { return QString::number(v); }
+QString fmtUInt32(uint32_t v) { return QString::number(v); }
+QString fmtUInt64(uint64_t v) { return QString::number((qulonglong)v); }
 
 QString fmtFloat16(uint16_t bits) {
     // Render via the same fixed-width path as fmtFloat, suffixed 'h' to distinguish.
@@ -192,6 +192,14 @@ QString fmtUInt128(const void* data) {
     uint64_t lo, hi;
     memcpy(&lo, data, 8); memcpy(&hi, (const char*)data + 8, 8);
     return fmtU128Impl(lo, hi);
+}
+
+// 128-bit hex: "0x" + high half + low half padded to 16 digits (same
+// layout the Hex128 display case uses).
+static QString hexU128(uint64_t lo, uint64_t hi) {
+    if (hi == 0) return hexVal(lo);
+    return QStringLiteral("0x") + QString::number(hi, 16).toUpper()
+         + QString::number(lo, 16).toUpper().rightJustified(16, '0');
 }
 
 QString fmtFloat(float v) {
@@ -426,24 +434,38 @@ static QString readValueImpl(const Node& node, const Provider& prov,
         return QStringLiteral("0x") + QString::number(hi, 16).toUpper()
              + QString::number(lo, 16).toUpper().rightJustified(16, '0');
     }
-    case NodeKind::Int8:      return fmtInt8((int8_t)prov.readU8(addr));
-    case NodeKind::Int16:     return fmtInt16((int16_t)rU16(addr));
-    case NodeKind::Int32:     return fmtInt32((int32_t)rU32(addr));
-    case NodeKind::Int64:     return fmtInt64((int64_t)rU64(addr));
+    case NodeKind::Int8:
+        return node.displayHex ? hexVal(prov.readU8(addr))
+                               : fmtInt8((int8_t)prov.readU8(addr));
+    case NodeKind::Int16:
+        return node.displayHex ? hexVal(rU16(addr))
+                               : fmtInt16((int16_t)rU16(addr));
+    case NodeKind::Int32:
+        return node.displayHex ? hexVal(rU32(addr))
+                               : fmtInt32((int32_t)rU32(addr));
+    case NodeKind::Int64:
+        return node.displayHex ? hexVal(rU64(addr))
+                               : fmtInt64((int64_t)rU64(addr));
     case NodeKind::Int128:
     case NodeKind::UInt128: {
         QByteArray b = prov.readBytes(addr, 16);
         if (b.size() < 16) b.resize(16);
         if (be) std::reverse(b.begin(), b.end());
+        if (node.displayHex) {
+            uint64_t lo, hi;
+            memcpy(&lo, b.constData(), 8);
+            memcpy(&hi, b.constData() + 8, 8);
+            return hexU128(lo, hi);
+        }
         return (node.kind == NodeKind::Int128) ? fmtInt128(b.constData()) : fmtUInt128(b.constData());
     }
-    case NodeKind::UInt8:     return fmtUInt8(prov.readU8(addr));
-    case NodeKind::UInt16:    return fmtUInt16(rU16(addr));
-    case NodeKind::UInt32:    return fmtUInt32(rU32(addr));
-    case NodeKind::UInt64:    return fmtUInt64(rU64(addr));
-    case NodeKind::Float16:   { auto s = fmtFloat16(rU16(addr));         return display ? s : s.trimmed(); }
-    case NodeKind::Float:     { auto s = fmtFloat(rF32(addr));           return display ? s : s.trimmed(); }
-    case NodeKind::Double:    { auto s = fmtDouble(rF64(addr));          return display ? s : s.trimmed(); }
+    case NodeKind::UInt8:     return node.displayHex ? hexVal(prov.readU8(addr)) : fmtUInt8(prov.readU8(addr));
+    case NodeKind::UInt16:    return node.displayHex ? hexVal(rU16(addr)) : fmtUInt16(rU16(addr));
+    case NodeKind::UInt32:    return node.displayHex ? hexVal(rU32(addr)) : fmtUInt32(rU32(addr));
+    case NodeKind::UInt64:    return node.displayHex ? hexVal(rU64(addr)) : fmtUInt64(rU64(addr));
+    case NodeKind::Float16:   { if (node.displayHex) return hexVal(rU16(addr)); auto s = fmtFloat16(rU16(addr)); return display ? s : s.trimmed(); }
+    case NodeKind::Float:     { if (node.displayHex) return hexVal(rU32(addr)); auto s = fmtFloat(rF32(addr));   return display ? s : s.trimmed(); }
+    case NodeKind::Double:    { if (node.displayHex) return hexVal(rU64(addr)); auto s = fmtDouble(rF64(addr));  return display ? s : s.trimmed(); }
     case NodeKind::Bool:      return fmtBool(prov.readU8(addr));
     // Pointer / function-pointer value formatting: just the address
     // (and the optional derefed primitive). PDB symbol annotations are
@@ -467,6 +489,7 @@ static QString readValueImpl(const Node& node, const Provider& prov,
                 Node tmp;
                 tmp.kind = node.elementKind;
                 tmp.strLen = node.strLen;
+                tmp.displayHex = node.displayHex;  // honor the pointer's hex toggle on the deref
                 QString derefVal = readValueImpl(tmp, prov, target, 0, mode);
                 if (display) return QStringLiteral("-> ") + derefVal;
                 return derefVal;
@@ -798,6 +821,12 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
     }
     case NodeKind::Float16: {
         QString n = s.trimmed();
+        // Hex display mode round-trip: "0x…" is the raw 16-bit pattern.
+        if (n.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+            uint bits = stripHex(n).toUInt(ok, 16);
+            if (*ok && bits > 0xFFFF) *ok = false;
+            return *ok ? toBytes<uint16_t>((uint16_t)bits) : QByteArray{};
+        }
         if (n.endsWith('h', Qt::CaseInsensitive)) n.chop(1);
         if (n.endsWith('f', Qt::CaseInsensitive)) n.chop(1);
         n.replace(',', '.');
@@ -806,6 +835,11 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
     }
     case NodeKind::Float: {
         QString n = s.trimmed();
+        // Hex display mode round-trip: "0x…" is the raw 32-bit pattern.
+        if (n.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+            uint bits = stripHex(n).toUInt(ok, 16);
+            return *ok ? toBytes<uint32_t>(bits) : QByteArray{};
+        }
         if (n.endsWith('f', Qt::CaseInsensitive)) n.chop(1);
         n.replace(',', '.');
         float val = n.toFloat(ok);
@@ -813,6 +847,11 @@ QByteArray parseValue(NodeKind kind, const QString& text, bool* ok) {
     }
     case NodeKind::Double: {
         QString n = s.trimmed();
+        // Hex display mode round-trip: "0x…" is the raw 64-bit pattern.
+        if (n.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) {
+            qulonglong bits = stripHex(n).toULongLong(ok, 16);
+            return *ok ? toBytes<uint64_t>(bits) : QByteArray{};
+        }
         n.replace(',', '.');
         double val = n.toDouble(ok);
         return *ok ? toBytes<double>(val) : QByteArray{};

@@ -269,6 +269,12 @@ struct Node {
     // placeholder. Draft fields are excluded from the struct footprint
     // (structSpan) and from generated code until the offset is fixed.
     bool     draft      = false;
+    // Session-only display override (NOT serialized): render this node's
+    // value column in hex instead of the default decimal. Applies to the
+    // Int/UInt/Float/Double family and to primitive-pointer derefs (the
+    // pointer address itself always stays hex). Driven by the right-click
+    // "Display as Hex" toggle; resets on reload because it is transient.
+    bool     displayHex = false;
 
     // Leaf-only byte size. Returns 0 for Struct (container, unless it's a
     // bitfield which has a fixed container size) and Array-of-Struct/Array
@@ -398,6 +404,32 @@ struct Node {
     bool isBitfield() const { return classKeyword == QStringLiteral("bitfield"); }
     bool isEnum() const { return resolvedClassKeyword() == QStringLiteral("enum"); }
 };
+
+// Can this node's value column flip between decimal (default) and hex via
+// the right-click "Display as Hex" toggle? Only when the rendered value is
+// a number — the Int/UInt/Float/Double family or a primitive-pointer deref
+// of one. Pointer addresses themselves always stay hex (they are addresses,
+// not values). Exclusions:
+//   - refId != 0 on an integer field = enum pick field, whose value renders
+//     as a chip pill (compose replaces the number) — a toggle would no-op.
+//   - Only Pointer64 derefs primitives today (Pointer32 renders the raw
+//     address), so only 64-bit typed pointers get a meaningful toggle.
+inline bool supportsHexDisplayToggle(const Node& n) {
+    auto k = n.kind;
+    if (n.refId == 0
+        && ((k >= NodeKind::Int8 && k <= NodeKind::UInt128)
+            || k == NodeKind::Float16 || k == NodeKind::Float
+            || k == NodeKind::Double))
+        return true;
+    if (k == NodeKind::Pointer64 && n.ptrDepth > 0 && n.refId == 0
+        && isValidPrimitivePtrTarget(n.elementKind)) {
+        auto ek = n.elementKind;
+        return (ek >= NodeKind::Int8 && ek <= NodeKind::UInt128)
+            || ek == NodeKind::Float16 || ek == NodeKind::Float
+            || ek == NodeKind::Double;
+    }
+    return false;
+}
 
 // The scalar integer kinds that can back an enum's storage (8/16/32/64-bit,
 // signed or unsigned). UInt128/Int128 are excluded: enum member values are

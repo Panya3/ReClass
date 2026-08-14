@@ -4830,6 +4830,37 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         if (addedQuickConvert || (anyNonHex && allConvertible))
             menu.addSeparator();
 
+        // ── Display as Hex (session-only, per-node view toggle) ──
+        // Checked when every eligible selected node already shows hex;
+        // clicking flips all eligible nodes to hex (or back to decimal
+        // when they already are). Never touches pointer addresses.
+        {
+            bool anyEligible = false;
+            bool allHex = true;
+            for (uint64_t id : ids) {
+                int idx = m_doc->tree.indexOfId(id);
+                if (idx < 0) continue;
+                const Node& n = m_doc->tree.nodes[idx];
+                if (!supportsHexDisplayToggle(n)) continue;
+                anyEligible = true;
+                if (!n.displayHex) allHex = false;
+            }
+            if (anyEligible) {
+                QAction* act = menu.addAction("Display as &Hex", [this, ids, allHex]() {
+                    for (uint64_t id : ids) {
+                        int idx = m_doc->tree.indexOfId(id);
+                        if (idx < 0) continue;
+                        Node& n = m_doc->tree.nodes[idx];
+                        if (supportsHexDisplayToggle(n)) n.displayHex = !allHex;
+                    }
+                    refresh();
+                });
+                act->setCheckable(true);
+                act->setChecked(allHex);
+                menu.addSeparator();
+            }
+        }
+
         // "Next Type →" for multi-select (same size, filtered variants)
         if (allSame) {
             int sz = sizeForKind(commonKind);
@@ -5610,6 +5641,23 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 act->setCheckable(true);
                 act->setChecked(cur);
             }
+        }
+
+        // ── Display as Hex (session-only view toggle) ──
+        // Flips this node's value column between decimal (default) and hex
+        // without changing its type. Stays on the in-memory node only — not
+        // serialized, so a reload reverts to the default. Pointer addresses
+        // are excluded (they always render hex).
+        if (supportsHexDisplayToggle(node)) {
+            bool cur = node.displayHex;
+            QAction* act = menu.addAction("Display as &Hex", [this, nodeId, cur]() {
+                int ni = m_doc->tree.indexOfId(nodeId);
+                if (ni < 0) return;
+                m_doc->tree.nodes[ni].displayHex = !cur;
+                refresh();
+            });
+            act->setCheckable(true);
+            act->setChecked(cur);
         }
 
         // ── Structure ► submenu (only when relevant) ──

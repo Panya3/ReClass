@@ -930,12 +930,13 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                         }
                         // Match → "MEMBER (value)". No match → the raw
                         // number, formatted exactly like the value column
-                        // (hex for UInt, decimal for Int) — a blank header
-                        // would re-create the "no value shown" report for
-                        // the most common case (uninitialized bytes like
-                        // 0xFF that are not members). Both render as the
-                        // same clickable pill so the value stays visible
-                        // AND editable via the picker's custom-value row.
+                        // (decimal for both Int and UInt by default) — a
+                        // blank header would re-create the "no value shown"
+                        // report for the most common case (uninitialized
+                        // bytes like 0xFF that are not members). Both
+                        // render as the same clickable pill so the value
+                        // stays visible AND editable via the picker's
+                        // custom-value row.
                         QString chipText;
                         if (!memberName.isEmpty()) {
                             quint64 unsignedV = (quint64)v;

@@ -593,6 +593,184 @@ private slots:
         QVERIFY(isValidPrimitivePtrTarget(NodeKind::Float));
         QVERIFY(isValidPrimitivePtrTarget(NodeKind::Bool));
     }
+
+    void testSupportsHexDisplayToggle() {
+        auto base = [](NodeKind k) { Node n; n.kind = k; return n; };
+
+        // Scalar numbers: eligible.
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::UInt32)));
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::Int8)));
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::Int64)));
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::UInt128)));
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::Float16)));
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::Float)));
+        QVERIFY(supportsHexDisplayToggle(base(NodeKind::Double)));
+
+        // Not numbers / already-hex / containers: excluded.
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::Hex32)));
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::Bool)));
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::Struct)));
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::Array)));
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::UTF8)));
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::Vec3)));
+
+        // Enum pick field (integer with refId): value renders as a chip
+        // pill, so a hex toggle would be a no-op.
+        Node enumField = base(NodeKind::UInt32);
+        enumField.refId = 42;
+        QVERIFY(!supportsHexDisplayToggle(enumField));
+
+        // Typed primitive pointer (64-bit): the deref is a number → eligible.
+        Node ptr = base(NodeKind::Pointer64);
+        ptr.ptrDepth = 1;
+        ptr.elementKind = NodeKind::UInt32;
+        QVERIFY(supportsHexDisplayToggle(ptr));
+
+        // Plain / class pointers: the shown value is the address → excluded.
+        QVERIFY(!supportsHexDisplayToggle(base(NodeKind::Pointer64)));
+        Node classPtr = base(NodeKind::Pointer64);
+        classPtr.refId = 7;
+        QVERIFY(!supportsHexDisplayToggle(classPtr));
+
+        // Pointer32 never derefs primitives → a toggle there would no-op.
+        Node ptr32 = base(NodeKind::Pointer32);
+        ptr32.ptrDepth = 1;
+        ptr32.elementKind = NodeKind::UInt32;
+        QVERIFY(!supportsHexDisplayToggle(ptr32));
+
+        // Pointer to a non-number target (bool) → excluded.
+        Node boolPtr = base(NodeKind::Pointer64);
+        boolPtr.ptrDepth = 1;
+        boolPtr.elementKind = NodeKind::Bool;
+        QVERIFY(!supportsHexDisplayToggle(boolPtr));
+    }
+
+    // ── Display as Hex (session-only per-node toggle) ──
+
+    void testFmtUIntDefaultDecimal() {
+        // Unsigned integer formatters now render decimal by default; hex
+        // is the opt-in display mode driven by node.displayHex.
+        QCOMPARE(fmt::fmtUInt8(0xAB), QStringLiteral("171"));
+        QCOMPARE(fmt::fmtUInt16(0x1234), QStringLiteral("4660"));
+        QCOMPARE(fmt::fmtUInt32(5), QStringLiteral("5"));
+        QCOMPARE(fmt::fmtUInt32(0xFFFFFFFFu), QStringLiteral("4294967295"));
+        QCOMPARE(fmt::fmtUInt64(0xFFFFFFFFFFFFFFFFull), QStringLiteral("18446744073709551615"));
+    }
+
+    void testDisplayHexToggle() {
+        // UInt32: default decimal, displayHex → hex
+        QByteArray data(16, '\0');
+        uint32_t v = 0x1A2B3C4D;
+        memcpy(data.data(), &v, 4);
+        BufferProvider prov(data);
+
+        Node n;
+        n.kind = NodeKind::UInt32;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("439041101"));
+        n.displayHex = true;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("0x1a2b3c4d"));
+        // Editable form matches the display so the edit dialog round-trips.
+        QCOMPARE(fmt::editableValue(n, prov, 0, 0), QStringLiteral("0x1a2b3c4d"));
+
+        // Int32 (positive value): decimal by default, raw bit pattern as
+        // hex when toggled.
+        n.kind = NodeKind::Int32;
+        n.displayHex = false;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("439041101"));
+        n.displayHex = true;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("0x1a2b3c4d"));
+
+        // Float: value by default, raw IEEE-754 bit pattern as hex.
+        // (BufferProvider copies its input at construction, so rebuild it
+        // after overwriting the buffer.)
+        data.fill('\0');
+        float f = 1.0f;
+        memcpy(data.data(), &f, 4);
+        BufferProvider provF(data);
+        n.kind = NodeKind::Float;
+        n.displayHex = false;
+        QVERIFY(fmt::readValue(n, provF, 0, 0).contains("1.0"));
+        n.displayHex = true;
+        QCOMPARE(fmt::readValue(n, provF, 0, 0), QStringLiteral("0x3f800000"));
+
+        // Double: raw 64-bit pattern.
+        data.fill('\0');
+        double d = 1.0;
+        memcpy(data.data(), &d, 8);
+        BufferProvider provD(data);
+        n.kind = NodeKind::Double;
+        n.displayHex = true;
+        QCOMPARE(fmt::readValue(n, provD, 0, 0), QStringLiteral("0x3ff0000000000000"));
+
+        // UInt128: decimal by default, hex when toggled.
+        data.fill('\0');
+        uint64_t lo = 0xABCDEF0123456789ull, hi = 0xDEADBEEFCAFEBABEull;
+        memcpy(data.data(), &lo, 8);
+        memcpy(data.data() + 8, &hi, 8);
+        BufferProvider provU(data);
+        n.kind = NodeKind::UInt128;
+        n.displayHex = false;
+        QCOMPARE(fmt::readValue(n, provU, 0, 0),
+                 QStringLiteral("295990755076957304710458999272422860681"));
+        n.displayHex = true;
+        QCOMPARE(fmt::readValue(n, provU, 0, 0),
+                 QStringLiteral("0xDEADBEEFCAFEBABEABCDEF0123456789"));
+    }
+
+    void testParseFloatHexBits() {
+        // Hex display mode round-trip: "0x…" parses as the raw bit pattern.
+        bool ok = false;
+        QByteArray b = fmt::parseValue(NodeKind::Float, QStringLiteral("0x3F800000"), &ok);
+        QVERIFY(ok);
+        QCOMPARE(b.size(), 4);
+        float f;
+        memcpy(&f, b.constData(), 4);
+        QCOMPARE(f, 1.0f);
+
+        ok = false;
+        b = fmt::parseValue(NodeKind::Double, QStringLiteral("0x3FF0000000000000"), &ok);
+        QVERIFY(ok);
+        QCOMPARE(b.size(), 8);
+        double d;
+        memcpy(&d, b.constData(), 8);
+        QCOMPARE(d, 1.0);
+
+        ok = false;
+        b = fmt::parseValue(NodeKind::Float16, QStringLiteral("0x3C00"), &ok);
+        QVERIFY(ok);
+        QCOMPARE(b.size(), 2);
+        QCOMPARE((uint8_t)b[0], (uint8_t)0x00);
+        QCOMPARE((uint8_t)b[1], (uint8_t)0x3C);
+
+        // Over-range 16-bit pattern rejected.
+        ok = true;
+        fmt::parseValue(NodeKind::Float16, QStringLiteral("0x10000"), &ok);
+        QVERIFY(!ok);
+    }
+
+    void testDisplayHexPointerDeref() {
+        // Typed pointer to uint32_t: deref shows decimal by default and
+        // hex when the pointer node's displayHex flag is set. The pointer
+        // address itself always renders hex.
+        QByteArray data(0x110, '\0');
+        uint64_t ptr = 0x100;
+        memcpy(data.data(), &ptr, 8);
+        uint32_t target = 5;
+        memcpy(data.data() + 0x100, &target, 4);
+        BufferProvider prov(data);
+
+        Node n;
+        n.kind = NodeKind::Pointer64;
+        n.ptrDepth = 1;
+        n.elementKind = NodeKind::UInt32;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("-> 5"));
+        n.displayHex = true;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("-> 0x5"));
+        // Plain void* pointer: address stays hex regardless of the flag.
+        n.ptrDepth = 0;
+        n.elementKind = NodeKind::UInt8;
+        QCOMPARE(fmt::readValue(n, prov, 0, 0), QStringLiteral("0x100"));
+    }
 };
 
 QTEST_MAIN(TestFormat)

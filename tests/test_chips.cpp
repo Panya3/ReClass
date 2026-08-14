@@ -241,9 +241,9 @@ private slots:
             while (e > 0 && line[e - 1] == QLatin1Char(' ')) --e;
             int s = e;
             while (s > 0 && line[s - 1] != QLatin1Char(' ')) --s;
-            // UInt32 renders in hex (fmtUInt32 → "0x…"); the unmatched
-            // value must stay exactly as it would normally display.
-            QCOMPARE(line.mid(s, e - s), QStringLiteral("0x5"));
+            // UInt32 renders in decimal (fmtUInt32 → "5") by default; the
+            // unmatched value must stay exactly as it would normally display.
+            QCOMPARE(line.mid(s, e - s), QStringLiteral("5"));
             sawNumber = true;
         }
         QVERIFY2(sawNumber, "found the UInt32 field line");
@@ -395,16 +395,17 @@ private slots:
         QCOMPARE(c->enumCurrentValue, (int64_t)2);
 
         // Unmatched value on the same shape: still a pill, but showing the
-        // raw number (hex, matching the value column) instead of a member
-        // name — a blank header would re-create the "no value shown" bug
-        // for the common uninitialized/non-member case, and the pill keeps
-        // the row clickable so the picker's custom-value row can fix it.
-        // (data was moved into prov — write through the provider's buffer.)
+        // raw number (decimal, matching the value column) instead of a
+        // member name — a blank header would re-create the "no value shown"
+        // bug for the common uninitialized/non-member case, and the pill
+        // keeps the row clickable so the picker's custom-value row can fix
+        // it. (data was moved into prov — write through the provider's
+        // buffer.)
         prov.data()[kStructBase + 32] = 0x7F;
         ComposeResult r2 = compose(tree, prov, rootId);
         const LineChip* c2 = firstChipOfKind(r2, ChipKind::Enum);
         QVERIFY2(c2, "enum pill should still fire on no-match (raw value)");
-        QCOMPARE(c2->text, QStringLiteral("0x7f"));  // hexVal uses lowercase
+        QCOMPARE(c2->text, QStringLiteral("127"));  // fmtUInt8 decimal
         QCOMPARE(c2->enumCurrentValue, (int64_t)0x7F);
     }
 

@@ -3264,6 +3264,65 @@ private slots:
                                     + c.text));
         }
     }
+
+    // ── Display as Hex: node.displayHex drives the value column ──
+    // The right-click "Display as &Hex" action flips this flag on the
+    // in-memory tree node; compose must render decimal by default and hex
+    // when set, for scalars AND unsigned* derefs (the pointer address
+    // itself stays hex either way).
+    void testDisplayHexToggleValueColumn() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root; root.kind = NodeKind::Struct; root.name = "Root"; root.parentId = 0;
+        tree.addNode(root);
+        uint64_t rootId = tree.nodes[0].id;
+
+        Node u32; u32.kind = NodeKind::UInt32; u32.name = "count";
+        u32.parentId = rootId; u32.offset = 0;
+        tree.addNode(u32);
+        int u32Idx = tree.nodes.size() - 1;
+
+        Node ptr; ptr.kind = NodeKind::Pointer64; ptr.name = "pcount";
+        ptr.parentId = rootId; ptr.offset = 8;
+        ptr.ptrDepth = 1; ptr.elementKind = NodeKind::UInt32;
+        tree.addNode(ptr);
+        int ptrIdx = tree.nodes.size() - 1;
+
+        QByteArray data(0x110, '\0');
+        uint32_t five = 5;   memcpy(data.data(), &five, 4);
+        uint64_t ptrVal = 0x100; memcpy(data.data() + 8, &ptrVal, 8);
+        uint32_t seven = 7;  memcpy(data.data() + 0x100, &seven, 4);
+        BufferProvider prov(data);
+
+        auto lineFor = [&](const ComposeResult& r, int nodeIdx) -> QString {
+            for (int i = 0; i < r.meta.size() && i < r.lineStarts.size(); i++) {
+                if (r.meta[i].nodeIdx != nodeIdx) continue;
+                int ls = r.lineStarts[i];
+                int le = (i + 1 < r.lineStarts.size()) ? r.lineStarts[i + 1] - 1
+                                                       : r.text.size();
+                return r.text.mid(ls, le - ls).trimmed();
+            }
+            return QString();
+        };
+
+        // Default: unsigned values render decimal (incl. the unsigned* deref).
+        ComposeResult r0 = compose(tree, prov);
+        QVERIFY(lineFor(r0, u32Idx).endsWith(QStringLiteral("5")));
+        QVERIFY(lineFor(r0, ptrIdx).endsWith(QStringLiteral("-> 7")));
+
+        // Toggle the scalar field to hex.
+        tree.nodes[u32Idx].displayHex = true;
+        ComposeResult r1 = compose(tree, prov);
+        QVERIFY(lineFor(r1, u32Idx).endsWith(QStringLiteral("0x5")));
+        QVERIFY(lineFor(r1, ptrIdx).endsWith(QStringLiteral("-> 7")));  // untouched
+
+        // Toggle the unsigned* deref to hex; the pointer address stays hex
+        // regardless (the deref branch renders "-> 0x7").
+        tree.nodes[ptrIdx].displayHex = true;
+        ComposeResult r2 = compose(tree, prov);
+        QVERIFY(lineFor(r2, ptrIdx).endsWith(QStringLiteral("-> 0x7")));
+    }
 };
 
 QTEST_MAIN(TestCompose)

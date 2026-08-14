@@ -53,11 +53,14 @@ static QString inferPreview(const uint8_t* data, int len, const TypeSuggestion& 
         case NodeKind::Float:     return fmt::fmtFloat(detail::loadF32(data));
         case NodeKind::Double:    return fmt::fmtDouble(detail::loadF64(data));
         case NodeKind::Int32:     return fmt::fmtInt32((int32_t)detail::loadU32(data));
-        case NodeKind::UInt32:    return fmt::fmtUInt32(detail::loadU32(data));
+        // Keep the historical hex preview (hex.read interpret mode shows the
+        // raw interpretation); the editor's decimal default is a display
+        // concern of the value column, not the MCP surface.
+        case NodeKind::UInt32:    return QStringLiteral("0x%1").arg(detail::loadU32(data), 0, 16);
         case NodeKind::Int16:     return fmt::fmtInt16((int16_t)detail::loadU16(data));
-        case NodeKind::UInt16:    return fmt::fmtUInt16(detail::loadU16(data));
+        case NodeKind::UInt16:    return QStringLiteral("0x%1").arg(detail::loadU16(data), 0, 16);
         case NodeKind::Int64:     return fmt::fmtInt64((int64_t)detail::loadU64(data));
-        case NodeKind::UInt64:    return fmt::fmtUInt64(detail::loadU64(data));
+        case NodeKind::UInt64:    return QStringLiteral("0x%1").arg(detail::loadU64(data), 0, 16);
         case NodeKind::Pointer64: return fmt::fmtPointer64(detail::loadU64(data));
         case NodeKind::Pointer32: return fmt::fmtPointer32(detail::loadU32(data));
         case NodeKind::Bool:      return fmt::fmtBool(data[0]);
