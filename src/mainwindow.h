@@ -250,6 +250,7 @@ private:
         int            lastRenderedFmt    = -1;
         int            lastRenderedScope  = -1;
         bool           lastRenderedAsserts = false;
+        bool           lastRenderedPrivatePads = false;
         // Minimap: narrow read-only Scintilla mirror to the right of the
         // main editor. Synced via RcxEditor::documentApplied. Created but
         // hidden; visibility toggled via the View menu "Minimap" action.

@@ -177,6 +177,10 @@ OptionsDialog::OptionsDialog(const OptionsResult& current, QWidget* parent)
     m_assertCheck = new QCheckBox("Emit static_assert size checks");
     m_assertCheck->setChecked(current.generatorAsserts);
     cppLayout->addWidget(m_assertCheck);
+    m_privatePadsCheck = new QCheckBox(
+        "Place generated padding in private: sections (class types only)");
+    m_privatePadsCheck->setChecked(current.generatorPrivatePads);
+    cppLayout->addWidget(m_privatePadsCheck);
     generatorLayout->addWidget(cppGroup);
 
     generatorLayout->addStretch();
@@ -228,6 +232,7 @@ OptionsResult OptionsDialog::result() const {
     r.autoStartMcp = m_autoMcpCheck->isChecked();
     r.refreshMs = m_refreshSpin->value();
     r.generatorAsserts = m_assertCheck->isChecked();
+    r.generatorPrivatePads = m_privatePadsCheck->isChecked();
     r.braceWrap = m_braceWrapCheck->isChecked();
     return r;
 }

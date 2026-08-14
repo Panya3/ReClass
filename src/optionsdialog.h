@@ -18,6 +18,7 @@ struct OptionsResult {
     bool    autoStartMcp = true;
     int     refreshMs = 660;
     bool    generatorAsserts = false;
+    bool    generatorPrivatePads = false;
     bool    braceWrap = false;
 };
 
@@ -43,6 +44,7 @@ private:
     QCheckBox*      m_autoMcpCheck   = nullptr;
     QSpinBox*       m_refreshSpin    = nullptr;
     QCheckBox*      m_assertCheck    = nullptr;
+    QCheckBox*      m_privatePadsCheck = nullptr;
     QCheckBox*      m_braceWrapCheck = nullptr;
 
     // searchable keywords per leaf tree item

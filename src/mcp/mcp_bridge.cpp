@@ -2171,15 +2171,16 @@ QJsonObject McpBridge::toolUiAction(const QJsonObject& args) {
         if (!doc) return makeTextResult("No active tab", true);
         const QHash<NodeKind, QString>* aliases = doc->typeAliases.isEmpty() ? nullptr : &doc->typeAliases;
         bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+        bool privatePads = QSettings("REECLASS", "REECLASS").value("generatorPrivatePads", false).toBool();
         QString code;
         if (!nodeIdStr.isEmpty()) {
             // Per-struct export
             uint64_t nid = nodeIdStr.toULongLong();
-            code = renderCpp(doc->tree, nid, aliases, asserts);
+            code = renderCpp(doc->tree, nid, aliases, asserts, privatePads);
             if (code.isEmpty())
                 return makeTextResult("Node not found or not a struct: " + nodeIdStr, true);
         } else {
-            code = renderCppAll(doc->tree, aliases, asserts);
+            code = renderCppAll(doc->tree, aliases, asserts, privatePads);
         }
         // Truncate if too large (64 KB limit)
         if (code.size() > 65536) {

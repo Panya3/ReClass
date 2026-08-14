@@ -6066,6 +6066,7 @@ void MainWindow::showOptionsDialog(int initialPage) {
     current.autoStartMcp = QSettings("REECLASS", "REECLASS").value("autoStartMcp", true).toBool();
     current.refreshMs = QSettings("REECLASS", "REECLASS").value("refreshMs", rcx::kDefaultRefreshMs).toInt();
     current.generatorAsserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+    current.generatorPrivatePads = QSettings("REECLASS", "REECLASS").value("generatorPrivatePads", false).toBool();
     current.braceWrap = QSettings("REECLASS", "REECLASS").value("braceWrap", false).toBool();
 
     OptionsDialog dlg(current, this);
@@ -6103,6 +6104,9 @@ void MainWindow::showOptionsDialog(int initialPage) {
 
     if (r.generatorAsserts != current.generatorAsserts)
         QSettings("REECLASS", "REECLASS").setValue("generatorAsserts", r.generatorAsserts);
+
+    if (r.generatorPrivatePads != current.generatorPrivatePads)
+        QSettings("REECLASS", "REECLASS").setValue("generatorPrivatePads", r.generatorPrivatePads);
 
     if (r.braceWrap != current.braceWrap) {
         QSettings("REECLASS", "REECLASS").setValue("braceWrap", r.braceWrap);
@@ -6538,6 +6542,7 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     const QHash<NodeKind, QString>* aliases =
         tab.doc->typeAliases.isEmpty() ? nullptr : &tab.doc->typeAliases;
     bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
+    bool privatePads = QSettings("REECLASS", "REECLASS").value("generatorPrivatePads", false).toBool();
     CodeFormat fmt = static_cast<CodeFormat>(
         QSettings("REECLASS", "REECLASS").value("codeFormat", 0).toInt());
     CodeScope scope = static_cast<CodeScope>(
@@ -6548,26 +6553,28 @@ void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
                      && pane.lastRenderedRootId == rootId
                      && pane.lastRenderedFmt == static_cast<int>(fmt)
                      && pane.lastRenderedScope == static_cast<int>(scope)
-                     && pane.lastRenderedAsserts == asserts);
+                     && pane.lastRenderedAsserts == asserts
+                     && pane.lastRenderedPrivatePads == privatePads);
     QString text;
     if (cacheHit) {
         text = pane.lastRenderedText;
     } else {
         if (scope == CodeScope::FullSdk) {
-            text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+            text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts, privatePads);
         } else if (rootId != 0) {
             if (scope == CodeScope::WithChildren)
-                text = renderCodeTree(fmt, tab.doc->tree, rootId, aliases, asserts);
+                text = renderCodeTree(fmt, tab.doc->tree, rootId, aliases, asserts, privatePads);
             else
-                text = renderCode(fmt, tab.doc->tree, rootId, aliases, asserts);
+                text = renderCode(fmt, tab.doc->tree, rootId, aliases, asserts, privatePads);
         } else {
-            text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts);
+            text = renderCodeAll(fmt, tab.doc->tree, aliases, asserts, privatePads);
         }
         pane.lastRenderedText     = text;
         pane.lastRenderedTreeGen  = treeGen;
         pane.lastRenderedFmt      = static_cast<int>(fmt);
         pane.lastRenderedScope    = static_cast<int>(scope);
         pane.lastRenderedAsserts  = asserts;
+        pane.lastRenderedPrivatePads = privatePads;
     }
 
     // Scroll restoration: save if same root, reset if different
@@ -6859,7 +6866,8 @@ void MainWindow::exportToFile(CodeFormat fmt) {
     const QHash<NodeKind, QString>* aliases =
         tab->doc->typeAliases.isEmpty() ? nullptr : &tab->doc->typeAliases;
     bool asserts = QSettings("REECLASS", "REECLASS").value("generatorAsserts", false).toBool();
-    QString text = renderCodeAll(fmt, tab->doc->tree, aliases, asserts);
+    bool privatePads = QSettings("REECLASS", "REECLASS").value("generatorPrivatePads", false).toBool();
+    QString text = renderCodeAll(fmt, tab->doc->tree, aliases, asserts, privatePads);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         ThemedMessageBox::warn(this,
