@@ -32,28 +32,28 @@ const char* codeScopeName(CodeScope scope);
 
 QString renderCode(CodeFormat fmt, const NodeTree& tree, uint64_t rootStructId,
                    const QHash<NodeKind, QString>* typeAliases = nullptr,
-                   bool emitAsserts = false);
+                   bool emitAsserts = false, bool privatePads = false);
 
 // Render rootStructId + all struct types reachable from it
 QString renderCodeTree(CodeFormat fmt, const NodeTree& tree, uint64_t rootStructId,
                        const QHash<NodeKind, QString>* typeAliases = nullptr,
-                       bool emitAsserts = false);
+                       bool emitAsserts = false, bool privatePads = false);
 
 QString renderCodeAll(CodeFormat fmt, const NodeTree& tree,
                       const QHash<NodeKind, QString>* typeAliases = nullptr,
-                      bool emitAsserts = false);
+                      bool emitAsserts = false, bool privatePads = false);
 
 // ── Individual backends ──
 
 QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
                   const QHash<NodeKind, QString>* typeAliases = nullptr,
-                  bool emitAsserts = false);
+                  bool emitAsserts = false, bool privatePads = false);
 QString renderCppTree(const NodeTree& tree, uint64_t rootStructId,
                       const QHash<NodeKind, QString>* typeAliases = nullptr,
-                      bool emitAsserts = false);
+                      bool emitAsserts = false, bool privatePads = false);
 QString renderCppAll(const NodeTree& tree,
                      const QHash<NodeKind, QString>* typeAliases = nullptr,
-                     bool emitAsserts = false);
+                     bool emitAsserts = false, bool privatePads = false);
 
 QString renderRust(const NodeTree& tree, uint64_t rootStructId,
                    const QHash<NodeKind, QString>* typeAliases = nullptr,

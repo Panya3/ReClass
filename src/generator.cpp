@@ -70,7 +70,6 @@ struct GenContext {
     QSet<uint64_t>  visiting;           // cycle guard
     QSet<uint64_t>  forwardDeclared;    // forward-declared type IDs
     QString         output;
-    int             padCounter = 0;
     const QHash<NodeKind, QString>* typeAliases = nullptr;
     bool            emitAsserts = false;
     // Pre-computed unique name per struct id. Populated by assignUniqueNames()
@@ -80,6 +79,17 @@ struct GenContext {
     // Kept at the end so existing aggregate initialisers still bind positions
     // 1..10 correctly; nameById defaults to an empty hash.
     QHash<uint64_t, QString> nameById;
+    // When true, class-keyword types split generated padding into `private:`
+    // sections and user-declared fields into `public:` sections (ReClass.NET
+    // style). struct/union are unaffected — they default to public in C++.
+    bool privatePads = false;
+    // Zero-padded hex width for offset annotations and auto-named members,
+    // derived from the top-level class size (digitsForSize). Set per class
+    // before its body is emitted; nested containers inherit it.
+    int padDigits = 2;
+    // Pad-name dedup scope: reset per top-level class, shared by nested
+    // anonymous containers (their members hoist into the class scope).
+    QSet<QString> usedPadNames;
 
     void prepare() { output.reserve(tree.nodes.size() * 80); }
 
@@ -92,8 +102,13 @@ struct GenContext {
         return children;
     }
 
-    QString uniquePadName() {
-        return QStringLiteral("_pad%1").arg(padCounter++, 4, 16, QChar('0'));
+    QString uniquePadName(int offset) {
+        QString base = QStringLiteral("_pad_%1").arg(offset, padDigits, 16, QChar('0'));
+        QString name = base;
+        for (int n = 2; usedPadNames.contains(name); n++)
+            name = base + QStringLiteral("_%1").arg(n);
+        usedPadNames.insert(name);
+        return name;
     }
 
     // Resolve the C type name for a primitive, consulting aliases first
@@ -159,10 +174,22 @@ static void emitStruct(GenContext& ctx, uint64_t structId);
 
 static const QChar kCommentMarker = QChar(0x01);
 
-static QString offsetComment(int offset, bool isSizeof = false) {
+// Offset annotation for a generated line. width is the zero-padded hex
+// digit count for the class being emitted (2/4/8 depending on its size).
+// Member lines get a front comment `/* XX */`; the closing-size comment
+// stays as a trailing `// sizeof 0x...` on the `};`/`}` line.
+static QString offsetComment(int offset, int width, bool isSizeof = false) {
     if (isSizeof)
         return QString(kCommentMarker) + QStringLiteral("// sizeof 0x%1").arg(QString::number(offset, 16).toUpper());
-    return QString(kCommentMarker) + QStringLiteral("// 0x%1").arg(QString::number(offset, 16).toUpper());
+    return QStringLiteral("/* %1 */ ").arg(QString::number(offset, 16).toUpper(), width, QChar('0'));
+}
+
+// Hex digit count for offset annotations: grows with the class size so a
+// small class stays compact (/* 28 */) while a big one aligns (/* 0028 */).
+static int digitsForSize(int size) {
+    if (size <= 0xFF) return 2;
+    if (size <= 0xFFFF) return 4;
+    return 8;
 }
 
 static QString indent(int depth) {
@@ -173,69 +200,91 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
     const NodeTree& tree = ctx.tree;
     QString ind = indent(depth);
     QString name = sanitizeIdent(node.name.isEmpty()
-        ? QStringLiteral("field_%1").arg(node.offset, 2, 16, QChar('0'))
+        ? QStringLiteral("field_%1").arg(node.offset, ctx.padDigits, 16, QChar('0'))
         : node.name);
-    QString oc = offsetComment(baseOffset + node.offset);
+    QString oc = offsetComment(baseOffset + node.offset, ctx.padDigits);
 
     switch (node.kind) {
     case NodeKind::Vec2:
-        return ind + QStringLiteral("%1 %2[2];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + oc + QStringLiteral("%1 %2[2];").arg(ctx.cType(NodeKind::Float), name);
     case NodeKind::Vec3:
-        return ind + QStringLiteral("%1 %2[3];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + oc + QStringLiteral("%1 %2[3];").arg(ctx.cType(NodeKind::Float), name);
     case NodeKind::Vec4:
-        return ind + QStringLiteral("%1 %2[4];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + oc + QStringLiteral("%1 %2[4];").arg(ctx.cType(NodeKind::Float), name);
     case NodeKind::Mat4x4:
-        return ind + QStringLiteral("%1 %2[4][4];").arg(ctx.cType(NodeKind::Float), name) + oc;
+        return ind + oc + QStringLiteral("%1 %2[4][4];").arg(ctx.cType(NodeKind::Float), name);
     case NodeKind::UTF8:
-        return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen) + oc;
+        return ind + oc + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF8), name).arg(node.strLen);
     case NodeKind::UTF16:
-        return ind + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen) + oc;
+        return ind + oc + QStringLiteral("%1 %2[%3];").arg(ctx.cType(NodeKind::UTF16), name).arg(node.strLen);
     case NodeKind::Pointer32:
     case NodeKind::Pointer64: {
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
                 QString target = ctx.nameFor(tree.nodes[refIdx]);
-                return ind + QStringLiteral("struct %1* %2;").arg(target, name) + oc;
+                return ind + oc + QStringLiteral("struct %1* %2;").arg(target, name);
             }
         }
         // Native pointer: use void* when this is the target's natural pointer kind
         bool isNativePtr = (node.kind == NodeKind::Pointer32 && ctx.tree.pointerSize <= 4)
                         || (node.kind == NodeKind::Pointer64 && ctx.tree.pointerSize >= 8);
         if (isNativePtr)
-            return ind + QStringLiteral("void* %1;").arg(name) + oc;
+            return ind + oc + QStringLiteral("void* %1;").arg(name);
         // Cross-size pointer: fall back to raw integer type
-        return ind + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name) + oc;
+        return ind + oc + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name);
     }
     case NodeKind::FuncPtr32:
-        return ind + QStringLiteral("void (*%1)();").arg(name) + oc;
+        return ind + oc + QStringLiteral("void (*%1)();").arg(name);
     case NodeKind::FuncPtr64:
-        return ind + QStringLiteral("void (*%1)();").arg(name) + oc;
+        return ind + oc + QStringLiteral("void (*%1)();").arg(name);
     default:
-        return ind + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name) + oc;
+        return ind + oc + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name);
     }
 }
 
 // ── Emit struct body (fields + padding) — Vergilius-style ──
 
 static void emitStructBody(GenContext& ctx, uint64_t structId,
-                           bool isUnion, int depth, int baseOffset) {
+                           bool isUnion, int depth, int baseOffset,
+                           bool classSections = false) {
     const NodeTree& tree = ctx.tree;
     int idx = tree.indexOfId(structId);
     if (idx < 0) return;
 
     int structSize = tree.structSpan(structId, &ctx.childMap);
     QString ind = indent(depth);
+    // Access labels (public:/private:) sit at the container's own level
+    // (same indent as the `class` keyword line). For a top-level class
+    // depth is 1, so labelInd is the 0-indent column.
+    QString labelInd = indent(depth - 1);
 
     auto children = ctx.prepareChildren(structId);
+
+    // Section tracking for class-keyword bodies (privatePads on): generated
+    // padding goes under `private:` and user-declared members under
+    // `public:`. A class body starts in the implicit private section — a
+    // leading pad gets no label, matching ReClass.NET output.
+    bool inPublic = false;
+    auto ensurePublic = [&]() {
+        if (classSections && !inPublic) {
+            ctx.output += labelInd + QStringLiteral("public:\n");
+            inPublic = true;
+        }
+    };
 
     // Helper: emit a padding/hex run as a single collapsed byte array
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
-        ctx.output += ind + QStringLiteral("uint8_t %1[0x%2];%3\n")
-            .arg(ctx.uniquePadName())
-            .arg(QString::number(size, 16).toUpper())
-            .arg(offsetComment(baseOffset + relOffset));
+        // Padding is never part of the public API of a class
+        if (classSections && inPublic) {
+            ctx.output += labelInd + QStringLiteral("private:\n");
+            inPublic = false;
+        }
+        ctx.output += ind + offsetComment(baseOffset + relOffset, ctx.padDigits)
+            + QStringLiteral("uint8_t %1[0x%2];\n")
+            .arg(ctx.uniquePadName(baseOffset + relOffset))
+            .arg(QString::number(size, 16).toUpper());
     };
 
     int cursor = 0;
@@ -291,34 +340,42 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
                 if (bfType.isEmpty()) bfType = QStringLiteral("uint32_t");
                 QString fieldName = child.name.isEmpty()
                     ? QString() : QStringLiteral(" ") + sanitizeIdent(child.name);
-                ctx.output += ind + QStringLiteral("struct\n");
-                ctx.output += ind + QStringLiteral("{\n");
+                ensurePublic();
+                ctx.output += ind + QStringLiteral("struct {\n");
                 QString bfInd = indent(depth + 1);
                 for (const auto& m : child.bitfieldMembers) {
-                    ctx.output += bfInd + bfType + QStringLiteral(" ")
+                    ctx.output += bfInd + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                        + bfType + QStringLiteral(" ")
                         + sanitizeIdent(m.name) + QStringLiteral(" : ")
                         + QString::number(m.bitWidth) + QStringLiteral(";")
-                        + offsetComment(baseOffset + child.offset)
                         + QStringLiteral("\n");
                 }
-                ctx.output += ind + QStringLiteral("}") + fieldName + QStringLiteral(";")
-                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("}") + fieldName + QStringLiteral(";")
+                    + QStringLiteral("\n");
             } else {
 
             bool isAnonymous = child.structTypeName.isEmpty();
 
             if (isAnonymous) {
-                // Inline anonymous struct/union
+                // Inline anonymous struct/union/class — a user member of the
+                // enclosing body, so it belongs in the public section.
+                ensurePublic();
                 QString kw = child.resolvedClassKeyword();
-                ctx.output += ind + kw + QStringLiteral("\n");
-                ctx.output += ind + QStringLiteral("{\n");
+                ctx.output += ind + kw + QStringLiteral(" {\n");
                 bool childIsUnion = (kw == QStringLiteral("union"));
+                bool childSections = (kw == QStringLiteral("class")) && ctx.privatePads;
+                // Same rule as emitStruct: an inline anonymous `class` would
+                // default its members to private without an explicit section.
+                if (kw == QStringLiteral("class") && !ctx.privatePads)
+                    ctx.output += ind + QStringLiteral("public:\n");
                 emitStructBody(ctx, child.id, childIsUnion, depth + 1,
-                               baseOffset + child.offset);
+                               baseOffset + child.offset, childSections);
                 QString fieldName = child.name.isEmpty()
                     ? QString() : QStringLiteral(" ") + sanitizeIdent(child.name);
-                ctx.output += ind + QStringLiteral("}") + fieldName + QStringLiteral(";")
-                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("}") + fieldName + QStringLiteral(";")
+                    + QStringLiteral("\n");
             } else {
                 // Named struct — reference by name with struct keyword prefix
                 QString kw = child.resolvedClassKeyword();
@@ -326,9 +383,11 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
                     kw = QStringLiteral("struct");
                 QString typeName = ctx.nameFor(child);
                 QString fieldName = sanitizeIdent(child.name);
-                ctx.output += ind + kw + QStringLiteral(" ") + typeName
+                ensurePublic();
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + kw + QStringLiteral(" ") + typeName
                     + QStringLiteral(" ") + fieldName + QStringLiteral(";")
-                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             }
             } // end bitfield else
         } else if (child.kind == NodeKind::Array) {
@@ -345,16 +404,18 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
             }
 
             QString fieldName = sanitizeIdent(child.name);
+            ensurePublic();
             if (hasStructChild && !elemTypeName.isEmpty()) {
-                ctx.output += ind + QStringLiteral("struct %1 %2[%3];%4\n")
-                    .arg(elemTypeName, fieldName).arg(child.arrayLen)
-                    .arg(offsetComment(baseOffset + child.offset));
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("struct %1 %2[%3];\n")
+                    .arg(elemTypeName, fieldName).arg(child.arrayLen);
             } else {
-                ctx.output += ind + QStringLiteral("%1 %2[%3];%4\n")
-                    .arg(ctx.cType(child.elementKind), fieldName).arg(child.arrayLen)
-                    .arg(offsetComment(baseOffset + child.offset));
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("%1 %2[%3];\n")
+                    .arg(ctx.cType(child.elementKind), fieldName).arg(child.arrayLen);
             }
         } else {
+            ensurePublic();
             ctx.output += emitField(ctx, child, depth, baseOffset) + QStringLiteral("\n");
         }
 
@@ -438,12 +499,27 @@ static void emitStruct(GenContext& ctx, uint64_t structId) {
 
     if (kw == QStringLiteral("enum")) kw = QStringLiteral("struct");
 
-    ctx.output += kw + QStringLiteral(" ") + typeName + QStringLiteral("\n{\n");
+    // Per-class annotation context: offset digit width and pad-name dedup
+    // scope (nested anonymous containers share the class's member namespace).
+    ctx.padDigits = digitsForSize(structSize);
+    ctx.usedPadNames.clear();
 
-    emitStructBody(ctx, structId, kw == QStringLiteral("union"), 1, 0);
+    ctx.output += kw + QStringLiteral(" ") + typeName + QStringLiteral(" {\n");
+
+    bool classSections = (kw == QStringLiteral("class")) && ctx.privatePads;
+    // C++ `class` defaults members to private — export an explicit
+    // `public:` section first so the fields stay accessible (matches
+    // ReClass.NET generated output). struct/union default to public
+    // and need no specifier. With privatePads enabled the section
+    // layout is handled inside emitStructBody (padding → private:,
+    // user members → public:) instead.
+    if (kw == QStringLiteral("class") && !ctx.privatePads)
+        ctx.output += QStringLiteral("public:\n");
+
+    emitStructBody(ctx, structId, kw == QStringLiteral("union"), 1, 0, classSections);
 
     ctx.output += QStringLiteral("};")
-        + offsetComment(structSize, true)
+        + offsetComment(structSize, 0, true)
         + QStringLiteral("\n");
     if (ctx.emitAsserts)
         ctx.output += QStringLiteral("static_assert(sizeof(%1) == 0x%2, \"Size mismatch for %1\");\n")
@@ -553,43 +629,43 @@ static QString emitRustField(GenContext& ctx, const Node& node, int depth, int b
     const NodeTree& tree = ctx.tree;
     QString ind = indent(depth);
     QString name = sanitizeIdent(node.name.isEmpty()
-        ? QStringLiteral("field_%1").arg(node.offset, 2, 16, QChar('0'))
+        ? QStringLiteral("field_%1").arg(node.offset, ctx.padDigits, 16, QChar('0'))
         : node.name);
-    QString oc = offsetComment(baseOffset + node.offset);
+    QString oc = offsetComment(baseOffset + node.offset, ctx.padDigits);
 
     switch (node.kind) {
     case NodeKind::Vec2:
-        return ind + QStringLiteral("pub %1: [f32; 2],").arg(name) + oc;
+        return ind + oc + QStringLiteral("pub %1: [f32; 2],").arg(name);
     case NodeKind::Vec3:
-        return ind + QStringLiteral("pub %1: [f32; 3],").arg(name) + oc;
+        return ind + oc + QStringLiteral("pub %1: [f32; 3],").arg(name);
     case NodeKind::Vec4:
-        return ind + QStringLiteral("pub %1: [f32; 4],").arg(name) + oc;
+        return ind + oc + QStringLiteral("pub %1: [f32; 4],").arg(name);
     case NodeKind::Mat4x4:
-        return ind + QStringLiteral("pub %1: [[f32; 4]; 4],").arg(name) + oc;
+        return ind + oc + QStringLiteral("pub %1: [[f32; 4]; 4],").arg(name);
     case NodeKind::UTF8:
-        return ind + QStringLiteral("pub %1: [u8; %2],").arg(name).arg(node.strLen) + oc;
+        return ind + oc + QStringLiteral("pub %1: [u8; %2],").arg(name).arg(node.strLen);
     case NodeKind::UTF16:
-        return ind + QStringLiteral("pub %1: [u16; %2],").arg(name).arg(node.strLen) + oc;
+        return ind + oc + QStringLiteral("pub %1: [u16; %2],").arg(name).arg(node.strLen);
     case NodeKind::Pointer32:
     case NodeKind::Pointer64: {
         if (node.refId != 0) {
             int refIdx = tree.indexOfId(node.refId);
             if (refIdx >= 0) {
                 QString target = ctx.nameFor(tree.nodes[refIdx]);
-                return ind + QStringLiteral("pub %1: *mut %2,").arg(name, target) + oc;
+                return ind + oc + QStringLiteral("pub %1: *mut %2,").arg(name, target);
             }
         }
         bool isNativePtr = (node.kind == NodeKind::Pointer32 && ctx.tree.pointerSize <= 4)
                         || (node.kind == NodeKind::Pointer64 && ctx.tree.pointerSize >= 8);
         if (isNativePtr)
-            return ind + QStringLiteral("pub %1: *mut core::ffi::c_void,").arg(name) + oc;
-        return ind + QStringLiteral("pub %1: %2,").arg(name, rustType(ctx, node.kind)) + oc;
+            return ind + oc + QStringLiteral("pub %1: *mut core::ffi::c_void,").arg(name);
+        return ind + oc + QStringLiteral("pub %1: %2,").arg(name, rustType(ctx, node.kind));
     }
     case NodeKind::FuncPtr32:
     case NodeKind::FuncPtr64:
-        return ind + QStringLiteral("pub %1: Option<unsafe extern \"C\" fn()>,").arg(name) + oc;
+        return ind + oc + QStringLiteral("pub %1: Option<unsafe extern \"C\" fn()>,").arg(name);
     default:
-        return ind + QStringLiteral("pub %1: %2,").arg(name, rustType(ctx, node.kind)) + oc;
+        return ind + oc + QStringLiteral("pub %1: %2,").arg(name, rustType(ctx, node.kind));
     }
 }
 
@@ -606,10 +682,11 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
 
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
-        ctx.output += ind + QStringLiteral("pub %1: [u8; 0x%2],")
-            .arg(ctx.uniquePadName())
+        ctx.output += ind + offsetComment(baseOffset + relOffset, ctx.padDigits)
+            + QStringLiteral("pub %1: [u8; 0x%2],")
+            .arg(ctx.uniquePadName(baseOffset + relOffset))
             .arg(QString::number(size, 16).toUpper())
-            + offsetComment(baseOffset + relOffset) + QStringLiteral("\n");
+            + QStringLiteral("\n");
     };
 
     int cursor = 0;
@@ -653,36 +730,39 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
                 QString bfType = rustType(ctx, child.elementKind);
                 if (bfType.isEmpty()) bfType = QStringLiteral("u32");
                 QString fieldName = sanitizeIdent(child.name.isEmpty()
-                    ? QStringLiteral("bitfield_%1").arg(child.offset, 2, 16, QChar('0'))
+                    ? QStringLiteral("bitfield_%1").arg(child.offset, ctx.padDigits, 16, QChar('0'))
                     : child.name);
                 QStringList bits;
                 for (const auto& m : child.bitfieldMembers)
                     bits << QStringLiteral("%1:%2").arg(sanitizeIdent(m.name)).arg(m.bitWidth);
-                ctx.output += ind + QStringLiteral("pub %1: %2,")
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("pub %1: %2,")
                     .arg(fieldName, bfType)
                     + QStringLiteral(" // bits: ") + bits.join(QStringLiteral(", "))
-                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else {
                 bool isAnonymous = child.structTypeName.isEmpty();
                 if (isAnonymous) {
                     // Rust can't do anonymous inline structs — flatten as byte array
                     int span = tree.structSpan(child.id, &ctx.childMap);
                     QString fieldName = sanitizeIdent(child.name.isEmpty()
-                        ? QStringLiteral("anon_%1").arg(child.offset, 2, 16, QChar('0'))
+                        ? QStringLiteral("anon_%1").arg(child.offset, ctx.padDigits, 16, QChar('0'))
                         : child.name);
-                    ctx.output += ind + QStringLiteral("pub %1: [u8; 0x%2],")
+                    ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                        + QStringLiteral("pub %1: [u8; 0x%2],")
                         .arg(fieldName)
                         .arg(QString::number(span, 16).toUpper())
-                        + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                        + QStringLiteral("\n");
                 } else {
                     QString kw = child.resolvedClassKeyword();
                     if (kw == QStringLiteral("enum") && child.enumMembers.isEmpty())
                         kw = QStringLiteral("struct");
                     QString typeName = ctx.nameFor(child);
                     QString fieldName = sanitizeIdent(child.name);
-                    ctx.output += ind + QStringLiteral("pub %1: %2,")
+                    ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                        + QStringLiteral("pub %1: %2,")
                         .arg(fieldName, typeName)
-                        + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                        + QStringLiteral("\n");
                 }
             }
         } else if (child.kind == NodeKind::Array) {
@@ -698,13 +778,15 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
             }
             QString fieldName = sanitizeIdent(child.name);
             if (hasStructChild && !elemTypeName.isEmpty()) {
-                ctx.output += ind + QStringLiteral("pub %1: [%2; %3],")
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("pub %1: [%2; %3],")
                     .arg(fieldName, elemTypeName).arg(child.arrayLen)
-                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else {
-                ctx.output += ind + QStringLiteral("pub %1: [%2; %3],")
+                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                    + QStringLiteral("pub %1: [%2; %3],")
                     .arg(fieldName, rustType(ctx, child.elementKind)).arg(child.arrayLen)
-                    + offsetComment(baseOffset + child.offset) + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             }
         } else {
             ctx.output += emitRustField(ctx, child, depth, baseOffset) + QStringLiteral("\n");
@@ -762,6 +844,9 @@ static void emitRustStruct(GenContext& ctx, uint64_t structId) {
         return;
     }
 
+    ctx.padDigits = digitsForSize(structSize);
+    ctx.usedPadNames.clear();
+
     bool isUnion = (kw == QStringLiteral("union"));
 
     if (isUnion)
@@ -772,7 +857,7 @@ static void emitRustStruct(GenContext& ctx, uint64_t structId) {
     emitRustStructBody(ctx, structId, isUnion, 1, 0);
 
     ctx.output += QStringLiteral("}")
-        + offsetComment(structSize, true)
+        + offsetComment(structSize, 0, true)
         + QStringLiteral("\n");
     if (ctx.emitAsserts)
         ctx.output += QStringLiteral("const _: () = assert!(core::mem::size_of::<%1>() == 0x%2);\n")
@@ -825,7 +910,7 @@ static void emitDefinesForStruct(GenContext& ctx, uint64_t structId,
         if (isHexNode(child.kind)) continue;
 
         QString fieldName = sanitizeIdent(child.name.isEmpty()
-            ? QStringLiteral("field_%1").arg(child.offset, 2, 16, QChar('0'))
+            ? QStringLiteral("field_%1").arg(child.offset, ctx.padDigits, 16, QChar('0'))
             : child.name);
         int absOffset = baseOffset + child.offset;
 
@@ -911,9 +996,9 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
 
         int absOffset = baseOffset + child.offset;
         QString name = sanitizeIdent(child.name.isEmpty()
-            ? QStringLiteral("field_%1").arg(child.offset, 2, 16, QChar('0'))
+            ? QStringLiteral("field_%1").arg(child.offset, ctx.padDigits, 16, QChar('0'))
             : child.name);
-        QString oc = offsetComment(absOffset);
+        QString oc = offsetComment(absOffset, ctx.padDigits);
 
         if (child.kind == NodeKind::Struct) {
             if (child.isBitfield()
@@ -923,24 +1008,24 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
                 QStringList bits;
                 for (const auto& m : child.bitfieldMembers)
                     bits << QStringLiteral("%1:%2").arg(sanitizeIdent(m.name)).arg(m.bitWidth);
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                     .arg(QString::number(absOffset, 16).toUpper(), bfType, name)
                     + QStringLiteral(" // bits: ") + bits.join(QStringLiteral(", "))
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else if (child.structTypeName.isEmpty()) {
                 // Anonymous inline — emit as fixed byte array
                 // (structExtent: Size= must cover the members' byte range;
                 // structSpan would report the C-size footprint for unions)
                 int span = tree.structExtent(child.id, &ctx.childMap);
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[0x%3];")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[0x%3];")
                     .arg(QString::number(absOffset, 16).toUpper(), name)
                     .arg(QString::number(span, 16).toUpper())
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else {
                 QString typeName = ctx.nameFor(child);
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                     .arg(QString::number(absOffset, 16).toUpper(), typeName, name)
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             }
         } else if (child.kind == NodeKind::Array) {
             QVector<int> arrayKids = ctx.childMap.value(child.id);
@@ -955,70 +1040,70 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
             }
             if (hasStructChild && !elemTypeName.isEmpty()) {
                 // MarshalAs for struct arrays
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] [MarshalAs(UnmanagedType.ByValArray, SizeConst = %2)] public %3[] %4;")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] [MarshalAs(UnmanagedType.ByValArray, SizeConst = %2)] public %3[] %4;")
                     .arg(QString::number(absOffset, 16).toUpper())
                     .arg(child.arrayLen)
                     .arg(elemTypeName, name)
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else {
                 QString elemType = csType(ctx, child.elementKind);
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed %2 %3[%4];")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed %2 %3[%4];")
                     .arg(QString::number(absOffset, 16).toUpper(), elemType, name)
                     .arg(child.arrayLen)
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             }
         } else {
             // Primitive fields
             switch (child.kind) {
             case NodeKind::Vec2:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[2];")
-                    .arg(QString::number(absOffset, 16).toUpper(), name) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[2];")
+                    .arg(QString::number(absOffset, 16).toUpper(), name) + QStringLiteral("\n");
                 break;
             case NodeKind::Vec3:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[3];")
-                    .arg(QString::number(absOffset, 16).toUpper(), name) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[3];")
+                    .arg(QString::number(absOffset, 16).toUpper(), name) + QStringLiteral("\n");
                 break;
             case NodeKind::Vec4:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[4];")
-                    .arg(QString::number(absOffset, 16).toUpper(), name) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[4];")
+                    .arg(QString::number(absOffset, 16).toUpper(), name) + QStringLiteral("\n");
                 break;
             case NodeKind::Mat4x4:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[16];")
-                    .arg(QString::number(absOffset, 16).toUpper(), name) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed float %2[16];")
+                    .arg(QString::number(absOffset, 16).toUpper(), name) + QStringLiteral("\n");
                 break;
             case NodeKind::UTF8:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[%3];")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed byte %2[%3];")
                     .arg(QString::number(absOffset, 16).toUpper(), name)
-                    .arg(child.strLen) + oc + QStringLiteral("\n");
+                    .arg(child.strLen) + QStringLiteral("\n");
                 break;
             case NodeKind::UTF16:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public fixed char %2[%3];")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public fixed char %2[%3];")
                     .arg(QString::number(absOffset, 16).toUpper(), name)
-                    .arg(child.strLen) + oc + QStringLiteral("\n");
+                    .arg(child.strLen) + QStringLiteral("\n");
                 break;
             case NodeKind::Pointer32:
             case NodeKind::Pointer64: {
                 bool isNativePtr = (child.kind == NodeKind::Pointer32 && ctx.tree.pointerSize <= 4)
                                 || (child.kind == NodeKind::Pointer64 && ctx.tree.pointerSize >= 8);
                 if (isNativePtr)
-                    ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public IntPtr %2;")
-                        .arg(QString::number(absOffset, 16).toUpper(), name) + oc + QStringLiteral("\n");
+                    ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public IntPtr %2;")
+                        .arg(QString::number(absOffset, 16).toUpper(), name) + QStringLiteral("\n");
                 else
-                    ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
+                    ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                         .arg(QString::number(absOffset, 16).toUpper(), csType(ctx, child.kind), name)
-                        + oc + QStringLiteral("\n");
+                        + QStringLiteral("\n");
                 break;
             }
             case NodeKind::FuncPtr32:
             case NodeKind::FuncPtr64:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public IntPtr %2;")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public IntPtr %2;")
                     .arg(QString::number(absOffset, 16).toUpper(), name)
-                    + QStringLiteral(" // fn ptr") + oc + QStringLiteral("\n");
+                    + QStringLiteral(" // fn ptr") + QStringLiteral("\n");
                 break;
             default:
-                ctx.output += ind + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
+                ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                     .arg(QString::number(absOffset, 16).toUpper(), csType(ctx, child.kind), name)
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
                 break;
             }
         }
@@ -1066,6 +1151,9 @@ static void emitCSharpStruct(GenContext& ctx, uint64_t structId) {
         return;
     }
 
+    ctx.padDigits = digitsForSize(structSize);
+    ctx.usedPadNames.clear();
+
     bool isUnion = (kw == QStringLiteral("union"));
 
     ctx.output += QStringLiteral("[StructLayout(LayoutKind.Explicit, Size = 0x%1)]\n")
@@ -1075,7 +1163,7 @@ static void emitCSharpStruct(GenContext& ctx, uint64_t structId) {
     emitCSharpStructBody(ctx, structId, isUnion, 1, 0);
 
     ctx.output += QStringLiteral("}")
-        + offsetComment(structSize, true)
+        + offsetComment(structSize, 0, true)
         + QStringLiteral("\n\n");
 
     ctx.visiting.remove(structId);
@@ -1136,10 +1224,11 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
 
     auto emitPadField = [&](int relOffset, int size) {
         if (size <= 0) return;
-        ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_uint8 * 0x%2),")
-            .arg(ctx.uniquePadName())
+        ctx.output += ind + offsetComment(baseOffset + relOffset, ctx.padDigits)
+            + QStringLiteral("(\"%1\", ctypes.c_uint8 * 0x%2),")
+            .arg(ctx.uniquePadName(baseOffset + relOffset))
             .arg(QString::number(size, 16).toUpper())
-            + offsetComment(baseOffset + relOffset) + QStringLiteral("\n");
+            + QStringLiteral("\n");
     };
 
     int cursor = 0;
@@ -1179,9 +1268,9 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
 
         int absOffset = baseOffset + child.offset;
         QString name = sanitizeIdent(child.name.isEmpty()
-            ? QStringLiteral("field_%1").arg(child.offset, 2, 16, QChar('0'))
+            ? QStringLiteral("field_%1").arg(child.offset, ctx.padDigits, 16, QChar('0'))
             : child.name);
-        QString oc = offsetComment(absOffset);
+        QString oc = offsetComment(absOffset, ctx.padDigits);
 
         if (child.kind == NodeKind::Struct) {
             if (child.isBitfield()
@@ -1191,21 +1280,21 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                 QStringList bits;
                 for (const auto& m : child.bitfieldMembers)
                     bits << QStringLiteral("%1:%2").arg(sanitizeIdent(m.name)).arg(m.bitWidth);
-                ctx.output += ind + QStringLiteral("(\"%1\", %2),")
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", %2),")
                     .arg(name, bfType)
                     + QStringLiteral(" # bits: ") + bits.join(QStringLiteral(", "))
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else if (child.structTypeName.isEmpty()) {
                 int span = tree.structSpan(child.id, &ctx.childMap);
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_uint8 * 0x%2),")
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_uint8 * 0x%2),")
                     .arg(name)
                     .arg(QString::number(span, 16).toUpper())
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             } else {
                 QString typeName = ctx.nameFor(child);
-                ctx.output += ind + QStringLiteral("(\"%1\", %2),")
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", %2),")
                     .arg(name, typeName)
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             }
         } else if (child.kind == NodeKind::Array) {
             QVector<int> arrayKids = ctx.childMap.value(child.id);
@@ -1219,39 +1308,39 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                 }
             }
             if (hasStructChild && !elemTypeName.isEmpty()) {
-                ctx.output += ind + QStringLiteral("(\"%1\", %2 * %3),")
-                    .arg(name, elemTypeName).arg(child.arrayLen) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", %2 * %3),")
+                    .arg(name, elemTypeName).arg(child.arrayLen) + QStringLiteral("\n");
             } else {
-                ctx.output += ind + QStringLiteral("(\"%1\", %2 * %3),")
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", %2 * %3),")
                     .arg(name, pyTypeName(child.elementKind)).arg(child.arrayLen)
-                    + oc + QStringLiteral("\n");
+                    + QStringLiteral("\n");
             }
         } else {
             // Primitive fields
             switch (child.kind) {
             case NodeKind::Vec2:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_float * 2),").arg(name)
-                    + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_float * 2),").arg(name)
+                    + QStringLiteral("\n");
                 break;
             case NodeKind::Vec3:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_float * 3),").arg(name)
-                    + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_float * 3),").arg(name)
+                    + QStringLiteral("\n");
                 break;
             case NodeKind::Vec4:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_float * 4),").arg(name)
-                    + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_float * 4),").arg(name)
+                    + QStringLiteral("\n");
                 break;
             case NodeKind::Mat4x4:
-                ctx.output += ind + QStringLiteral("(\"%1\", (ctypes.c_float * 4) * 4),").arg(name)
-                    + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", (ctypes.c_float * 4) * 4),").arg(name)
+                    + QStringLiteral("\n");
                 break;
             case NodeKind::UTF8:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_char * %2),").arg(name)
-                    .arg(child.strLen) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_char * %2),").arg(name)
+                    .arg(child.strLen) + QStringLiteral("\n");
                 break;
             case NodeKind::UTF16:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_wchar * %2),").arg(name)
-                    .arg(child.strLen) + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_wchar * %2),").arg(name)
+                    .arg(child.strLen) + QStringLiteral("\n");
                 break;
             case NodeKind::Pointer32:
             case NodeKind::Pointer64: {
@@ -1261,27 +1350,27 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                     int refIdx = tree.indexOfId(child.refId);
                     if (refIdx >= 0) {
                         QString target = ctx.nameFor(tree.nodes[refIdx]);
-                        ctx.output += ind + QStringLiteral("(\"%1\", ctypes.POINTER(%2)),").arg(name, target)
-                            + oc + QStringLiteral("\n");
+                        ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.POINTER(%2)),").arg(name, target)
+                            + QStringLiteral("\n");
                         break;
                     }
                 }
                 if (isNativePtr)
-                    ctx.output += ind + QStringLiteral("(\"%1\", ctypes.c_void_p),").arg(name)
-                        + oc + QStringLiteral("\n");
+                    ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_void_p),").arg(name)
+                        + QStringLiteral("\n");
                 else
-                    ctx.output += ind + QStringLiteral("(\"%1\", %2),").arg(name, pyTypeName(child.kind))
-                        + oc + QStringLiteral("\n");
+                    ctx.output += ind + oc + QStringLiteral("(\"%1\", %2),").arg(name, pyTypeName(child.kind))
+                        + QStringLiteral("\n");
                 break;
             }
             case NodeKind::FuncPtr32:
             case NodeKind::FuncPtr64:
-                ctx.output += ind + QStringLiteral("(\"%1\", ctypes.CFUNCTYPE(None)),").arg(name)
-                    + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.CFUNCTYPE(None)),").arg(name)
+                    + QStringLiteral("\n");
                 break;
             default:
-                ctx.output += ind + QStringLiteral("(\"%1\", %2),").arg(name, pyTypeName(child.kind))
-                    + oc + QStringLiteral("\n");
+                ctx.output += ind + oc + QStringLiteral("(\"%1\", %2),").arg(name, pyTypeName(child.kind))
+                    + QStringLiteral("\n");
                 break;
             }
         }
@@ -1338,11 +1427,14 @@ static void emitPythonStruct(GenContext& ctx, uint64_t structId) {
         return;
     }
 
+    ctx.padDigits = digitsForSize(structSize);
+    ctx.usedPadNames.clear();
+
     bool isUnion = (kw == QStringLiteral("union"));
     QString baseClass = isUnion ? QStringLiteral("ctypes.Union") : QStringLiteral("ctypes.Structure");
 
     ctx.output += QStringLiteral("class %1(%2):").arg(typeName, baseClass)
-        + offsetComment(structSize, true) + QStringLiteral("\n");
+        + offsetComment(structSize, 0, true) + QStringLiteral("\n");
     ctx.output += QStringLiteral("    _fields_ = [\n");
 
     emitPythonStructBody(ctx, structId, isUnion, 0);
@@ -1433,14 +1525,14 @@ const char* codeScopeName(CodeScope scope) {
 
 QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
                   const QHash<NodeKind, QString>* typeAliases,
-                  bool emitAsserts) {
+                  bool emitAsserts, bool privatePads) {
     int idx = tree.indexOfId(rootStructId);
     if (idx < 0) return {};
 
     const Node& root = tree.nodes[idx];
     if (root.kind != NodeKind::Struct) return {};
 
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, typeAliases, emitAsserts, {}, privatePads};
     ctx.prepare();
     ctx.assignUniqueNames();
 
@@ -1453,13 +1545,13 @@ QString renderCpp(const NodeTree& tree, uint64_t rootStructId,
 
 QString renderCppTree(const NodeTree& tree, uint64_t rootStructId,
                       const QHash<NodeKind, QString>* typeAliases,
-                      bool emitAsserts) {
+                      bool emitAsserts, bool privatePads) {
     int idx = tree.indexOfId(rootStructId);
     if (idx < 0) return {};
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     auto childMap = buildChildMap(tree);
-    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, typeAliases, emitAsserts, {}, privatePads};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
@@ -1472,8 +1564,8 @@ QString renderCppTree(const NodeTree& tree, uint64_t rootStructId,
 
 QString renderCppAll(const NodeTree& tree,
                      const QHash<NodeKind, QString>* typeAliases,
-                     bool emitAsserts) {
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+                     bool emitAsserts, bool privatePads) {
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, typeAliases, emitAsserts, {}, privatePads};
     ctx.prepare();
     ctx.assignUniqueNames();
 
@@ -1501,7 +1593,7 @@ QString renderRust(const NodeTree& tree, uint64_t rootStructId,
     if (idx < 0) return {};
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, typeAliases, emitAsserts};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("// Generated by REECLASS 2027\n\n");
@@ -1517,7 +1609,7 @@ QString renderRustTree(const NodeTree& tree, uint64_t rootStructId,
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     auto childMap = buildChildMap(tree);
-    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, typeAliases, emitAsserts};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("// Generated by REECLASS 2027\n\n");
@@ -1531,7 +1623,7 @@ QString renderRustTree(const NodeTree& tree, uint64_t rootStructId,
 QString renderRustAll(const NodeTree& tree,
                       const QHash<NodeKind, QString>* typeAliases,
                       bool emitAsserts) {
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, typeAliases, emitAsserts};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("// Generated by REECLASS 2027\n\n");
@@ -1554,7 +1646,7 @@ QString renderDefines(const NodeTree& tree, uint64_t rootStructId) {
     if (idx < 0) return {};
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, nullptr, false};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
@@ -1568,7 +1660,7 @@ QString renderDefinesTree(const NodeTree& tree, uint64_t rootStructId) {
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     auto childMap = buildChildMap(tree);
-    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, nullptr, false};
+    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, nullptr, false};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
@@ -1580,7 +1672,7 @@ QString renderDefinesTree(const NodeTree& tree, uint64_t rootStructId) {
 }
 
 QString renderDefinesAll(const NodeTree& tree) {
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, nullptr, false};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("#pragma once\n#include <cstdint>\n\n");
@@ -1605,7 +1697,7 @@ QString renderCSharp(const NodeTree& tree, uint64_t rootStructId,
     if (idx < 0) return {};
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, typeAliases, emitAsserts};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
@@ -1621,7 +1713,7 @@ QString renderCSharpTree(const NodeTree& tree, uint64_t rootStructId,
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     auto childMap = buildChildMap(tree);
-    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, typeAliases, emitAsserts};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
@@ -1635,7 +1727,7 @@ QString renderCSharpTree(const NodeTree& tree, uint64_t rootStructId,
 QString renderCSharpAll(const NodeTree& tree,
                         const QHash<NodeKind, QString>* typeAliases,
                         bool emitAsserts) {
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, typeAliases, emitAsserts};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, typeAliases, emitAsserts};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("using System.Runtime.InteropServices;\n#nullable disable\n\n");
@@ -1658,7 +1750,7 @@ QString renderPython(const NodeTree& tree, uint64_t rootStructId) {
     if (idx < 0) return {};
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, nullptr, false};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("import ctypes\n\n");
@@ -1672,7 +1764,7 @@ QString renderPythonTree(const NodeTree& tree, uint64_t rootStructId) {
     if (tree.nodes[idx].kind != NodeKind::Struct) return {};
 
     auto childMap = buildChildMap(tree);
-    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, 0, nullptr, false};
+    GenContext ctx{tree, childMap, {}, {}, {}, {}, {}, nullptr, false};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("import ctypes\n\n");
@@ -1684,7 +1776,7 @@ QString renderPythonTree(const NodeTree& tree, uint64_t rootStructId) {
 }
 
 QString renderPythonAll(const NodeTree& tree) {
-    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, 0, nullptr, false};
+    GenContext ctx{tree, buildChildMap(tree), {}, {}, {}, {}, {}, nullptr, false};
     ctx.prepare();
     ctx.assignUniqueNames();
     ctx.output += QStringLiteral("import ctypes\n\n");
@@ -1703,35 +1795,38 @@ QString renderPythonAll(const NodeTree& tree) {
 // ── Format dispatch ──
 
 QString renderCode(CodeFormat fmt, const NodeTree& tree, uint64_t rootStructId,
-                   const QHash<NodeKind, QString>* typeAliases, bool emitAsserts) {
+                   const QHash<NodeKind, QString>* typeAliases, bool emitAsserts,
+                   bool privatePads) {
     switch (fmt) {
     case CodeFormat::RustStruct:    return renderRust(tree, rootStructId, typeAliases, emitAsserts);
     case CodeFormat::DefineOffsets: return renderDefines(tree, rootStructId);
     case CodeFormat::CSharpStruct:  return renderCSharp(tree, rootStructId, typeAliases, emitAsserts);
     case CodeFormat::PythonCtypes:  return renderPython(tree, rootStructId);
-    default:                        return renderCpp(tree, rootStructId, typeAliases, emitAsserts);
+    default:                        return renderCpp(tree, rootStructId, typeAliases, emitAsserts, privatePads);
     }
 }
 
 QString renderCodeTree(CodeFormat fmt, const NodeTree& tree, uint64_t rootStructId,
-                       const QHash<NodeKind, QString>* typeAliases, bool emitAsserts) {
+                       const QHash<NodeKind, QString>* typeAliases, bool emitAsserts,
+                       bool privatePads) {
     switch (fmt) {
     case CodeFormat::RustStruct:    return renderRustTree(tree, rootStructId, typeAliases, emitAsserts);
     case CodeFormat::DefineOffsets: return renderDefinesTree(tree, rootStructId);
     case CodeFormat::CSharpStruct:  return renderCSharpTree(tree, rootStructId, typeAliases, emitAsserts);
     case CodeFormat::PythonCtypes:  return renderPythonTree(tree, rootStructId);
-    default:                        return renderCppTree(tree, rootStructId, typeAliases, emitAsserts);
+    default:                        return renderCppTree(tree, rootStructId, typeAliases, emitAsserts, privatePads);
     }
 }
 
 QString renderCodeAll(CodeFormat fmt, const NodeTree& tree,
-                      const QHash<NodeKind, QString>* typeAliases, bool emitAsserts) {
+                      const QHash<NodeKind, QString>* typeAliases, bool emitAsserts,
+                      bool privatePads) {
     switch (fmt) {
     case CodeFormat::RustStruct:    return renderRustAll(tree, typeAliases, emitAsserts);
     case CodeFormat::DefineOffsets: return renderDefinesAll(tree);
     case CodeFormat::CSharpStruct:  return renderCSharpAll(tree, typeAliases, emitAsserts);
     case CodeFormat::PythonCtypes:  return renderPythonAll(tree);
-    default:                        return renderCppAll(tree, typeAliases, emitAsserts);
+    default:                        return renderCppAll(tree, typeAliases, emitAsserts, privatePads);
     }
 }
 

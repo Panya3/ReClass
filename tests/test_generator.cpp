@@ -59,17 +59,17 @@ private slots:
         // Size comment on closing brace
         QVERIFY(result.contains("// sizeof 0x10"));
 
-        // Struct definition (brace on new line)
-        QVERIFY(result.contains("struct Player\n{"));
+        // Struct definition (brace on same line)
+        QVERIFY(result.contains("struct Player {"));
         QVERIFY(result.contains("int32_t health;"));
         QVERIFY(result.contains("float speed;"));
         QVERIFY(result.contains("uint64_t id;"));
         QVERIFY(result.contains("};"));
 
-        // Offset comments
-        QVERIFY(result.contains("// 0x0"));
-        QVERIFY(result.contains("// 0x4"));
-        QVERIFY(result.contains("// 0x8"));
+        // Offset comments (front, zero-padded to the class size width)
+        QVERIFY(result.contains("/* 00 */"));
+        QVERIFY(result.contains("/* 04 */"));
+        QVERIFY(result.contains("/* 08 */"));
 
         // static_assert
         QVERIFY(result.contains("static_assert(sizeof(Player) == 0x10"));
@@ -77,6 +77,292 @@ private slots:
         // Without emitAsserts, static_assert should not appear
         QString noAsserts = rcx::renderCpp(tree, rootId);
         QVERIFY(!noAsserts.contains("static_assert"));
+    }
+
+    // ── class keyword exports a public: section ──
+    // C++ `class` defaults members to private, so a class-keyword type must
+    // emit `public:` right after the opening brace — otherwise the exported
+    // fields are inaccessible outside the class (ReClass.NET does the same).
+
+    void testClassKeywordEmitsPublicSection() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Actor";
+        root.structTypeName = "Actor";
+        root.classKeyword = QStringLiteral("class");
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f;
+        f.kind = rcx::NodeKind::Int32;
+        f.name = "hp";
+        f.parentId = rootId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true);
+
+        // public: on its own line at indent 0, fields unchanged
+        QVERIFY(result.contains("class Actor {\npublic:\n"));
+        QVERIFY(result.contains("int32_t hp;"));
+        QVERIFY(result.contains("static_assert(sizeof(Actor) == 0x4"));
+
+        // struct keyword stays untouched — structs default to public already
+        auto tree2 = makeSimpleStruct();
+        QString structOut = rcx::renderCpp(tree2, tree2.nodes[0].id);
+        QVERIFY(structOut.contains("struct Player {"));
+        QVERIFY(!structOut.contains("public:"));
+    }
+
+    // ── Inline anonymous class-keyword container also gets public: ──
+    // A nested Struct child with no type name and keyword "class" is emitted
+    // inline as `class { ... };` — without a public: section its members
+    // would be private, same defect the top-level fix addresses.
+
+    void testAnonymousClassKeywordEmitsPublicSection() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Holder";
+        root.structTypeName = "Holder";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Anonymous class container (no structTypeName) with one field
+        rcx::Node anon;
+        anon.kind = rcx::NodeKind::Struct;
+        anon.name = "inner";
+        anon.structTypeName = "";
+        anon.classKeyword = QStringLiteral("class");
+        anon.parentId = rootId;
+        anon.offset = 0;
+        int ai = tree.addNode(anon);
+        uint64_t anonId = tree.nodes[ai].id;
+
+        rcx::Node f;
+        f.kind = rcx::NodeKind::Int32;
+        f.name = "value";
+        f.parentId = anonId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        QVERIFY(result.contains("class {\n    public:\n"));
+        QVERIFY(result.contains("int32_t value;"));
+        // The enclosing root is a struct — itself untouched
+        QVERIFY(result.contains("struct Holder {"));
+    }
+
+    // ── privatePads: class padding → private:, user fields → public: ──
+    // When the generatorPrivatePads option is on, a class-keyword type splits
+    // its body: generated padding (gap/hex/tail runs) goes under `private:`
+    // and user-declared members under `public:`. A leading pad needs no
+    // label — a class body starts in the implicit private section.
+
+    void testClassPrivatePadsSections() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "name";
+        root.structTypeName = "name";
+        root.classKeyword = QStringLiteral("class");
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // User field at 0x28 (leading gap 0x0..0x28 is padding)
+        rcx::Node f;
+        f.kind = rcx::NodeKind::UInt64;
+        f.name = "field_0028";
+        f.parentId = rootId;
+        f.offset = 0x28;
+        tree.addNode(f);
+
+        // Trailing hex bytes 0x30..0x40 collapse into a tail pad run
+        rcx::Node h1;
+        h1.kind = rcx::NodeKind::Hex64;
+        h1.parentId = rootId;
+        h1.offset = 0x30;
+        tree.addNode(h1);
+        rcx::Node h2;
+        h2.kind = rcx::NodeKind::Hex64;
+        h2.parentId = rootId;
+        h2.offset = 0x38;
+        tree.addNode(h2);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true, true);
+
+        // Leading pad: no label (implicit private), then public: field,
+        // then private: tail pad — matching the agreed output shape
+        QVERIFY(result.contains("class name {\n    /* 00 */ uint8_t _pad_00[0x28]"));
+        QVERIFY(result.contains("public:\n    /* 28 */ uint64_t field_0028;"));
+        QVERIFY(result.contains("private:\n    /* 30 */ uint8_t _pad_30[0x10]"));
+        QVERIFY(result.contains("static_assert(sizeof(name) == 0x40"));
+    }
+
+    // ── privatePads: a class with only user fields starts public ──
+
+    void testClassPrivatePadsNoPadding() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "name2";
+        root.structTypeName = "name2";
+        root.classKeyword = QStringLiteral("class");
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f;
+        f.kind = rcx::NodeKind::UInt32;
+        f.name = "hp";
+        f.parentId = rootId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true, true);
+
+        QVERIFY(result.contains("class name2 {\npublic:\n    /* 00 */ uint32_t hp;"));
+        QVERIFY(!result.contains("private:"));
+    }
+
+    // ── privatePads off keeps the current behavior ──
+
+    void testClassPrivatePadsToggleOff() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "name";
+        root.structTypeName = "name";
+        root.classKeyword = QStringLiteral("class");
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f;
+        f.kind = rcx::NodeKind::UInt64;
+        f.name = "field_0028";
+        f.parentId = rootId;
+        f.offset = 0x28;
+        tree.addNode(f);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true, false);
+
+        // Unconditional public: right after the brace, pad included
+        QVERIFY(result.contains("class name {\npublic:\n    /* 00 */ uint8_t _pad_00[0x28]"));
+        QVERIFY(!result.contains("private:"));
+    }
+
+    // ── privatePads: struct types are untouched ──
+
+    void testClassPrivatePadsStructUnaffected() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Padded";
+        root.structTypeName = "Padded";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node f;
+        f.kind = rcx::NodeKind::UInt8;
+        f.name = "flag";
+        f.parentId = rootId;
+        f.offset = 0;
+        tree.addNode(f);
+
+        rcx::Node h;
+        h.kind = rcx::NodeKind::Hex64;
+        h.parentId = rootId;
+        h.offset = 0x10;
+        tree.addNode(h);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true, true);
+
+        QVERIFY(result.contains("struct Padded {"));
+        QVERIFY(result.contains("/* 01 */ uint8_t _pad_01[0xF]"));
+        QVERIFY(!result.contains("public:"));
+        QVERIFY(!result.contains("private:"));
+    }
+
+    // ── privatePads: anonymous class container uses the same sections ──
+
+    void testClassPrivatePadsAnonymous() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Holder";
+        root.structTypeName = "Holder";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node anon;
+        anon.kind = rcx::NodeKind::Struct;
+        anon.name = "inner";
+        anon.structTypeName = "";
+        anon.classKeyword = QStringLiteral("class");
+        anon.parentId = rootId;
+        anon.offset = 0;
+        int ai = tree.addNode(anon);
+        uint64_t anonId = tree.nodes[ai].id;
+
+        // Leading pad inside the anonymous class, then a field, then a hex tail
+        rcx::Node f;
+        f.kind = rcx::NodeKind::Int32;
+        f.name = "value";
+        f.parentId = anonId;
+        f.offset = 0x10;
+        tree.addNode(f);
+
+        rcx::Node h;
+        h.kind = rcx::NodeKind::Hex64;
+        h.parentId = anonId;
+        h.offset = 0x14;
+        tree.addNode(h);
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, false, true);
+
+        // Labels align with the anonymous `class {` line (4 spaces here)
+        QVERIFY(result.contains("class {\n        /* 00 */ uint8_t _pad_00[0x10]"));
+        QVERIFY(result.contains("public:\n        /* 10 */ int32_t value;"));
+        QVERIFY(result.contains("private:\n        /* 14 */ uint8_t _pad_14[0x8]"));
+        // Enclosing struct untouched — no sections at its level
+        QVERIFY(result.contains("struct Holder {\n    class {"));
+    }
+
+    // ── Offset-based pad names dedup on collision ──
+    // Two overlapping hex nodes land at the same offset → both pad runs
+    // would be `_pad_00`; the second gets a numeric suffix so the class
+    // still compiles (members must be unique).
+
+    void testPadNameOffsetDedup() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "DedupPad";
+        root.structTypeName = "DedupPad";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        for (int i = 0; i < 2; i++) {
+            rcx::Node h;
+            h.kind = rcx::NodeKind::Hex64;
+            h.parentId = rootId;
+            h.offset = 0;
+            tree.addNode(h);
+        }
+
+        QString result = rcx::renderCpp(tree, rootId, nullptr, true, true);
+
+        QVERIFY(result.contains("/* 00 */ uint8_t _pad_00[0x8]"));
+        QVERIFY(result.contains("/* 00 */ uint8_t _pad_00_2[0x8]"));
     }
 
     // ── Draft fields are excluded from generated code ──
@@ -255,8 +541,8 @@ private slots:
 
         QString result = rcx::renderCpp(tree, rootId);
 
-        // Vergilius-style: union keyword, brace on new line
-        QVERIFY(result.contains("union TestUnion\n{"));
+        // Vergilius-style: union keyword, brace on same line
+        QVERIFY(result.contains("union TestUnion {"));
         QVERIFY(result.contains("uint64_t wide;"));
         QVERIFY(result.contains("uint32_t narrow;"));
         // Union members overlap by design — no warning
@@ -319,7 +605,7 @@ private slots:
 
         QString result = rcx::renderCpp(tree, rootId, nullptr, true);
 
-        QVERIFY(result.contains("union SizeUnion\n{"));
+        QVERIFY(result.contains("union SizeUnion {"));
         QVERIFY(result.contains("// sizeof 0x10"));
         QVERIFY(result.contains("static_assert(sizeof(SizeUnion) == 0x10"));
         QVERIFY(!result.contains("static_assert(sizeof(SizeUnion) == 0x14"));
@@ -376,7 +662,7 @@ private slots:
 
         // Vergilius-style: named sub-types referenced by name with struct prefix
         // No separate top-level definition for Vec2f in renderCpp
-        QVERIFY(result.contains("struct Outer\n{"));
+        QVERIFY(result.contains("struct Outer {"));
         QVERIFY(result.contains("struct Vec2f pos;"));
         QVERIFY(result.contains("int32_t score;"));
         QVERIFY(result.contains("static_assert(sizeof(Outer) == 0xC"));
@@ -597,9 +883,9 @@ private slots:
 
         QString result = rcx::renderCppAll(tree, nullptr, true);
 
-        // Vergilius-style: brace on new line
-        QVERIFY(result.contains("struct StructA\n{"));
-        QVERIFY(result.contains("struct StructB\n{"));
+        // Vergilius-style: brace on same line
+        QVERIFY(result.contains("struct StructA {"));
+        QVERIFY(result.contains("struct StructB {"));
         QVERIFY(result.contains("uint32_t valueA;"));
         QVERIFY(result.contains("uint64_t valueB;"));
         QVERIFY(result.contains("static_assert(sizeof(StructA) == 0x4"));
@@ -637,8 +923,8 @@ private slots:
 
         // Both structs must appear in the output. The first keeps its name;
         // the second gets a disambiguator suffix.
-        QVERIFY(result.contains("struct Shared\n{"));
-        QVERIFY(result.contains("struct Shared_v2\n{"));
+        QVERIFY(result.contains("struct Shared {"));
+        QVERIFY(result.contains("struct Shared_v2 {"));
         // And their field types survive distinctly.
         QVERIFY(result.contains("uint32_t val;"));
         QVERIFY(result.contains("uint64_t val;"));
@@ -687,7 +973,7 @@ private slots:
 
         QString result = rcx::renderCpp(tree, tree.nodes[0].id, nullptr, true);
 
-        QVERIFY(result.contains("struct Empty\n{"));
+        QVERIFY(result.contains("struct Empty {"));
         QVERIFY(result.contains("};"));
         QVERIFY(result.contains("static_assert(sizeof(Empty) == 0x0"));
     }
@@ -714,7 +1000,7 @@ private slots:
         QString result = rcx::renderCpp(tree, rootId);
 
         // Spaces and dashes should be replaced with underscores
-        QVERIFY(result.contains("struct my_struct_name\n{"));
+        QVERIFY(result.contains("struct my_struct_name {"));
         QVERIFY(result.contains("uint32_t field_with_spaces;"));
     }
 
@@ -738,7 +1024,7 @@ private slots:
 
         QString readStr = QString::fromUtf8(readBack);
         QVERIFY(readStr.contains("#pragma once"));
-        QVERIFY(readStr.contains("struct Player\n{"));
+        QVERIFY(readStr.contains("struct Player {"));
         QVERIFY(readStr.contains("static_assert"));
     }
 
@@ -802,7 +1088,7 @@ private slots:
 
         // Vergilius-style: named sub-types referenced by name with struct prefix
         // Only the root type gets a top-level definition
-        QVERIFY(result.contains("struct TypeA\n{"));
+        QVERIFY(result.contains("struct TypeA {"));
         QVERIFY(result.contains("struct TypeB b;"));
     }
 
@@ -859,7 +1145,7 @@ private slots:
 
         // Anonymous union should be inlined, not a top-level anon_XXXX
         QVERIFY(!result.contains("anon_"));
-        QVERIFY(result.contains("union\n    {"));
+        QVERIFY(result.contains("union {"));
         QVERIFY(result.contains("struct _LIST_ENTRY ListEntry;"));
         QVERIFY(result.contains("uint64_t Flags;"));
         QVERIFY(result.contains("};"));
@@ -893,7 +1179,7 @@ private slots:
         // Should reference by name with struct prefix, no stub body
         QVERIFY(result.contains("struct _LIST_ENTRY entry;"));
         // Should NOT have a separate _LIST_ENTRY definition with padding
-        QVERIFY(!result.contains("struct _LIST_ENTRY\n{"));
+        QVERIFY(!result.contains("struct _LIST_ENTRY {"));
         QVERIFY(!result.contains("uint8_t _pad"));
     }
     // ═══════════════════════════════════════════════════════════
@@ -911,9 +1197,9 @@ private slots:
         QVERIFY(result.contains("pub health: i32,"));
         QVERIFY(result.contains("pub speed: f32,"));
         QVERIFY(result.contains("pub id: u64,"));
-        QVERIFY(result.contains("// 0x0"));
-        QVERIFY(result.contains("// 0x4"));
-        QVERIFY(result.contains("// 0x8"));
+        QVERIFY(result.contains("/* 00 */"));
+        QVERIFY(result.contains("/* 04 */"));
+        QVERIFY(result.contains("/* 08 */"));
         QVERIFY(result.contains("core::mem::size_of::<Player>() == 0x10"));
 
         // Without asserts
@@ -1181,13 +1467,13 @@ private slots:
 
         // "Current" scope: only Main, no Target definition
         QString current = rcx::renderCpp(tree, mainId);
-        QVERIFY(current.contains("struct Main\n{"));
-        QVERIFY(!current.contains("struct Target\n{"));
+        QVERIFY(current.contains("struct Main {"));
+        QVERIFY(!current.contains("struct Target {"));
 
         // "Current + Deps" scope: Main AND Target definitions
         QString withDeps = rcx::renderCppTree(tree, mainId);
-        QVERIFY(withDeps.contains("struct Main\n{"));
-        QVERIFY(withDeps.contains("struct Target\n{"));
+        QVERIFY(withDeps.contains("struct Main {"));
+        QVERIFY(withDeps.contains("struct Target {"));
 
         // Same for Rust
         QString rustDeps = rcx::renderRustTree(tree, mainId);
