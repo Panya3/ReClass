@@ -638,6 +638,175 @@ private slots:
         m_editor->cancelInlineEdit();
     }
 
+    // ── Test: renaming an enum MEMBER via inline edit must commit only
+    //    the name — not "name = value". Drives the real editor edit path
+    //    (beginInlineEdit → type over the selection → commitInlineEdit)
+    //    and inspects the emitted text. ──
+    void testEnumMemberRenameCommitsNameOnly() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = "T";
+        root.name = "t";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node en;
+        en.kind = NodeKind::Struct;
+        en.classKeyword = "enum";
+        en.structTypeName = "Color";
+        en.name = "color";
+        en.parentId = rootId;
+        en.offset = 0;
+        en.collapsed = false;
+        en.enumMembers = { {"Red", 0}, {"Green", 1}, {"Blue", 2} };
+        int ei = tree.addNode(en);
+        uint64_t enumId = tree.nodes[ei].id;
+
+        BufferProvider prov = makeTestProvider();
+        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(result);
+        auto* sci = m_editor->scintilla();
+
+        int memberLine = -1, memberSub = -1;
+        for (int i = 0; i < result.meta.size(); i++) {
+            const auto& lm = result.meta[i];
+            if (lm.isMemberLine && lm.nodeId == enumId && memberLine < 0) {
+                memberLine = i;
+                memberSub = lm.subLine;
+            }
+        }
+        QVERIFY2(memberLine >= 0, "no enum member line composed");
+        QCOMPARE(memberSub, 0);  // "Red"
+
+        sci->SendScintilla(QsciScintillaBase::SCI_ENSUREVISIBLE,
+                           (unsigned long)memberLine);
+        sci->SendScintilla(QsciScintillaBase::SCI_GOTOLINE,
+                           (unsigned long)memberLine);
+        QApplication::processEvents();
+
+        bool ok = m_editor->beginInlineEdit(EditTarget::Name, memberLine);
+        QVERIFY2(ok, "member name edit should start");
+
+        // Replace the selected name with a new one (simulates typing).
+        QByteArray newName = "Crimson";
+        sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
+                           (uintptr_t)0, newName.constData());
+        QApplication::processEvents();
+
+        QSignalSpy spy(m_editor, &RcxEditor::inlineEditCommitted);
+        QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+        QApplication::sendEvent(m_editor->scintilla(), &enter);
+        QCOMPARE(spy.count(), 1);
+        const QList<QVariant>& args = spy.at(0);
+        // args: nodeIdx, subLine, target, text, addr
+        QCOMPARE(args.at(1).toInt(), 0);
+        QCOMPARE((EditTarget)args.at(2).toInt(), EditTarget::Name);
+        QString committed = args.at(3).toString();
+        QCOMPARE(committed, QStringLiteral("Crimson"));
+
+        m_editor->applyDocument(m_result);  // restore fixture doc
+    }
+
+    // ── Regression: renaming an enum PICK leaf (Struct + refId→enum, no
+    //    children) whose header carries the inline value pill. The pill
+    //    text is part of the composed line, so a name span that ran to
+    //    end-of-line swallowed it — the reported "renaming an enum pulls
+    //    the value in" bug (committed name was "field_0000  InMenu (0)").
+    //    The name span must stop before the pill. ──
+    void testEnumPickLeafRenameDoesNotPullValueIn() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node enumNode;
+        enumNode.kind = NodeKind::Struct;
+        enumNode.classKeyword = QStringLiteral("enum");
+        enumNode.structTypeName = QStringLiteral("SceneState");
+        enumNode.name = QStringLiteral("SceneState");
+        enumNode.enumMembers = {{"InMenu", 0}, {"InGame", 1}};
+        int ei2 = tree.addNode(enumNode);
+        uint64_t enumId = tree.nodes[ei2].id;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.structTypeName = QStringLiteral("Holder");
+        root.name = QStringLiteral("Holder");
+        root.parentId = 0;
+        root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node field;
+        field.kind = NodeKind::Struct;
+        field.name = QStringLiteral("field_0000");
+        field.parentId = rootId;
+        field.offset = 0;
+        field.refId = enumId;
+        field.structTypeName = QStringLiteral("SceneState");
+        field.elementKind = NodeKind::UInt32;
+        int fi2 = tree.addNode(field);
+        uint64_t fieldId = tree.nodes[fi2].id;
+
+        // Readable byte at offset 0 → pill "InMenu (0)" renders inline.
+        QByteArray data(16, '\0');
+        BufferProvider prov(std::move(data), QStringLiteral("synthetic"));
+        ComposeResult result = compose(tree, prov);
+        m_editor->applyDocument(result);
+        auto* sci = m_editor->scintilla();
+
+        int leafLine = -1;
+        QString lineText;
+        for (int i = 0; i < result.meta.size(); i++) {
+            const auto& lm = result.meta[i];
+            if (lm.nodeId == fieldId && lm.lineKind == LineKind::Header) {
+                leafLine = i;
+                int ls = result.lineStarts[i];
+                int le = (i + 1 < result.lineStarts.size()) ? result.lineStarts[i + 1] - 1
+                                                            : result.text.size();
+                lineText = result.text.mid(ls, le - ls);
+                break;
+            }
+        }
+        QVERIFY2(leafLine >= 0, "no enum pick leaf header line");
+        qDebug().noquote() << "LEAF LINE: [" << lineText << "]";
+
+        sci->SendScintilla(QsciScintillaBase::SCI_ENSUREVISIBLE,
+                           (unsigned long)leafLine);
+        sci->SendScintilla(QsciScintillaBase::SCI_GOTOLINE,
+                           (unsigned long)leafLine);
+        QApplication::processEvents();
+
+        bool ok = m_editor->beginInlineEdit(EditTarget::Name, leafLine);
+        QVERIFY2(ok, "pick leaf name edit should start");
+
+        // Commit WITHOUT typing → committed text == span content. The name
+        // span must be just the name — the inline "InMenu (0)" pill must
+        // NOT be part of it.
+        QSignalSpy spy(m_editor, &RcxEditor::inlineEditCommitted);
+        QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+        QApplication::sendEvent(m_editor->scintilla(), &enter);
+        QCOMPARE(spy.count(), 1);
+        QString committed = spy.at(0).at(3).toString();
+        QCOMPARE(committed, QStringLiteral("field_0000"));
+
+        // Typing a replacement over the selection also commits the name
+        // only (pill text replaced, not kept).
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Name, leafLine));
+        QByteArray newName = "m_state";
+        sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
+                           (uintptr_t)0, newName.constData());
+        QApplication::processEvents();
+        QSignalSpy spy2(m_editor, &RcxEditor::inlineEditCommitted);
+        QKeyEvent enter2(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+        QApplication::sendEvent(m_editor->scintilla(), &enter2);
+        QCOMPARE(spy2.count(), 1);
+        QCOMPARE(spy2.at(0).at(3).toString(), QStringLiteral("m_state"));
+
+        m_editor->applyDocument(m_result);  // restore fixture doc
+    }
+
     // ── Test: footer line rejects all edits ──
     void testFooterLineEdit() {
         m_editor->applyDocument(m_result);

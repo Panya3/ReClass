@@ -4788,6 +4788,17 @@ static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
         nameEnd = lineText.size() - 2;
     if (lm.nodeKind == NodeKind::Pointer32 || lm.nodeKind == NodeKind::Pointer64)
         nameEnd = qMin(nameEnd, nameStart + lm.effectiveNameW);
+    // Inline chips appended to header text (today: the enum value pill on
+    // an enum pick leaf; typed-pointer chips sit past the already-capped
+    // name) sit right after the name column. A name span running to
+    // end-of-line would swallow that text into hover, click-to-edit, and
+    // the committed rename — an enum pick field renamed as
+    // "field_0000  InMenu (0)" (value pulled into the name). Clamp to the
+    // first chip that starts after the name.
+    for (const auto& c : lm.chips) {
+        if (c.startCol > nameStart)
+            nameEnd = qMin(nameEnd, c.startCol);
+    }
 
     if (nameEnd <= nameStart) return {};
 
