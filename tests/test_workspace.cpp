@@ -46,6 +46,61 @@ private slots:
         QVERIFY(!model.item(0)->data(RoleSectionHeader).toString().isEmpty());
         QVERIFY(model.item(1)->data(RoleSectionHeader).toString().isEmpty());
     }
+
+    // The badge highlight (Qt::UserRole + 3) must update IN PLACE when the
+    // open-tab set changes — no rebuild needed. Regression: MainWindow's
+    // generation gate skipped rebuilds on tab open/close (the gate's hash
+    // doesn't cover tab/viewed state), so a closed tab's item stayed lit and
+    // a freshly opened one never lit.
+    void testViewedFlagsRefreshInPlace() {
+        NodeTree tree;
+        Node a; a.kind = NodeKind::Struct;
+        a.structTypeName = QStringLiteral("Alpha"); a.parentId = 0;
+        int ai = tree.addNode(a);
+        uint64_t idA = tree.nodes[ai].id;
+        Node b; b.kind = NodeKind::Struct;
+        b.structTypeName = QStringLiteral("Beta"); b.parentId = 0;
+        int bi = tree.addNode(b);
+        uint64_t idB = tree.nodes[bi].id;
+
+        QVector<TabInfo> tabs{ TabInfo{ &tree, QStringLiteral("T"), nullptr } };
+        QStandardItemModel model;
+        buildProjectExplorer(&model, tabs, {});
+
+        auto itemById = [&](uint64_t id) -> QStandardItem* {
+            for (int i = 0; i < model.rowCount(); ++i) {
+                auto* it = model.item(i);
+                if (!it || !it->data(RoleSectionHeader).toString().isEmpty()) continue;
+                if (it->data(Qt::UserRole + 1).toULongLong() == id) return it;
+            }
+            return nullptr;
+        };
+
+        QStandardItem* ia = itemById(idA);
+        QStandardItem* ib = itemById(idB);
+        QVERIFY(ia && ib);
+
+        // Tab for Alpha open → only Alpha lit
+        applyViewedPinnedFlags(&model, {idA}, {});
+        QVERIFY(ia->data(Qt::UserRole + 3).toBool());
+        QVERIFY(!ib->data(Qt::UserRole + 3).toBool());
+
+        // Tab for Beta opens too → both lit
+        applyViewedPinnedFlags(&model, {idA, idB}, {});
+        QVERIFY(ib->data(Qt::UserRole + 3).toBool());
+
+        // Both tabs closed → both dim (regression: previously stayed lit
+        // because the gated rebuild never ran)
+        applyViewedPinnedFlags(&model, {}, {});
+        QVERIFY(!ia->data(Qt::UserRole + 3).toBool());
+        QVERIFY(!ib->data(Qt::UserRole + 3).toBool());
+
+        // Pinned flag rides along without disturbing the viewed state
+        applyViewedPinnedFlags(&model, {idA}, {idB});
+        QVERIFY(ia->data(Qt::UserRole + 3).toBool());
+        QVERIFY(ib->data(Qt::UserRole + 4).toBool());
+        QVERIFY(!ib->data(Qt::UserRole + 3).toBool());
+    }
 };
 
 QTEST_MAIN(TestWorkspace)

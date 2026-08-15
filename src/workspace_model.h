@@ -172,6 +172,34 @@ inline void syncProjectExplorer(QStandardItemModel* model,
     buildProjectExplorer(model, tabs, pinnedIds);
 }
 
+// Mark items that are currently viewed in an open tab (badge highlight) and
+// pinned (pin icon). Safe to call on an existing model without a rebuild —
+// section-header rows are skipped, and both flag sets are keyed by the item's
+// node id (Qt::UserRole + 1). Used by MainWindow on the generation-gate skip
+// path (a tab open/close doesn't change the gated hash, so the rebuild is
+// skipped but the highlight must still refresh in place) and after a full
+// rebuild.
+inline void applyViewedPinnedFlags(QStandardItemModel* model,
+                                   const QSet<uint64_t>& viewedIds,
+                                   const QSet<uint64_t>& pinnedIds) {
+    if (!model) return;
+    for (int i = 0; i < model->rowCount(); ++i) {
+        auto* item = model->item(i);
+        if (!item) continue;
+        if (!item->data(RoleSectionHeader).toString().isEmpty()) continue;
+        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
+        // setData always emits dataChanged (→ row repaint), so only write
+        // when the flag actually flips — this pass runs on every rebuild
+        // attempt, including ones the generation gate skips.
+        bool viewed = viewedIds.contains(id);
+        if (item->data(Qt::UserRole + 3).toBool() != viewed)
+            item->setData(viewed, Qt::UserRole + 3);
+        bool pinned = pinnedIds.contains(id);
+        if (item->data(Qt::UserRole + 4).toBool() != pinned)
+            item->setData(pinned, Qt::UserRole + 4);
+    }
+}
+
 // ── Proxy model that hides section headers when a filter is active ──
 
 class WorkspaceProxyModel : public QSortFilterProxyModel {

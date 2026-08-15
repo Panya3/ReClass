@@ -10011,6 +10011,17 @@ void MainWindow::rebuildWorkspaceModelNow() {
     if (m_workspaceDock && !m_workspaceDock->isVisible())
         return;
 
+    // The gate's hash covers docs/structs/pins only — opening or closing a
+    // tab changes which structs are viewed without touching that hash, so a
+    // skipped rebuild below would leave the badge highlight stale (stays lit
+    // after the tab closes, never lights up when one opens). Refresh the
+    // viewed/pinned flags in place on the skip path — O(top-level items),
+    // value-guarded, and expansion/scroll stay untouched. A real rebuild
+    // re-applies them to the fresh items instead.
+    QSet<uint64_t> viewedIds;
+    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
+        viewedIds.insert(it->ctrl->viewRootId());
+
     // Generation gate — hash (tab list, struct id+name+keyword+pinned status)
     // and skip the rebuild when the result would be identical. Catches the
     // common "documentChanged fired but only baseAddress / values changed"
@@ -10033,7 +10044,10 @@ void MainWindow::rebuildWorkspaceModelNow() {
             mix(m_pinnedIds.contains(n.id) ? 1 : 0);
         }
     }
-    if (gen == m_workspaceGen) return;
+    if (gen == m_workspaceGen) {
+        rcx::applyViewedPinnedFlags(m_workspaceModel, viewedIds, m_pinnedIds);
+        return;
+    }
     m_workspaceGen = gen;
 
     // Save scroll position before model clear (which resets it)
@@ -10078,18 +10092,9 @@ void MainWindow::rebuildWorkspaceModelNow() {
     }
     rcx::syncProjectExplorer(m_workspaceModel, tabs, m_pinnedIds);
 
-    // Mark items that are currently viewed in a tab + pinned/dirty state
-    QSet<uint64_t> viewedIds;
-    for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it)
-        viewedIds.insert(it->ctrl->viewRootId());
-    for (int i = 0; i < m_workspaceModel->rowCount(); ++i) {
-        auto* item = m_workspaceModel->item(i);
-        if (!item) continue;
-        if (!item->data(rcx::RoleSectionHeader).toString().isEmpty()) continue;
-        uint64_t id = item->data(Qt::UserRole + 1).toULongLong();
-        item->setData(viewedIds.contains(id), Qt::UserRole + 3);
-        item->setData(m_pinnedIds.contains(id), Qt::UserRole + 4);
-    }
+    // Mark the fresh items from the rebuild above; the pre-gate pass
+    // already ran on the old model (and on rebuilds skipped by the gate).
+    rcx::applyViewedPinnedFlags(m_workspaceModel, viewedIds, m_pinnedIds);
 
     if (m_dockTitleLabel) {
         bool anyDirty = false;
