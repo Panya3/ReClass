@@ -91,6 +91,16 @@ if(NOT EXISTS "${FADEC_DIR}/fadec-decode-public.inc")
     endif()
 endif()
 
+# LLVM MicrosoftDemangle — vendored MSVC name demangler (llvmorg-20.1.0).
+# rtti.cpp uses it for LLVM-exact demangling of RTTI type descriptor names
+# (".?AV...@@", incl. templates / anonymous namespaces). The two sources are
+# tiny, so they're compiled into every target that lists src/rtti.cpp via
+# ${LLVM_DEMANGLE_SRCS} (same pattern as ${DISASM_SRCS} in the test section).
+set(LLVM_DEMANGLE_SRCS
+    third_party/llvm-demangle/src/MicrosoftDemangle.cpp
+    third_party/llvm-demangle/src/MicrosoftDemangleNodes.cpp)
+include_directories(third_party/llvm-demangle/include)
+
 add_executable(REECLASS
     src/main.cpp
     src/editor.h
@@ -177,7 +187,7 @@ add_executable(REECLASS
     src/disasm.h
     src/disasm.cpp
     src/rtti.h
-    src/rtti.cpp
+    src/rtti.cpp ${LLVM_DEMANGLE_SRCS}
     src/rttibrowser.h
     src/gotoaddressdialog.h
     src/commandpalette.h
@@ -392,7 +402,7 @@ if(BUILD_TESTING)
 
     # ── Headless tests (Qt::Core only — safe for CI without a display) ──
 
-    add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+    add_executable(test_core tests/test_core.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_core PRIVATE src)
     target_link_libraries(test_core PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_core COMMAND test_core)
@@ -412,7 +422,7 @@ if(BUILD_TESTING)
     target_link_libraries(test_format PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_format COMMAND test_format)
 
-    add_executable(test_compose tests/test_compose.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+    add_executable(test_compose tests/test_compose.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_compose PRIVATE src)
     target_link_libraries(test_compose PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_compose COMMAND test_compose)
@@ -420,7 +430,7 @@ if(BUILD_TESTING)
     # Unit tests for the unified tail-chip model (Enum / TypeHint / Rtti /
     # Comment chips emitted by compose). Same source set as test_compose
     # since chips are populated entirely inside compose.cpp.
-    add_executable(test_chips tests/test_chips.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+    add_executable(test_chips tests/test_chips.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_chips PRIVATE src)
     target_link_libraries(test_chips PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_chips COMMAND test_chips)
@@ -433,7 +443,7 @@ if(BUILD_TESTING)
     # refId pointing at the new class.
     add_executable(test_overlay_classcreate tests/test_overlay_classcreate.cpp
         src/controller.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp
         src/hextoolbarpopup.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -454,7 +464,7 @@ if(BUILD_TESTING)
     # resize keep the overlay glued to its text.
     add_executable(test_overlay_widget tests/test_overlay_widget.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp
         src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -474,7 +484,7 @@ if(BUILD_TESTING)
     # tests — here we just lock in the chip emission contract.
     add_executable(test_overlay_null_rtti tests/test_overlay_null_rtti.cpp
         src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_overlay_null_rtti PRIVATE src)
     target_link_libraries(test_overlay_null_rtti PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_overlay_null_rtti COMMAND test_overlay_null_rtti)
@@ -494,7 +504,7 @@ if(BUILD_TESTING)
     # oscillation; a flickering one ratchets up unbounded counts.
     add_executable(test_tooltip_flicker tests/test_tooltip_flicker.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp
         src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -510,7 +520,7 @@ if(BUILD_TESTING)
 
     add_executable(test_default_class_footer tests/test_default_class_footer.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp
         src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -535,13 +545,13 @@ if(BUILD_TESTING)
     add_test(NAME test_command_row COMMAND test_command_row)
 
     add_executable(test_generator tests/test_generator.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_generator PRIVATE src)
     target_link_libraries(test_generator PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_generator COMMAND test_generator)
 
     add_executable(test_import_xml tests/test_import_xml.cpp
-        src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_import_xml PRIVATE src)
     target_link_libraries(test_import_xml PRIVATE ${QT}::Core ${QT}::Test)
     if(TARGET ${QT}::GuiPrivate)
@@ -551,13 +561,13 @@ if(BUILD_TESTING)
     add_test(NAME test_import_xml COMMAND test_import_xml)
 
     add_executable(test_import_source tests/test_import_source.cpp
-        src/imports/import_source.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/imports/import_source.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_import_source PRIVATE src)
     target_link_libraries(test_import_source PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_import_source COMMAND test_import_source)
 
     add_executable(test_export_xml tests/test_export_xml.cpp
-        src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/imports/export_reclass_xml.cpp src/imports/import_reclass_xml.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_export_xml PRIVATE src)
     target_link_libraries(test_export_xml PRIVATE ${QT}::Core ${QT}::Test)
     if(TARGET ${QT}::GuiPrivate)
@@ -568,7 +578,7 @@ if(BUILD_TESTING)
 
     add_executable(test_disasm tests/test_disasm.cpp
         src/disasm.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
-        src/rtti.cpp src/symbolstore.cpp
+        src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp
         third_party/fadec/decode.c third_party/fadec/format.c)
     target_include_directories(test_disasm PRIVATE src third_party/fadec)
     target_link_libraries(test_disasm PRIVATE ${QT}::Core ${QT}::Test)
@@ -581,7 +591,7 @@ if(BUILD_TESTING)
 
     # ── RTTI walker (headless: pure parser over a synthetic byte buffer) ──
     # Cross-platform: parser uses only Provider::read*, no platform APIs.
-    add_executable(test_rtti tests/test_rtti.cpp src/rtti.cpp src/symbolstore.cpp)
+    add_executable(test_rtti tests/test_rtti.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_rtti PRIVATE src)
     target_link_libraries(test_rtti PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_rtti COMMAND test_rtti)
@@ -592,7 +602,7 @@ if(BUILD_TESTING)
     # including the per-pass module cache (one enumerateModules call).
     add_executable(test_rtti_hint tests/test_rtti_hint.cpp
         src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_rtti_hint PRIVATE src)
     target_link_libraries(test_rtti_hint PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_rtti_hint COMMAND test_rtti_hint)
@@ -604,7 +614,7 @@ if(BUILD_TESTING)
     # tree.initialClass round-trips through JSON.
     add_executable(test_tutorial tests/test_tutorial.cpp
         src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_tutorial PRIVATE src)
     target_link_libraries(test_tutorial PRIVATE ${QT}::Core ${QT}::Test)
     if(WIN32)
@@ -693,7 +703,7 @@ if(BUILD_TESTING)
     # Same heavy link set as the editor integration tests. Not a ctest.
     add_executable(editor_render EXCLUDE_FROM_ALL tools/editor_render.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp
         src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -711,7 +721,7 @@ if(BUILD_TESTING)
     # all types" toggle row can be verified. Same heavy link set. Not a ctest.
     add_executable(typeselector_render EXCLUDE_FROM_ALL tools/typeselector_render.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp
         src/symbolstore.cpp src/processpicker.cpp src/processpicker.ui
         src/providerregistry.cpp src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -743,7 +753,7 @@ if(BUILD_TESTING)
     # PNG so coloring can be verified per language. Not a ctest.
     add_executable(coderender EXCLUDE_FROM_ALL tools/coderender.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp
-        src/profiler.cpp src/rtti.cpp src/symbolstore.cpp
+        src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp)
     target_include_directories(coderender PRIVATE src)
     target_link_libraries(coderender PRIVATE
@@ -775,14 +785,14 @@ if(BUILD_TESTING)
 
     if(WIN32)
         add_executable(test_import_pdb tests/test_import_pdb.cpp
-            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
         target_include_directories(test_import_pdb PRIVATE src)
         target_link_libraries(test_import_pdb PRIVATE
             ${QT}::Core ${QT}::Test raw_pdb)
         add_test(NAME test_import_pdb COMMAND test_import_pdb)
 
         add_executable(bench_import_pdb tests/bench_import_pdb.cpp
-            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+            src/imports/import_pdb.cpp src/format.cpp src/compose.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
         target_include_directories(bench_import_pdb PRIVATE src)
         target_link_libraries(bench_import_pdb PRIVATE
             ${QT}::Core ${QT}::Test raw_pdb)
@@ -794,7 +804,7 @@ if(BUILD_TESTING)
     if(BUILD_UI_TESTS)
 
         add_executable(test_controller tests/test_controller.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -809,7 +819,7 @@ if(BUILD_TESTING)
 
         # ── Drill-down breadcrumb (nav stack + BreadcrumbBar widget) ──
         add_executable(test_breadcrumb tests/test_breadcrumb.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -824,7 +834,7 @@ if(BUILD_TESTING)
 
         # ── New Class self-attach (doc-owned buffer + processmemory loopback) ──
         add_executable(test_new_class_selfattach tests/test_new_class_selfattach.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -839,7 +849,7 @@ if(BUILD_TESTING)
 
         # ── Byte-selection ↔ controller integration ──
         add_executable(test_byte_selection_controller tests/test_byte_selection_controller.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -854,7 +864,7 @@ if(BUILD_TESTING)
 
         # ── Refresh speedups (memory-source-only optimizations) ──
         add_executable(test_refresh_speedups tests/test_refresh_speedups.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -868,7 +878,7 @@ if(BUILD_TESTING)
         add_test(NAME test_refresh_speedups COMMAND test_refresh_speedups)
 
         add_executable(test_context_menu tests/test_context_menu.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -882,7 +892,7 @@ if(BUILD_TESTING)
         add_test(NAME test_context_menu COMMAND test_context_menu)
 
         add_executable(test_source_management tests/test_source_management.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -897,7 +907,7 @@ if(BUILD_TESTING)
 
         add_executable(test_editor tests/test_editor.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
-        src/rtti.cpp src/symbolstore.cpp
+        src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_editor PRIVATE src third_party/fadec)
@@ -908,7 +918,7 @@ if(BUILD_TESTING)
 
         add_executable(test_byte_selection tests/test_byte_selection.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
-        src/rtti.cpp src/symbolstore.cpp
+        src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(test_byte_selection PRIVATE src third_party/fadec)
@@ -924,7 +934,7 @@ if(BUILD_TESTING)
         add_test(NAME test_lenient_hex COMMAND test_lenient_hex)
 
         add_executable(test_rendered_view tests/test_rendered_view.cpp
-        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/symbolstore.cpp)
+        src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
         target_include_directories(test_rendered_view PRIVATE src)
         target_link_libraries(test_rendered_view PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Test ${QT}::Svg
@@ -932,7 +942,7 @@ if(BUILD_TESTING)
         add_test(NAME test_rendered_view COMMAND test_rendered_view)
 
         add_executable(test_type_selector tests/test_type_selector.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -959,7 +969,7 @@ if(BUILD_TESTING)
         add_test(NAME test_source_chooser COMMAND test_source_chooser)
 
         add_executable(test_type_visibility tests/test_type_visibility.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
@@ -1016,7 +1026,7 @@ if(BUILD_TESTING)
         add_test(NAME test_tab_source_icon COMMAND test_tab_source_icon)
 
         add_executable(test_source_provider tests/test_source_provider.cpp
-        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
@@ -1069,7 +1079,7 @@ if(BUILD_TESTING)
 
         add_executable(bench_large_class tests/bench_large_class.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
-        src/rtti.cpp src/symbolstore.cpp
+        src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp
         src/providerregistry.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
         target_include_directories(bench_large_class PRIVATE src third_party/fadec)
@@ -1100,7 +1110,7 @@ if(BUILD_TESTING)
         # applyCommand -> refresh.
         add_executable(bench_spam_append tests/bench_spam_append.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp
-        src/rtti.cpp src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
