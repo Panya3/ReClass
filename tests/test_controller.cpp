@@ -2715,6 +2715,208 @@ private slots:
         QCOMPARE(sibs, 3);  // f@0 plus the restored 0xC and 0x10
     }
 
+    // ── Type-chooser enum conversion must keep the field's byte width ──
+    // User scenario: a hex32 field at 0x34 followed by hex32 fields at 0x38 /
+    // 0x3C / 0x40, converted to an enum via the type chooser. The enum pick
+    // is modeled as Struct + refId→enum; because the enum definition stores
+    // its members on the node (no children), structSpan() sized the converted
+    // field 0 — so the post-mutation sibling adjustment shifted every
+    // following field up by the old size, producing duplicate overlapping
+    // offsets (two "0x34" rows). The conversion must (a) record the storage
+    // kind on the field so the pill reads the full width, and (b) size the
+    // enum field by that storage kind so siblings don't move.
+    void testEnumConversionKeepsFieldWidthAndOffsets() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "Root";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        uint64_t f34 = 0, f38 = 0, f3C = 0, f40 = 0;
+        {
+            Node n; n.kind = NodeKind::UInt32; n.name = "m_uiRenderPriority";
+            n.parentId = rootId; n.offset = 0x30;
+            m_doc->tree.addNode(n);
+        }
+        {
+            Node n; n.kind = NodeKind::Hex32; n.name = "field_0034";
+            n.parentId = rootId; n.offset = 0x34;
+            f34 = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+        {
+            Node n; n.kind = NodeKind::Hex32; n.name = "field_0038";
+            n.parentId = rootId; n.offset = 0x38;
+            f38 = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+        {
+            Node n; n.kind = NodeKind::Hex32; n.name = "field_003C";
+            n.parentId = rootId; n.offset = 0x3C;
+            f3C = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+        {
+            Node n; n.kind = NodeKind::Hex32; n.name = "field_0040";
+            n.parentId = rootId; n.offset = 0x40;
+            f40 = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+
+        Node en; en.kind = NodeKind::Struct; en.name = "SceneState";
+        en.structTypeName = "SceneState"; en.classKeyword = "enum";
+        en.parentId = 0;
+        en.enumMembers = {{"InMenu", 0}, {"InGame", 1}, {"Loading", 2}};
+        uint64_t enumId = m_doc->tree.nodes[m_doc->tree.addNode(en)].id;
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        int fi = m_doc->tree.indexOfId(f34);
+        QVERIFY(fi >= 0);
+        QCOMPARE(m_doc->tree.nodes[fi].kind, NodeKind::Hex32);
+
+        TypeEntry e;
+        e.entryKind = TypeEntry::Composite;
+        e.structId = enumId;
+        e.displayName = "SceneState";
+        e.classKeyword = "enum";
+        e.category = TypeEntry::CatEnum;
+
+        m_ctrl->applyTypePopupResult(TypePopupMode::FieldType, fi, e,
+                                     QStringLiteral("SceneState"));
+
+        // Converted field: Struct + refId→enum, storage width preserved.
+        fi = m_doc->tree.indexOfId(f34);
+        QVERIFY(fi >= 0);
+        const Node& f = m_doc->tree.nodes[fi];
+        QCOMPARE((int)f.kind, (int)NodeKind::Struct);
+        QCOMPARE(f.refId, enumId);
+        QCOMPARE(f.structTypeName, QStringLiteral("SceneState"));
+        QCOMPARE(f.offset, 0x34);
+        QCOMPARE((int)f.elementKind, (int)NodeKind::UInt32);  // 4-byte source
+
+        // The enum pick occupies its storage width — not 0 — and the
+        // parent's footprint counts it (0x30+4, 0x34+4, 0x38+4, 0x3C+4,
+        // 0x40+4 → 0x44).
+        QCOMPARE(m_doc->tree.structSpan(f34), 4);
+        QCOMPARE(m_doc->tree.structSpan(rootId), 0x44);
+
+        // Following siblings keep their offsets — no duplicate 0x34.
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(f38)].offset, 0x38);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(f3C)].offset, 0x3C);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(f40)].offset, 0x40);
+        QVERIFY(m_doc->tree.findOverlaps().isEmpty());
+
+        // Undo restores the hex32 field and the layout.
+        m_doc->undoStack.undo();
+        fi = m_doc->tree.indexOfId(f34);
+        QVERIFY(fi >= 0);
+        QCOMPARE((int)m_doc->tree.nodes[fi].kind, (int)NodeKind::Hex32);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(f38)].offset, 0x38);
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(f40)].offset, 0x40);
+    }
+
+    // Converting an integer field to an enum preserves its signedness as
+    // the storage kind — enumFieldStorageKind then reads the same width AND
+    // signedness, so negative member values still match the pill.
+    void testEnumConversionPreservesSignedIntegerStorage() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "Root";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        uint64_t fieldId = 0;
+        {
+            Node n; n.kind = NodeKind::Int32; n.name = "state";
+            n.parentId = rootId; n.offset = 0;
+            fieldId = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+        Node en; en.kind = NodeKind::Struct; en.name = "State";
+        en.structTypeName = "State"; en.classKeyword = "enum";
+        en.parentId = 0;
+        en.enumMembers = {{"Ready", 0}, {"Error", -1}};
+        uint64_t enumId = m_doc->tree.nodes[m_doc->tree.addNode(en)].id;
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        int fi = m_doc->tree.indexOfId(fieldId);
+        QVERIFY(fi >= 0);
+
+        TypeEntry e;
+        e.entryKind = TypeEntry::Composite;
+        e.structId = enumId;
+        e.displayName = "State";
+        e.classKeyword = "enum";
+        e.category = TypeEntry::CatEnum;
+        m_ctrl->applyTypePopupResult(TypePopupMode::FieldType, fi, e,
+                                     QStringLiteral("State"));
+
+        fi = m_doc->tree.indexOfId(fieldId);
+        QVERIFY(fi >= 0);
+        QCOMPARE((int)m_doc->tree.nodes[fi].kind, (int)NodeKind::Struct);
+        QCOMPARE((int)m_doc->tree.nodes[fi].elementKind, (int)NodeKind::Int32);
+        QCOMPARE(m_doc->tree.structSpan(fieldId), 4);
+    }
+
+    // Array-of-enum conversion had the same 0-size bug: an Array with
+    // elementKind=Struct + refId→enum sized its elements via structSpan of
+    // the enum DEFINITION (0), so the post-mutation block shifted following
+    // siblings up by the old size → duplicate offsets. Elements size by the
+    // enum storage width (compose's element-spacing fallback), so a
+    // 4-byte field → "SceneState[3]" occupies 3 bytes and the next sibling
+    // lands at oldEnd − 1 (no overlap).
+    void testEnumArrayConversionKeepsOffsetsNonOverlapping() {
+        m_doc->tree.nodes.clear();
+        m_doc->tree.invalidateIdCache();
+        Node root; root.kind = NodeKind::Struct; root.structTypeName = "Root";
+        root.parentId = 0; root.collapsed = false;
+        uint64_t rootId = m_doc->tree.nodes[m_doc->tree.addNode(root)].id;
+
+        uint64_t f34 = 0, f38 = 0;
+        {
+            Node n; n.kind = NodeKind::Hex32; n.name = "field_0034";
+            n.parentId = rootId; n.offset = 0x34;
+            f34 = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+        {
+            Node n; n.kind = NodeKind::Hex32; n.name = "field_0038";
+            n.parentId = rootId; n.offset = 0x38;
+            f38 = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        }
+        Node en; en.kind = NodeKind::Struct; en.name = "SceneState";
+        en.structTypeName = "SceneState"; en.classKeyword = "enum";
+        en.parentId = 0;
+        en.enumMembers = {{"InMenu", 0}, {"InGame", 1}};
+        uint64_t enumId = m_doc->tree.nodes[m_doc->tree.addNode(en)].id;
+
+        m_ctrl->setViewRootId(rootId);
+        m_ctrl->refresh();
+
+        int fi = m_doc->tree.indexOfId(f34);
+        QVERIFY(fi >= 0);
+
+        TypeEntry e;
+        e.entryKind = TypeEntry::Composite;
+        e.structId = enumId;
+        e.displayName = "SceneState";
+        e.classKeyword = "enum";
+        e.category = TypeEntry::CatEnum;
+        m_ctrl->applyTypePopupResult(TypePopupMode::FieldType, fi, e,
+                                     QStringLiteral("SceneState[3]"));
+
+        fi = m_doc->tree.indexOfId(f34);
+        QVERIFY(fi >= 0);
+        const Node& f = m_doc->tree.nodes[fi];
+        QCOMPARE((int)f.kind, (int)NodeKind::Array);
+        QCOMPARE((int)f.elementKind, (int)NodeKind::Struct);
+        QCOMPARE(f.refId, enumId);
+        QCOMPARE(f.arrayLen, 3);
+
+        // Elements size by the enum storage width (1 byte fallback): the
+        // array occupies 3 bytes, so the next sibling moves 0x38 → 0x37.
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(f38)].offset, 0x37);
+        QVERIFY(m_doc->tree.findOverlaps().isEmpty());
+    }
+
     void testUnionAbsorbsOnMemberKindGrow() {
         // Same shape, but the member grows via changeNodeKind directly
         // (Hex32 → Hex128): the union spans [0x4, 0x14) and the fields at

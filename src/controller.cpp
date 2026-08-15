@@ -7484,6 +7484,31 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                     if (refIdx >= 0) {
                         const Node& ref = m_doc->tree.nodes[refIdx];
                         targetName = ref.structTypeName.isEmpty() ? ref.name : ref.structTypeName;
+                        // Enum pick conversion: record the storage width on the
+                        // field. An enum pick is a Struct field whose refId
+                        // points at an enum DEFINITION — the definition stores
+                        // its members on itself, so nothing else carries the
+                        // pick's width. enumFieldStorageKind (compose's pill
+                        // read + the picker's write) uses elementKind as that
+                        // width; without this, a converted field kept the
+                        // default UInt8 and read only one byte, and layout
+                        // math sized the field 0 (see structSpan's enum
+                        // fallback) — which shifted following siblings into
+                        // overlapping duplicate offsets. Preserve the replaced
+                        // field's byte width so the conversion is neutral.
+                        // Only scalar→enum conversions set it: re-picking a
+                        // different enum on an existing pick must keep the
+                        // already-recorded width.
+                        if (ref.isEnum() && nodeKind != NodeKind::Struct) {
+                            NodeKind storageKind = enumStorageKindFor(nodeKind, oldEffectiveSize);
+                            if (m_doc->tree.nodes[idx].elementKind != storageKind) {
+                                m_doc->undoStack.push(new RcxCommand(this,
+                                    cmd::ChangeArrayMeta{nodeId,
+                                        m_doc->tree.nodes[idx].elementKind, storageKind,
+                                        m_doc->tree.nodes[idx].arrayLen,
+                                        m_doc->tree.nodes[idx].arrayLen}));
+                            }
+                        }
                     }
                     QString oldTypeName = m_doc->tree.nodes[idx].structTypeName;
                     if (oldTypeName != targetName)
@@ -7538,7 +7563,18 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
                 // Use int64_t to prevent overflow with large arrays.
                 if (newEffectiveSize == 0 && updatedNode.kind == NodeKind::Array
                     && updatedNode.elementKind == NodeKind::Struct && updatedNode.refId != 0) {
-                    int elemSpan = m_doc->tree.structSpan(updatedNode.refId);
+                    int elemSpan;
+                    int refIdx2 = m_doc->tree.indexOfId(updatedNode.refId);
+                    if (refIdx2 >= 0 && m_doc->tree.nodes[refIdx2].isEnum())
+                        // Array-of-enum: the enum definition has no children,
+                        // so structSpan(refId) is 0. Size each element by the
+                        // enum's storage width (same fallback compose uses for
+                        // its element spacing) — otherwise the array sized 0
+                        // and shifted following siblings into duplicate
+                        // offsets, the same bug as scalar enum picks.
+                        elemSpan = enumFieldSize(updatedNode, m_doc->tree.nodes[refIdx2]);
+                    else
+                        elemSpan = m_doc->tree.structSpan(updatedNode.refId);
                     int64_t product = (int64_t)elemSpan * updatedNode.arrayLen;
                     newEffectiveSize = (int)qMin(product, (int64_t)INT_MAX);
                 }

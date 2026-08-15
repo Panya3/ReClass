@@ -491,6 +491,34 @@ inline NodeKind enumFieldStorageKind(const Node& field, const Node& enumNode) {
     return isIntegerKind(k) ? k : NodeKind::UInt32;
 }
 
+// Byte footprint of an enum pick leaf (a Struct field whose refId points at
+// an enum definition). Enum definitions store their members on the node
+// itself — no child nodes — so the field's footprint is just its storage
+// kind's width, not a child layout. structSpan()/structExtent()/unionSize()
+// fall back to this so an enum pick never sizes as 0 (which mis-shifted
+// following siblings into overlapping duplicate offsets on conversion).
+inline int enumFieldSize(const Node& field, const Node& enumNode) {
+    return sizeForKind(enumFieldStorageKind(field, enumNode));
+}
+
+// Storage kind to record on a field when it is converted to an enum pick
+// (Struct + refId → enum) via the type chooser. Preserves the replaced
+// field's byte width so the conversion is layout-neutral: integer kinds
+// keep their signedness (member matching then reads signed values
+// correctly), hex/other kinds map by size to the matching unsigned kind
+// (the natural reading of raw bytes), and anything exotic falls back to
+// UInt32 — the same default enumFieldStorageKind uses.
+inline NodeKind enumStorageKindFor(NodeKind oldKind, int oldByteSize) {
+    if (isIntegerKind(oldKind)) return oldKind;
+    switch (oldByteSize) {
+    case 1:  return NodeKind::UInt8;
+    case 2:  return NodeKind::UInt16;
+    case 4:  return NodeKind::UInt32;
+    case 8:  return NodeKind::UInt64;
+    default: return NodeKind::UInt32;
+    }
+}
+
 // ── Bookmark (named address, persists with the project) ──
 
 struct Bookmark {
@@ -956,8 +984,12 @@ struct NodeTree {
         }
 
         // Embedded struct reference: no own children but refId points to a struct definition
-        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0)
+        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0) {
+            int refIdx = indexOfId(node.refId);
+            if (refIdx >= 0 && nodes[refIdx].isEnum())
+                return qMax(declaredSize, enumFieldSize(node, nodes[refIdx]));
             maxEnd = qMax(maxEnd, structSpan(node.refId, childMap, visited));
+        }
 
         return qMax(declaredSize, maxEnd);
     }
@@ -999,8 +1031,12 @@ struct NodeTree {
         }
 
         // Embedded struct reference: no own children but refId points to a struct definition
-        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0)
+        if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0) {
+            int refIdx = indexOfId(node.refId);
+            if (refIdx >= 0 && nodes[refIdx].isEnum())
+                return qMax(declaredSize, enumFieldSize(node, nodes[refIdx]));
             maxEnd = qMax(maxEnd, structExtent(node.refId, childMap, visited));
+        }
 
         return qMax(declaredSize, maxEnd);
     }
@@ -1049,10 +1085,14 @@ struct NodeTree {
         // instead of collapsing to 0.
         if (kids.isEmpty() && node.kind == NodeKind::Struct && node.refId != 0) {
             int refIdx = indexOfId(node.refId);
-            if (refIdx >= 0)
-                maxSize = qMax(maxSize, nodes[refIdx].isUnion()
-                    ? unionSize(node.refId, childMap, visited)
-                    : structSpan(node.refId, childMap, visited));
+            if (refIdx >= 0) {
+                if (nodes[refIdx].isEnum())
+                    maxSize = qMax(maxSize, enumFieldSize(node, nodes[refIdx]));
+                else
+                    maxSize = qMax(maxSize, nodes[refIdx].isUnion()
+                        ? unionSize(node.refId, childMap, visited)
+                        : structSpan(node.refId, childMap, visited));
+            }
         }
 
         return maxSize;
