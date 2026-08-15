@@ -161,6 +161,19 @@ public:
     // no sibling shifting and overlaps are allowed (union-style annotation
     // fields).
     void createNodeFromDialog(int nodeIdx, NodeKind defaultKind);
+    // Open the "Insert Nested Struct..." dialog for the node at `nodeIdx`
+    // (or the view root when -1) and build the member on accept. Mirrors
+    // insertNodeFromDialog's parent/offset resolution.
+    void openNestedStructDialog(int nodeIdx);
+    // Build a nested struct member (inline type name optional, recursive
+    // children) under parentId at offset in ONE undo macro. Children
+    // offsets are auto-packed: sequential with natural alignment for
+    // struct/class containers, all-at-0 for unions. Returns the created
+    // member node's id (0 on failure).
+    uint64_t insertNestedStruct(uint64_t parentId, int offset,
+                                const QString& name, const QString& typeName,
+                                const QString& keyword,
+                                const QVector<NestedStructSpec>& children);
     // Open the Edit Offset dialog for an existing field. The new offset is
     // applied as-is: overlaps are allowed (positioning is explicit), no
     // sibling shifting, no draft.

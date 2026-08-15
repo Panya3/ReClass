@@ -15,6 +15,9 @@
 #include "core.h"
 #include "typeselectorpopup.h"
 #include "widgets/fieldlayoutdialog.h"
+#include "widgets/nestedstructdialog.h"
+#include <QTreeWidget>
+#include <QHeaderView>
 #include <QComboBox>
 #include <QLineEdit>
 #include <QPushButton>
@@ -546,6 +549,375 @@ private slots:
         QVERIFY(ok->isEnabled());
         QCOMPARE(ok->text(), QStringLiteral("Create"));
     }
+
+    // ── Nested Struct dialog: row type combos behave like the Insert Field
+    //    dialog's — editable (type-to-filter), height-bounded, and OK is
+    //    refused while any row's type text resolves to nothing.
+    void testNestedDialogTypeComboEditableBoundedAndValidates() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        QVERIFY(tree->topLevelItemCount() >= 1);
+        // Column order: Offset | Type | Name | Type name — the combo lives
+        // in column 1.
+        auto* combo = qobject_cast<QComboBox*>(
+            tree->itemWidget(tree->topLevelItem(0), 1));
+        QVERIFY(combo);
+
+        // The fix: editable (type-to-filter) + bounded popup height.
+        QVERIFY(combo->isEditable());
+        QCOMPARE(combo->maxVisibleItems(), 12);
+
+        // The Offset input spans the full row width (grows with the form).
+        auto* offEdit = dlg.findChild<QLineEdit*>();
+        QVERIFY(offEdit);
+        QVERIFY(offEdit->sizePolicy().horizontalPolicy() == QSizePolicy::Expanding);
+
+        // Offset (0) and Type (1) are fixed, Type 25% wider than Offset;
+        // Name (2) and Type name (3) both Stretch, splitting the remaining
+        // space equally (Qt 6 has no stretch-factor API).
+        QCOMPARE(tree->header()->sectionResizeMode(0), QHeaderView::Interactive);
+        QCOMPARE(tree->header()->sectionResizeMode(1), QHeaderView::Interactive);
+        QCOMPARE(tree->header()->sectionResizeMode(2), QHeaderView::Stretch);
+        QCOMPARE(tree->header()->sectionResizeMode(3), QHeaderView::Stretch);
+        // Type is 25% wider than Offset.
+        QCOMPARE(tree->columnWidth(1) * 4, tree->columnWidth(0) * 5);
+        // The seed row packs to offset 0: plain "0" (no 0x prefix),
+        // centered in the column — the edit editor stays left-aligned
+        // (OffsetEditorDelegate), the contrast is intentional.
+        QCOMPARE(tree->topLevelItem(0)->text(0), QStringLiteral("0"));
+        QVERIFY(tree->topLevelItem(0)->textAlignment(0) & Qt::AlignHCenter);
+        // The column sizes to the combo: the item's SizeHintRole mirrors the
+        // combo's hint (live combo sizeHint can drift a pixel or two after
+        // reparenting, so check the mechanism, not exact equality).
+        const QSize hint = tree->topLevelItem(0)->sizeHint(1);
+        QVERIFY(hint.width() > 50 && hint.height() > 15);
+
+        QPushButton* ok = nullptr;
+        for (auto* b : dlg.findChildren<QPushButton*>()) {
+            if (b->text() == QStringLiteral("Insert")) { ok = b; break; }
+        }
+        QVERIFY(ok);
+
+        // Ambiguous typed text ("int" matches int8/16/32/64/128) → OK refuses.
+        combo->setCurrentText(QStringLiteral("int"));
+        ok->click();
+        QVERIFY(dlg.result() != QDialog::Accepted);
+
+        // A typed unique prefix/name resolves → OK accepts (same policy as
+        // the Insert Field type combo).
+        combo->setCurrentText(QStringLiteral("int32_t"));
+        ok->click();
+        QCOMPARE(dlg.result(), QDialog::Accepted);
+    }
+
+    // ── Nested Struct dialog: the Offset column's editor is a
+    //    left-aligned QLineEdit that fills the whole cell (the item's
+    //    alignment must not leak into it, and it must not shrink to the
+    //    content width).
+    void testNestedDialogOffsetEditorLeftAlignedAndFullWidth() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        QVERIFY(tree->topLevelItemCount() >= 1);
+
+        // The delegate for the Offset column is installed.
+        auto* del = tree->itemDelegateForColumn(0);
+        QVERIFY(del);
+
+        // Open the editor for the first row's Offset cell and inspect it.
+        const QModelIndex idx = tree->model()->index(0, 0);
+        QVERIFY(idx.isValid());
+        QStyleOptionViewItem opt;
+        opt.rect = QRect(0, 0, 200, 30);
+        QWidget* ed = del->createEditor(tree->viewport(), opt, idx);
+        QVERIFY(ed);
+        auto* le = qobject_cast<QLineEdit*>(ed);
+        QVERIFY(le);
+        // Left-aligned text, not centered.
+        QVERIFY(le->alignment() & Qt::AlignLeft);
+        QVERIFY(!(le->alignment() & Qt::AlignHCenter));
+        // The editor must span the FULL column — from the column's true
+        // left edge (x=0, not the 20px branch strip QTreeView reserves in
+        // column 0) to its right edge — and keep the row's vertical span.
+        del->updateEditorGeometry(le, opt, idx);
+        QCOMPARE(le->geometry().left(), 0);
+        QCOMPARE(le->geometry().width(), tree->header()->sectionSize(0));
+        QCOMPARE(le->geometry().top(), opt.rect.top());
+        QCOMPARE(le->geometry().height(), opt.rect.height());
+        delete ed;
+    }
+
+    // ── Nested Struct dialog: when the user single-clicks the Offset cell,
+    //    the live editor must sit flush at the column's start X (QTreeView
+    //    otherwise indents it 20px past the branch strip) and span the
+    //    whole column width.
+    void testNestedDialogOffsetEditorFlushWithColumnStart() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        dlg.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dlg));
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        QVERIFY(tree->topLevelItemCount() >= 1);
+        tree->editItem(tree->topLevelItem(0), 0);
+        // The Type column's editable combo has an internal QLineEdit too,
+        // so only take a line edit that is a direct child of the viewport.
+        QLineEdit* le = nullptr;
+        const auto children = tree->viewport()->findChildren<QLineEdit*>();
+        for (auto* c : children)
+            if (c->parent() == tree->viewport()) { le = c; break; }
+        QVERIFY(le);
+        // Starts at the column's true left edge — NOT 20px in — and spans
+        // the full column width.
+        QCOMPARE(le->geometry().left(),
+                 tree->header()->sectionViewportPosition(0));
+        QCOMPARE(le->geometry().width(), tree->header()->sectionSize(0));
+        dlg.close();
+    }
+
+    // ── Nested Struct dialog: the displayed offset number is centered in
+    //    the FULL Offset column, not in the branch-indented cell (QTreeView
+    //    reserves a 20px strip at the left of column 0, which would push
+    //    the center 10px right of the column's true center).
+    void testNestedDialogOffsetDisplayCenteredInColumn() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        dlg.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dlg));
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        const QImage img = tree->viewport()->grab().toImage();
+        const QColor base = tree->viewport()->palette().color(QPalette::Base);
+        const int colW = tree->header()->sectionSize(0);
+        const int rowH = tree->visualItemRect(tree->topLevelItem(0)).height();
+        // Row 0 occupies y 0..rowH; scan column 0 (x 0..colW) for text
+        // pixels and measure the text's horizontal center.
+        int minX = -1, maxX = -1;
+        for (int y = 0; y < rowH; ++y) {
+            for (int x = 0; x < colW; ++x) {
+                const QColor c = img.pixelColor(x, y);
+                if (qAbs(c.red() - base.red()) > 40 ||
+                    qAbs(c.green() - base.green()) > 40 ||
+                    qAbs(c.blue() - base.blue()) > 40) {
+                    if (minX < 0) minX = x;
+                    maxX = x;
+                }
+            }
+        }
+        QVERIFY(minX >= 0);  // some text pixels found
+        const double center = (minX + maxX) / 2.0;
+        // Within 4px of the column's true center (36 for a 72px column).
+        QVERIFY2(qAbs(center - colW / 2.0) <= 4.0,
+                 qPrintable(QStringLiteral("offset text center %1 vs column center %2")
+                                .arg(center).arg(colW / 2.0)));
+        dlg.close();
+    }
+
+    // ── Nested Struct dialog: an offset cell whose text doesn't parse
+    //    must fall back to auto-packing (matching what insert does —
+    //    collectChildren only sets offsetManual when the text parses), not
+    //    be honored as a manual offset of 0.
+    void testNestedDialogInvalidManualOffsetFallsBackToAuto() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        auto* item = tree->topLevelItem(0);
+        QCOMPARE(item->text(0), QStringLiteral("0"));
+        // Fires itemChanged: the handler marks the row manual, then
+        // packChildren must reject the unparseable text and re-pack auto.
+        item->setText(0, QStringLiteral("zz"));
+        QCOMPARE(item->data(0, Qt::UserRole).toBool(), false);
+        QCOMPARE(item->text(0), QStringLiteral("0"));   // auto value restored
+        QString name, typeName, keyword;
+        int offset = 0;
+        QVector<rcx::NestedStructSpec> children;
+        dlg.collectResult(name, typeName, keyword, offset, children);
+        QCOMPARE(children.size(), 1);
+        QCOMPARE(children[0].offsetManual, false);
+    }
+
+    // ── Nested Struct dialog: a click on the branch strip at the left of
+    //    column 0 (the expand/collapse arrow zone) must NOT open the offset
+    //    editor; a click inside the cell must.
+    void testNestedDialogClickBranchStripDoesNotEdit() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        dlg.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dlg));
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        auto* viewport = tree->viewport();
+        const int cellLeft = tree->visualItemRect(tree->topLevelItem(0)).left();
+        QVERIFY(cellLeft > 0);   // branch strip reserved
+        // Click in the strip (left of the cell): must not start editing.
+        // (The Type column's editable combo has an internal QLineEdit, so
+        // only a line edit that is a DIRECT viewport child is an editor.)
+        auto directEditor = [&]() {
+            const auto les = tree->viewport()->findChildren<QLineEdit*>();
+            for (auto* le : les)
+                if (le->parent() == viewport) return true;
+            return false;
+        };
+        QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier,
+                          QPoint(cellLeft / 2, 12));
+        QVERIFY(!directEditor());
+        // Click inside the cell: must open the offset editor.
+        QTest::mouseClick(viewport, Qt::LeftButton, Qt::NoModifier,
+                          QPoint(cellLeft + 10, 12));
+        QVERIFY(directEditor());
+        dlg.close();
+    }
+
+    // ── Nested Struct dialog: free-text typing must NOT prune a container
+    //    row's children (only a committed selection does).
+    void testNestedDialogTypingDoesNotPruneChildren() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+
+        QPushButton* addContainer = nullptr;
+        QPushButton* addField = nullptr;
+        for (auto* b : dlg.findChildren<QPushButton*>()) {
+            if (b->text() == QStringLiteral("Add Nested Struct")) addContainer = b;
+            else if (b->text() == QStringLiteral("Add Field"))      addField = b;
+        }
+        QVERIFY(addContainer && addField);
+
+        addContainer->click();                 // new container row (top-level)
+        const int containerIdx = tree->topLevelItemCount() - 1;
+        auto* container = tree->topLevelItem(containerIdx);
+        QVERIFY(container);
+        addField->click();                     // one child under the container
+        QCOMPARE(container->childCount(), 1);
+
+        auto* combo = qobject_cast<QComboBox*>(
+            tree->itemWidget(container, 1));   // Type column (index 1)
+        QVERIFY(combo);
+
+        // Typed text alone never prunes — even when it resolves to a
+        // primitive (the row is only pruned on a committed selection, so
+        // free typing can't destroy children).
+        combo->setCurrentText(QStringLiteral("int"));
+        QCOMPARE(container->childCount(), 1);
+        combo->setCurrentText(QStringLiteral("uint8_t"));
+        QCOMPARE(container->childCount(), 1);
+
+        // A committed selection (a real item chosen from the list) prunes
+        // at once — the existing change-type semantics.
+        int u8Idx = -1;
+        for (int i = 0; i < combo->count(); i++)
+            if (combo->itemText(i) == QStringLiteral("uint8_t")) { u8Idx = i; break; }
+        QVERIFY(u8Idx >= 0);
+        combo->setCurrentIndex(u8Idx);
+        QCOMPARE(container->childCount(), 0);
+
+        // Rebuild a child, then switch the row to a primitive by typing:
+        // the child survives typing, but OK drops it so the insert matches
+        // what is displayed.
+        QVERIFY(addField);
+        // Back to a container (committed selection) so Add Field nests
+        // under the row again.
+        int structIdx = -1;
+        for (int i = 0; i < combo->count(); i++)
+            if (combo->itemText(i) == QStringLiteral("struct")) { structIdx = i; break; }
+        QVERIFY(structIdx >= 0);
+        combo->setCurrentIndex(structIdx);
+        tree->setCurrentItem(container);
+        addField->click();
+        QCOMPARE(container->childCount(), 1);
+        combo->setCurrentText(QStringLiteral("uint8_t"));
+        QCOMPARE(container->childCount(), 1);   // typing never prunes
+
+        QPushButton* ok = nullptr;
+        for (auto* b : dlg.findChildren<QPushButton*>()) {
+            if (b->text() == QStringLiteral("Insert")) { ok = b; break; }
+        }
+        QVERIFY(ok);
+        ok->click();
+        QCOMPARE(dlg.result(), QDialog::Accepted);
+        QCOMPARE(container->childCount(), 0);   // orphan children dropped at OK
+    }
+
+    // ── Nested Struct dialog: an offset typed into the tree's Offset
+    //    column (single-click editable) is honored as a manual override —
+    //    collectResult carries it through with offsetManual=true instead of
+    //    re-packing over it.
+    void testNestedDialogHonorsManualOffset() {
+        using rcx::NestedStructDialog;
+        NestedStructDialog dlg(0);
+        auto* tree = dlg.findChild<QTreeWidget*>();
+        QVERIFY(tree);
+        QVERIFY(tree->topLevelItemCount() >= 1);
+        auto* row = tree->topLevelItem(0);
+
+        // Simulate the user typing an offset into the Offset column: the
+        // itemChanged handler marks it manual (Qt::UserRole on column 0).
+        row->setText(0, QStringLiteral("30"));
+        row->setData(0, Qt::UserRole, true);
+
+        QString name, typeName, keyword;
+        int offset = -1;
+        QVector<rcx::NestedStructSpec> children;
+        dlg.collectResult(name, typeName, keyword, offset, children);
+        QCOMPARE(children.size(), 1);
+        QVERIFY(children[0].offsetManual);
+        QCOMPARE(children[0].offset, 0x30);
+    }
+
+    // ── Insert Nested Struct honors user-typed (manual) child offsets: a
+    //    spec with offsetManual=true keeps its offset verbatim and later
+    //    siblings pack after it instead of re-deriving from zero.
+    void testInsertNestedStructHonorsManualOffsets() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        NestedStructSpec a; a.kind = NodeKind::Int32; a.name = "a";
+        NestedStructSpec b; b.kind = NodeKind::Int32; b.name = "b";
+        b.offset       = 0x30;               // typed by the user
+        b.offsetManual = true;
+        QVector<NestedStructSpec> kids = {a, b};
+        uint64_t memId = m_ctrl->insertNestedStruct(rootId, 0, "Inner", QString(),
+                                                    "struct", kids);
+        QVERIFY(memId != 0);
+        QVector<int> kidsIdx;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId == memId) kidsIdx.append(i);
+        QCOMPARE(kidsIdx.size(), 2);
+        const Node& na = m_doc->tree.nodes[kidsIdx[0]];
+        const Node& nb = m_doc->tree.nodes[kidsIdx[1]];
+        QCOMPARE(na.name, QStringLiteral("a"));
+        QCOMPARE(nb.name, QStringLiteral("b"));
+        // a auto-packs at 0; b honors the typed 0x30.
+        QCOMPARE(na.offset, 0);
+        QCOMPARE(nb.offset, 0x30);
+    }
+
+    // ── Insert Nested Struct is CREATE semantics: a conflicting offset
+    //    places the member as-is (overlap allowed) — no draft flag, no
+    //    sibling shifting.
+    void testInsertNestedStructNoDraftOnConflict() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        // field_u32 lives at 0..3 — place the nested member right on top.
+        NestedStructSpec x; x.kind = NodeKind::Int32; x.name = "x";
+        QVector<NestedStructSpec> kids = {x};
+        uint64_t memId = m_ctrl->insertNestedStruct(rootId, 0, "Inner", QString(),
+                                                    "struct", kids);
+        QVERIFY(memId != 0);
+        int mi = m_doc->tree.indexOfId(memId);
+        QVERIFY(mi >= 0);
+        const Node& member = m_doc->tree.nodes[mi];
+        QCOMPARE(member.offset, 0);
+        QVERIFY(!member.draft);                  // overlap allowed, no draft
+        // Sibling offsets untouched (no push).
+        bool u32Intact = false;
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.name == QStringLiteral("field_u32") && n.offset == 0) u32Intact = true;
+        QVERIFY(u32Intact);
+    }
+
     // ── Repro: renaming a field around a virtually-expanded typed pointer
     //    must not duplicate anything across a save/load round trip ──
     //
@@ -1831,6 +2203,152 @@ private slots:
         }
         QVERIFY(found);
     }
+
+    // ── Test: insertNestedStruct builds a recursive inline member tree ──
+    // struct A { struct B { int32_t x; int32_t y; } Inner;
+    //            struct { int32_t z; } Inner2; }
+    void testInsertNestedStruct() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        const int before = m_doc->tree.nodes.size();
+
+        NestedStructSpec x; x.kind = NodeKind::Int32; x.name = "x";
+        NestedStructSpec y; y.kind = NodeKind::Int32; y.name = "y";
+        QVector<NestedStructSpec> innerKids = {x, y};
+        uint64_t innerId = m_ctrl->insertNestedStruct(rootId, 0, "Inner", "B",
+                                                      "struct", innerKids);
+        QVERIFY(innerId != 0);
+
+        NestedStructSpec z; z.kind = NodeKind::Int32; z.name = "z";
+        QVector<NestedStructSpec> inner2Kids = {z};
+        uint64_t inner2Id = m_ctrl->insertNestedStruct(rootId, 8, "Inner2", QString(),
+                                                       "struct", inner2Kids);
+        QVERIFY(inner2Id != 0);
+
+        // Inner: named struct member, children x@0, y@4
+        int ii = m_doc->tree.indexOfId(innerId);
+        QVERIFY(ii >= 0);
+        const Node& inner = m_doc->tree.nodes[ii];
+        QCOMPARE(inner.kind, NodeKind::Struct);
+        QCOMPARE(inner.name, QStringLiteral("Inner"));
+        QCOMPARE(inner.structTypeName, QStringLiteral("B"));
+        QCOMPARE(inner.classKeyword, QStringLiteral("struct"));
+        QCOMPARE(inner.parentId, rootId);
+        QCOMPARE(inner.offset, 0);
+        QVector<int> ikids;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId == innerId) ikids.append(i);
+        QCOMPARE(ikids.size(), 2);
+        QCOMPARE(m_doc->tree.nodes[ikids[0]].name, QStringLiteral("x"));
+        QCOMPARE(m_doc->tree.nodes[ikids[0]].offset, 0);
+        QCOMPARE(m_doc->tree.nodes[ikids[1]].name, QStringLiteral("y"));
+        QCOMPARE(m_doc->tree.nodes[ikids[1]].offset, 4);
+
+        // Inner2: anonymous struct member, child z@0
+        int i2 = m_doc->tree.indexOfId(inner2Id);
+        QVERIFY(i2 >= 0);
+        const Node& inner2 = m_doc->tree.nodes[i2];
+        QCOMPARE(inner2.kind, NodeKind::Struct);
+        QCOMPARE(inner2.structTypeName, QString());
+        QCOMPARE(inner2.offset, 8);
+        QVector<int> i2kids;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].parentId == inner2Id) i2kids.append(i);
+        QCOMPARE(i2kids.size(), 1);
+        QCOMPARE(m_doc->tree.nodes[i2kids[0]].name, QStringLiteral("z"));
+        QCOMPARE(m_doc->tree.nodes[i2kids[0]].offset, 0);
+
+        // Each insertNestedStruct is one undo macro: undo once removes
+        // Inner2's subtree only, undo again removes Inner's subtree.
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes.size(), before + 3);  // Inner + x + y
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.nodes.size(), before);
+    }
+
+    // ── Test: union overlap at 0 + unlimited recursion depth ──
+    void testInsertNestedStructUnionAndDeep() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+
+        // Union member: every child packs to offset 0.
+        NestedStructSpec a; a.kind = NodeKind::UInt64; a.name = "a";
+        NestedStructSpec b; b.kind = NodeKind::UInt32; b.name = "b";
+        QVector<NestedStructSpec> uKids = {a, b};
+        uint64_t uId = m_ctrl->insertNestedStruct(rootId, 0, "U", QString(),
+                                                  "union", uKids);
+        QVERIFY(uId != 0);
+        int uCount = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            if (m_doc->tree.nodes[i].parentId == uId) {
+                uCount++;
+                QCOMPARE(m_doc->tree.nodes[i].offset, 0);
+            }
+        }
+        QCOMPARE(uCount, 2);
+
+        // Deep recursion: Outer -> Deep(struct C) -> d1 ; sibling x packs
+        // before Deep with natural alignment (x@0, Deep@4).
+        NestedStructSpec d1; d1.kind = NodeKind::Int32; d1.name = "d1";
+        NestedStructSpec deep; deep.kind = NodeKind::Struct; deep.name = "Deep";
+        deep.keyword = "struct"; deep.typeName = "C";
+        deep.children.append(d1);
+        NestedStructSpec x; x.kind = NodeKind::Int32; x.name = "x";
+        QVector<NestedStructSpec> outerKids = {x, deep};
+        uint64_t outerId = m_ctrl->insertNestedStruct(rootId, 16, "Outer", "B",
+                                                      "struct", outerKids);
+        QVERIFY(outerId != 0);
+
+        int deepId = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            const Node& n = m_doc->tree.nodes[i];
+            if (n.parentId == outerId && n.name == QStringLiteral("Deep")) {
+                deepId = i;
+                QCOMPARE(n.offset, 4);
+                QCOMPARE(n.structTypeName, QStringLiteral("C"));
+            }
+        }
+        QVERIFY(deepId >= 0);
+        const uint64_t deepNodeId = m_doc->tree.nodes[deepId].id;
+        int d1Count = 0;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
+            if (m_doc->tree.nodes[i].parentId == deepNodeId) {
+                d1Count++;
+                QCOMPARE(m_doc->tree.nodes[i].name, QStringLiteral("d1"));
+                QCOMPARE(m_doc->tree.nodes[i].offset, 0);
+            }
+        }
+        QCOMPARE(d1Count, 1);
+    }
+
+    // ── Test: Change Type accepts any name on a container (inline declared) ──
+    void testRetypeStructNodeAcceptsFreeName() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        QVector<NestedStructSpec> noKids;
+        uint64_t memId = m_ctrl->insertNestedStruct(rootId, 0x20, "Inner", QString(),
+                                                    "struct", noKids);
+        int mi = m_doc->tree.indexOfId(memId);
+        QVERIFY(mi >= 0);
+
+        // Unknown name on a container → structTypeName set freely.
+        emit m_editor->inlineEditCommitted(mi, 0, EditTarget::Type, "B", 0);
+        mi = m_doc->tree.indexOfId(memId);
+        QCOMPARE(m_doc->tree.nodes[mi].kind, NodeKind::Struct);
+        QCOMPARE(m_doc->tree.nodes[mi].structTypeName, QStringLiteral("B"));
+
+        // Whitespace → no change.
+        emit m_editor->inlineEditCommitted(mi, 0, EditTarget::Type, "   ", 0);
+        QCOMPARE(m_doc->tree.nodes[mi].structTypeName, QStringLiteral("B"));
+
+        // Non-container node with an unknown name → still ignored (no
+        // silent conversion to an empty struct shell).
+        int fi = -1;
+        for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+            if (m_doc->tree.nodes[i].name == QStringLiteral("field_u32")) { fi = i; break; }
+        QVERIFY(fi >= 0);
+        emit m_editor->inlineEditCommitted(fi, 0, EditTarget::Type, "NoSuchType", 0);
+        QCOMPARE(m_doc->tree.nodes[fi].kind, NodeKind::UInt32);
+        QCOMPARE(m_doc->tree.nodes[fi].structTypeName, QString());
+    }
+
     void testUnionAppendPlacesAtExactEnd() {
         // A union whose members end at 0x14 (member at offset 4 sized 0x10)
         // must append the next member at exactly 0x14 — not round it up to

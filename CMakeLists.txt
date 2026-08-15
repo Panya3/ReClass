@@ -201,6 +201,8 @@ add_executable(REECLASS
     src/widgets/themed_inputdialog.cpp
     src/widgets/fieldlayoutdialog.h
     src/widgets/fieldlayoutdialog.cpp
+    src/widgets/nestedstructdialog.h
+    src/widgets/nestedstructdialog.cpp
     src/widgets/category_chip.h
     src/widgets/fuzzy_match.h
     src/widgets/unified_symbol_panel.h
@@ -398,7 +400,8 @@ if(BUILD_TESTING)
         src/widgets/themed_messagebox.cpp
         src/widgets/themed_inputdialog.cpp
         src/widgets/dialog_button.cpp
-        src/widgets/fieldlayoutdialog.cpp)
+        src/widgets/fieldlayoutdialog.cpp
+        src/widgets/nestedstructdialog.cpp)
 
     # ── Headless tests (Qt::Core only — safe for CI without a display) ──
 

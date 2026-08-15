@@ -421,6 +421,25 @@ struct Node {
     bool isVftable() const { return classKeyword == QStringLiteral("vftable"); }
 };
 
+// ── Nested-struct creation spec ──
+
+// One child row of the "Insert Nested Struct..." dialog. Containers
+// (kind == Struct) carry their own recursive children; `keyword` selects
+// struct/union/class and `typeName` is the optional inline type name
+// (empty = anonymous). `offset` is filled in by the controller's layout
+// pass before nodes are created — unless `offsetManual` is set, in which
+// case the typed offset is honored verbatim (the dialog's Offset column is
+// editable and packs around it).
+struct NestedStructSpec {
+    NodeKind kind = NodeKind::Hex64;
+    QString  name;
+    QString  keyword;      // struct / union / class (containers only)
+    QString  typeName;     // structTypeName (empty = anonymous)
+    int      offset = 0;   // assigned by the layout pass (or manual override)
+    bool     offsetManual = false;  // true: `offset` was typed by the user
+    QVector<NestedStructSpec> children;
+};
+
 // Can this node's value column flip between decimal (default) and hex via
 // the right-click "Display as Hex" toggle? Only when the rendered value is
 // a number — the Int/UInt/Float/Double family or a primitive-pointer deref

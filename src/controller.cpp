@@ -17,6 +17,7 @@
 #include "widgets/dialog_button.h"
 #include "widgets/enum_picker_popup.h"
 #include "widgets/fieldlayoutdialog.h"
+#include "widgets/nestedstructdialog.h"
 #include <Qsci/qsciscintilla.h>
 #include <QSplitter>
 #include <QFile>
@@ -1745,24 +1746,43 @@ void RcxController::connectEditor(RcxEditor* editor) {
                 if (ok && k != NodeKind::Struct && k != NodeKind::Array) {
                     changeNodeKind(nodeIdx, k);
                 } else if (nodeIdx < m_doc->tree.nodes.size()) {
-                    // Check if it's a defined struct type name
-                    bool isStructType = false;
-                    for (const auto& n : m_doc->tree.nodes) {
-                        if (n.kind == NodeKind::Struct && n.structTypeName == text) {
-                            isStructType = true;
-                            break;
-                        }
-                    }
-                    if (isStructType) {
-                        auto& node = m_doc->tree.nodes[nodeIdx];
-                        if (node.kind != NodeKind::Struct)
-                            changeNodeKind(nodeIdx, NodeKind::Struct);
+                    const Node& node = m_doc->tree.nodes[nodeIdx];
+                    // A container's type name is a label (inline declared
+                    // type), so it can be retyped freely — any non-empty
+                    // name is accepted without a top-level definition.
+                    if ((node.kind == NodeKind::Struct || node.kind == NodeKind::Array)
+                        && !text.trimmed().isEmpty()) {
                         int idx = m_doc->tree.indexOfId(node.id);
                         if (idx >= 0) {
-                            QString oldTypeName = m_doc->tree.nodes[idx].structTypeName;
-                            if (oldTypeName != text) {
+                            const QString newName = text.trimmed();
+                            const QString oldName = m_doc->tree.nodes[idx].structTypeName;
+                            if (oldName != newName) {
                                 m_doc->undoStack.push(new RcxCommand(this,
-                                    cmd::ChangeStructTypeName{node.id, oldTypeName, text}));
+                                    cmd::ChangeStructTypeName{node.id, oldName, newName}));
+                            }
+                        }
+                    } else {
+                        // Non-container: only link to a struct type that is
+                        // actually defined (converting a primitive to a
+                        // struct must not silently produce an empty shell).
+                        bool isStructType = false;
+                        for (const auto& n : m_doc->tree.nodes) {
+                            if (n.kind == NodeKind::Struct && n.structTypeName == text) {
+                                isStructType = true;
+                                break;
+                            }
+                        }
+                        if (isStructType) {
+                            auto& node = m_doc->tree.nodes[nodeIdx];
+                            if (node.kind != NodeKind::Struct)
+                                changeNodeKind(nodeIdx, NodeKind::Struct);
+                            int idx = m_doc->tree.indexOfId(node.id);
+                            if (idx >= 0) {
+                                QString oldTypeName = m_doc->tree.nodes[idx].structTypeName;
+                                if (oldTypeName != text) {
+                                    m_doc->undoStack.push(new RcxCommand(this,
+                                        cmd::ChangeStructTypeName{node.id, oldTypeName, text}));
+                                }
                             }
                         }
                     }
@@ -3206,6 +3226,143 @@ void RcxController::selectNodeById(uint64_t id) {
     emit nodeSelected(ni);
 }
 
+// ── Nested struct creation (Insert Nested Struct... dialog) ──
+
+namespace {
+// Layout pass for a nested-struct spec: assign packed offsets to every
+// child under a container. `isUnion` = the container is a union (members
+// overlap at offset 0). Returns the container's {size, alignment}.
+QPair<int, int> layoutNestedSpecs(QVector<NestedStructSpec>& specs, bool isUnion) {
+    int align = 1;
+    int cursor = 0;    // struct/class sequential pack cursor
+    int maxSize = 0;   // union: largest member size
+    for (auto& c : specs) {
+        int cAlign = 1, cSize = 0;
+        if (c.kind == NodeKind::Struct) {
+            auto l = layoutNestedSpecs(c.children, c.keyword == QStringLiteral("union"));
+            cAlign = l.second;
+            cSize  = l.first;
+        } else {
+            cAlign = alignmentFor(c.kind);
+            cSize  = sizeForKind(c.kind);
+        }
+        align = qMax(align, cAlign);
+        if (c.offsetManual) {
+            // The user typed this offset in the dialog — honor it verbatim.
+            // Siblings pack after it so nothing collides silently.
+            if (isUnion) {
+                maxSize = qMax(maxSize, (cSize + cAlign - 1) / cAlign * cAlign);
+            } else {
+                cursor = qMax(cursor, c.offset + cSize);
+            }
+        } else if (isUnion) {
+            c.offset = 0;
+            maxSize = qMax(maxSize, (cSize + cAlign - 1) / cAlign * cAlign);
+        } else {
+            c.offset = cursor + (cAlign - (cursor % cAlign)) % cAlign;
+            cursor = c.offset + cSize;
+        }
+    }
+    int size = isUnion ? maxSize : cursor;
+    if (size > 0)
+        size = (size + align - 1) / align * align;  // round up to container alignment
+    return {size, align};
+}
+} // namespace
+
+uint64_t RcxController::insertNestedStruct(uint64_t parentId, int offset,
+                                           const QString& name, const QString& typeName,
+                                           const QString& keyword,
+                                           const QVector<NestedStructSpec>& children) {
+    if (parentId == 0) {
+        emit statusHint(QStringLiteral(
+            "Insert Nested Struct works inside a struct (right-click a field "
+            "and use Insert \u25b8 Insert Nested Struct...)."));
+        return 0;
+    }
+
+    // Layout pass mutates the spec copies' offsets (returned size/alignment
+    // are no longer needed — overlaps are allowed, no draft).
+    QVector<NestedStructSpec> specs = children;
+    layoutNestedSpecs(specs, keyword == QStringLiteral("union"));
+
+    Node member;
+    member.kind           = NodeKind::Struct;
+    member.name           = name;
+    member.structTypeName = typeName;
+    member.classKeyword   = keyword;
+    member.parentId       = parentId;
+    member.offset         = offset;
+    member.id             = m_doc->tree.reserveId();
+
+    m_doc->undoStack.beginMacro(QStringLiteral("Insert Nested Struct"));
+
+    // Create the member, then its whole subtree (children offsets already
+    // packed). The member must exist before its children reference it.
+    std::function<void(uint64_t, const QVector<NestedStructSpec>&)> buildSubtree;
+    buildSubtree = [&](uint64_t pid, const QVector<NestedStructSpec>& sub) {
+        for (const auto& c : sub) {
+            Node n;
+            n.kind     = c.kind;
+            n.name     = c.name;
+            n.parentId = pid;
+            n.offset   = c.offset;
+            n.id       = m_doc->tree.reserveId();
+            if (c.kind == NodeKind::Struct) {
+                n.structTypeName = c.typeName;
+                n.classKeyword   = c.keyword;
+            }
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+            if (c.kind == NodeKind::Struct && !c.children.isEmpty())
+                buildSubtree(n.id, c.children);
+        }
+    };
+
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{member}));
+    buildSubtree(member.id, specs);
+
+    m_doc->undoStack.endMacro();
+    refresh();
+
+    // Select the fresh member so the user sees what just landed (same
+    // bookkeeping as insertNodeFromDialog).
+    selectNodeById(member.id);
+    return member.id;
+}
+
+void RcxController::openNestedStructDialog(int nodeIdx) {
+    // A structural insert shifts the layout: drop any armed byte selection
+    // (same reason as insertNodeFromDialog).
+    for (auto* ed : m_editors)
+        if (ed) ed->clearByteSelection();
+
+    uint64_t parentId;
+    int defaultOffset;
+    if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+        const Node& before = m_doc->tree.nodes[nodeIdx];
+        parentId = before.parentId;
+        defaultOffset = suggestedInsertOffset(parentId, nodeIdx, NodeKind::Struct);
+    } else {
+        parentId = m_viewRootId ? m_viewRootId : 0;
+        defaultOffset = (parentId == 0) ? 0 : structEndAligned(parentId, NodeKind::Struct);
+    }
+    if (parentId == 0) {
+        emit statusHint(QStringLiteral(
+            "Insert Nested Struct works inside a struct (right-click a field "
+            "and use Insert \u25b8 Insert Nested Struct...)."));
+        return;
+    }
+
+    NestedStructDialog dlg(defaultOffset, qobject_cast<QWidget*>(parent()));
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    QString name, typeName, keyword;
+    int offset = 0;
+    QVector<NestedStructSpec> children;
+    dlg.collectResult(name, typeName, keyword, offset, children);
+
+    insertNestedStruct(parentId, offset, name, typeName, keyword, children);
+}
 
 void RcxController::editNodeOffset(int nodeIdx) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
@@ -5257,6 +5414,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             insertMenu->addAction("Create Field...", [this, firstIdx]() {
                 createNodeFromDialog(firstIdx, NodeKind::Hex64);
             });
+            insertMenu->addAction(icon("symbol-structure.svg"),
+                                  "Insert Nested Struct...", [this, firstIdx]() {
+                openNestedStructDialog(firstIdx);
+            });
         }
 
         // ── Shift Offsets (same-parent selection) ──
@@ -5822,6 +5983,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             });
             insertMenu->addAction("Create Field...", [this, nodeIdx]() {
                 createNodeFromDialog(nodeIdx, NodeKind::Hex64);
+            });
+            insertMenu->addAction(icon("symbol-structure.svg"),
+                                  "Insert Nested Struct...", [this, nodeIdx]() {
+                openNestedStructDialog(nodeIdx);
             });
             insertMenu->addSeparator();
             insertMenu->addAction("Append bytes...", [this, &menu]() {
