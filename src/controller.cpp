@@ -4868,9 +4868,35 @@ static QWidgetAction* makeCycleRow(QMenu* menu,
     return wa;
 }
 
+int RcxController::mapCommandRowNodeIdx(int line, int nodeIdx) const {
+    // Only the CommandRow (line 0) carries a synthetic nodeIdx of -1.
+    if (nodeIdx >= 0 || line != 0)
+        return nodeIdx;
+    uint64_t rootId = m_viewRootId;
+    if (!rootId) {
+        for (const auto& n : m_doc->tree.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) { rootId = n.id; break; }
+    }
+    if (rootId) {
+        int ri = m_doc->tree.indexOfId(rootId);
+        if (ri >= 0) return ri;
+    }
+    return nodeIdx;
+}
+
 void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                                      int subLine, const QPoint& globalPos) {
     auto icon = [](const char* name) { return QIcon(QStringLiteral(":/vsicons/%1").arg(name)); };
+
+    // Right-clicking the CommandRow (line 0 — the root's "struct Foo {"
+    // header) carries nodeIdx == -1 because that row is composed without an
+    // owning node (the root struct's real header is suppressed; CommandRow
+    // shows type + name instead). Map it to the view root so the full
+    // root-struct menu (Structure ▸ Add Virtual Function, Add Child, ...)
+    // appears instead of the empty-area menu (Insert/Fold/Copy/...).
+    const int rawNodeIdx = nodeIdx;
+    nodeIdx = mapCommandRowNodeIdx(line, nodeIdx);
+    const bool mappedFromCommandRow = (nodeIdx != rawNodeIdx);
 
     const bool hasNode = nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size();
 
@@ -4882,7 +4908,10 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // already-selected such row as "outside the selection" and reset
         // it — wrongly dropping an active byte selection (and its submenu)
         // when you right-click the very rows it covers. Match handleNodeClick.
-        uint64_t clickedId = (line >= 0 && line < m_lastResult.meta.size())
+        // A CommandRow-mapped click skips selIdForLine (line 0 is synthetic,
+        // nodeId == kCommandRowId) and uses the mapped node's real id.
+        uint64_t clickedId = (line >= 0 && line < m_lastResult.meta.size()
+                              && !mappedFromCommandRow)
             ? selIdForLine(m_lastResult.meta[line])
             : m_doc->tree.nodes[nodeIdx].id;
         if (!m_selIds.contains(clickedId)) {

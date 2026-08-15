@@ -287,6 +287,13 @@ public:
     void applySelectionOverlays();
     QSet<uint64_t> selectedIds() const { return m_selIds; }
 
+    // Right-click on the CommandRow (line 0 — the root class header) carries
+    // nodeIdx == -1 because that row is composed without an owning node.
+    // Map it to the view root's index so the full root-struct menu shows
+    // instead of the empty-area menu. Returns `nodeIdx` unchanged for any
+    // other line, and -1 when no root struct exists to map to.
+    int mapCommandRowNodeIdx(int line, int nodeIdx) const;
+
     // Mirror an editor's byte selection into the row selection. The set is
     // the encoded selIds of every hex row the byte selection covers (empty
     // = clear). Driven by RcxEditor::byteSelectionRowsChanged so the grey

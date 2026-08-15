@@ -1131,6 +1131,52 @@ private slots:
         QCOMPARE(countNodes(), before);
         QCOMPARE(m_doc->tree.childrenOf(innerId).size(), 2);
     }
+
+    // ── Right-click on the CommandRow maps to the root struct ──
+
+    void testCommandRowMapsToRootStruct() {
+        // Line 0 is the CommandRow ("struct Player {"), composed with a
+        // synthetic nodeIdx of -1. The context menu must map it to the view
+        // root so the full root-struct menu (Structure ▸ Add Virtual
+        // Function, ...) shows instead of the empty-area menu.
+        int mapped = m_ctrl->mapCommandRowNodeIdx(0, -1);
+        QVERIFY2(mapped >= 0, "CommandRow right-click must map to a node");
+        QCOMPARE(m_doc->tree.nodes[mapped].kind, NodeKind::Struct);
+        QCOMPARE(m_doc->tree.nodes[mapped].parentId, (uint64_t)0);
+        QCOMPARE(m_doc->tree.nodes[mapped].structTypeName, QStringLiteral("Player"));
+
+        // A non-CommandRow line (any real node row) passes through unchanged.
+        int healthIdx = findNode("health");
+        QVERIFY(healthIdx >= 0);
+        QCOMPARE(m_ctrl->mapCommandRowNodeIdx(1, healthIdx), healthIdx);
+        QCOMPARE(m_ctrl->mapCommandRowNodeIdx(-1, -1), -1);
+    }
+
+    void testCommandRowMapsToPinnedViewRoot() {
+        // With viewRootId pinned to a specific root, the CommandRow maps
+        // there even when multiple root structs exist.
+        Node extra; extra.kind = NodeKind::Struct; extra.structTypeName = "Other";
+        extra.name = "Other";
+        extra.parentId = 0; extra.offset = 0;
+        m_doc->tree.addNode(extra);
+        int extraIdx = findNode("Other");
+        QVERIFY(extraIdx >= 0);
+        uint64_t extraId = m_doc->tree.nodes[extraIdx].id;
+        m_ctrl->setViewRootId(extraId);
+
+        int mapped = m_ctrl->mapCommandRowNodeIdx(0, -1);
+        QVERIFY(mapped >= 0);
+        QCOMPARE(m_doc->tree.nodes[mapped].id, extraId);
+        QCOMPARE(m_doc->tree.nodes[mapped].structTypeName, QStringLiteral("Other"));
+    }
+
+    void testCommandRowNoRootStructStaysEmpty() {
+        // Empty tree (no root struct at all): mapping must return -1 so the
+        // empty-area menu is shown rather than a bogus node menu.
+        m_doc->tree.nodes.clear();
+        m_ctrl->setViewRootId(0);
+        QCOMPARE(m_ctrl->mapCommandRowNodeIdx(0, -1), -1);
+    }
 };
 
 QTEST_MAIN(TestContextMenu)
