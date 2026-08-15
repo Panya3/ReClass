@@ -70,6 +70,78 @@ private slots:
         QCOMPARE(demangleRttiName(QString()), QString());
     }
 
+    // ── Template instantiations ──
+    // Routed through the vendored LLVM MicrosoftDemangle, which resolves
+    // "?$...@...@@" template mangling incl. the @2@ back-references. The
+    // old in-house parser truncated on the first "@@" inside the template
+    // and produced garbage ("std::D::DU?$char_traits::?$basic_string").
+    void demangleTemplate() {
+        QCOMPARE(demangleRttiName(QStringLiteral(
+                     ".?AV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@")),
+                 QStringLiteral(
+                     "std::basic_string<char, std::char_traits<char>, std::allocator<char>>"));
+    }
+
+    // ── formatRttiDisplayName ──
+    // The CHD lists the whole hierarchy including the class itself; the
+    // display name must exclude it and dedupe repeated (non-virtual)
+    // inheritance, keeping MSVC array order for the rest.
+
+    void formatDisplayNameFlatAndSelfExcluded() {
+        RttiInfo info;
+        info.ok = true;
+        info.demangledName = QStringLiteral("Foo");
+        RttiBaseClass self; self.demangledName = QStringLiteral("Foo");
+        RttiBaseClass bar;  bar.demangledName  = QStringLiteral("Bar");
+        RttiBaseClass baz;  baz.demangledName  = QStringLiteral("Baz");
+        info.bases = {self, bar, baz};
+        QCOMPARE(formatRttiDisplayName(info), QStringLiteral("Foo : Bar, Baz"));
+    }
+
+    void formatDisplayNameDedupe() {
+        RttiInfo info;
+        info.ok = true;
+        info.demangledName = QStringLiteral("D");
+        RttiBaseClass self; self.demangledName = QStringLiteral("D");
+        RttiBaseClass b;    b.demangledName    = QStringLiteral("B");
+        RttiBaseClass c;    c.demangledName    = QStringLiteral("C");
+        // Diamond: V reachable via both B and C — appears twice in the CHD.
+        RttiBaseClass v1;   v1.demangledName   = QStringLiteral("V");
+        RttiBaseClass v2;   v2.demangledName   = QStringLiteral("V");
+        info.bases = {self, b, c, v1, v2};
+        QCOMPARE(formatRttiDisplayName(info), QStringLiteral("D : B, C, V"));
+    }
+
+    void formatDisplayNameNoBases() {
+        RttiInfo info;
+        info.ok = true;
+        info.demangledName = QStringLiteral("Solo");
+        QCOMPARE(formatRttiDisplayName(info), QStringLiteral("Solo"));
+    }
+
+    void formatDisplayNameSelfOnly() {
+        // CHD with only the class itself (no real bases) → plain name,
+        // never a trailing colon.
+        RttiInfo info;
+        info.ok = true;
+        info.demangledName = QStringLiteral("Foo");
+        RttiBaseClass self; self.demangledName = QStringLiteral("Foo");
+        info.bases = {self};
+        QCOMPARE(formatRttiDisplayName(info), QStringLiteral("Foo"));
+    }
+
+    void formatDisplayNameRawFallback() {
+        // When demangling fails, raw names are used consistently.
+        RttiInfo info;
+        info.ok = true;
+        info.rawName = QStringLiteral(".?AVFoo@@");
+        RttiBaseClass self; self.rawName = QStringLiteral(".?AVFoo@@");
+        RttiBaseClass bar;  bar.rawName  = QStringLiteral(".?AVBar@@");
+        info.bases = {self, bar};
+        QCOMPARE(formatRttiDisplayName(info),
+                 QStringLiteral(".?AVFoo@@ : .?AVBar@@"));
+    }
+
     void walkSyntheticRtti() {
         BufferProvider prov(m_data, QStringLiteral("synthetic"));
 
@@ -91,6 +163,10 @@ private slots:
         QCOMPARE(info.bases[0].demangledName, QStringLiteral("Foo"));
         QCOMPARE(info.bases[1].demangledName, QStringLiteral("Bar"));
         QCOMPARE(info.bases[2].demangledName, QStringLiteral("Baz"));
+
+        // The walker's bases list includes the class itself (CHD semantics);
+        // the display name excludes it → "Foo : Bar, Baz".
+        QCOMPARE(formatRttiDisplayName(info), QStringLiteral("Foo : Bar, Baz"));
 
         // Vtable: 5 valid slots (we filled 5 method pointers) — slot 6 is null.
         QCOMPARE(info.vtable.size(), 5);
