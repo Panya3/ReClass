@@ -436,17 +436,42 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
                     + QStringLiteral("}") + fieldName + QStringLiteral(";")
                     + QStringLiteral("\n");
             } else {
-                // Named struct — reference by name with struct keyword prefix
+                // Named struct — inline declared form when it carries its own
+                // body (its children live under it): `struct B { ... } Inner;`.
+                // Otherwise it is an embedded field referencing a top-level
+                // definition, emitted by name (`B Inner;`).
                 QString kw = child.resolvedClassKeyword();
                 if (kw == QStringLiteral("enum") && child.enumMembers.isEmpty())
                     kw = QStringLiteral("struct");
                 QString typeName = ctx.nameFor(child);
-                QString fieldName = sanitizeIdent(child.name);
-                ensurePublic();
-                ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
-                    + kw + QStringLiteral(" ") + typeName
-                    + QStringLiteral(" ") + fieldName + QStringLiteral(";")
-                    + QStringLiteral("\n");
+                if (!ctx.childMap.value(child.id).isEmpty()) {
+                    // Same shape as the anonymous branch above, with the
+                    // type name after the keyword.
+                    ensurePublic();
+                    ctx.output += ind + kw + QStringLiteral(" ") + typeName
+                        + QStringLiteral(" {\n");
+                    bool childIsUnion = (kw == QStringLiteral("union"));
+                    bool childSections = (kw == QStringLiteral("class")) && ctx.privatePads;
+                    // An inline named `class` would default its members to
+                    // private without an explicit section (same rule as
+                    // emitStruct and the anonymous branch).
+                    if (kw == QStringLiteral("class") && !ctx.privatePads)
+                        ctx.output += ind + QStringLiteral("public:\n");
+                    emitStructBody(ctx, child.id, childIsUnion, depth + 1,
+                                   baseOffset + child.offset, childSections);
+                    QString fieldName = child.name.isEmpty()
+                        ? QString() : QStringLiteral(" ") + sanitizeIdent(child.name);
+                    ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                        + QStringLiteral("}") + fieldName + QStringLiteral(";")
+                        + QStringLiteral("\n");
+                } else {
+                    QString fieldName = sanitizeIdent(child.name);
+                    ensurePublic();
+                    ctx.output += ind + offsetComment(baseOffset + child.offset, ctx.padDigits)
+                        + kw + QStringLiteral(" ") + typeName
+                        + QStringLiteral(" ") + fieldName + QStringLiteral(";")
+                        + QStringLiteral("\n");
+                }
             }
             } // end bitfield else
         } else if (child.kind == NodeKind::Array) {
@@ -801,8 +826,12 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
                     + QStringLiteral("\n");
             } else {
                 bool isAnonymous = child.structTypeName.isEmpty();
-                if (isAnonymous) {
-                    // Rust can't do anonymous inline structs — flatten as byte array
+                bool hasOwnBody = !ctx.childMap.value(child.id).isEmpty();
+                if (isAnonymous || hasOwnBody) {
+                    // Rust can't do anonymous inline structs — flatten as
+                    // byte array. Named inline structs (a type declared
+                    // inline, no top-level definition) get the same
+                    // treatment: there is no definition to reference.
                     int span = tree.structSpan(child.id, &ctx.childMap);
                     QString fieldName = sanitizeIdent(child.name.isEmpty()
                         ? QStringLiteral("anon_%1").arg(child.offset, ctx.padDigits, 16, QChar('0'))
@@ -1087,6 +1116,25 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
                     + QStringLiteral("\n");
             } else {
                 QString typeName = ctx.nameFor(child);
+                if (!ctx.childMap.value(child.id).isEmpty()) {
+                    // Named inline struct: C# has no anonymous member structs
+                    // or inline type declarations, so declare the type as a
+                    // nested struct first, then the field referencing it.
+                    bool childUnion =
+                        (child.resolvedClassKeyword() == QStringLiteral("union"));
+                    int childSize = tree.structExtent(child.id, &ctx.childMap);
+                    ctx.output += ind + QStringLiteral(
+                        "[StructLayout(LayoutKind.Explicit, Size = 0x%1)]\n")
+                        .arg(QString::number(childSize, 16).toUpper());
+                    ctx.output += ind + QStringLiteral("public unsafe struct %1\n")
+                        .arg(typeName)
+                        + ind + QStringLiteral("{\n");
+                    // Nested type: member FieldOffsets are relative to ITS
+                    // own origin, not to the enclosing struct — so the base
+                    // offset passed down is 0 (same as a top-level type).
+                    emitCSharpStructBody(ctx, child.id, childUnion, depth + 1, 0);
+                    ctx.output += ind + QStringLiteral("}\n");
+                }
                 ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                     .arg(QString::number(absOffset, 16).toUpper(), typeName, name)
                     + QStringLiteral("\n");
@@ -1352,7 +1400,11 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                     .arg(name, bfType)
                     + QStringLiteral(" # bits: ") + bits.join(QStringLiteral(", "))
                     + QStringLiteral("\n");
-            } else if (child.structTypeName.isEmpty()) {
+            } else if (child.structTypeName.isEmpty()
+                       || !ctx.childMap.value(child.id).isEmpty()) {
+                // Anonymous inline structs flatten to a byte array; named
+                // inline structs (inline-declared type, no top-level
+                // definition to reference) get the same treatment.
                 int span = tree.structSpan(child.id, &ctx.childMap);
                 ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_uint8 * 0x%2),")
                     .arg(name)

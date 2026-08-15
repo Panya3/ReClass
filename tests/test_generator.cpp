@@ -660,10 +660,15 @@ private slots:
 
         QString result = rcx::renderCpp(tree, outerId, nullptr, true);
 
-        // Vergilius-style: named sub-types referenced by name with struct prefix
-        // No separate top-level definition for Vec2f in renderCpp
+        // A named struct child that carries its own body is emitted as an
+        // inline declared form (struct Vec2f { ... } pos;) — self-contained,
+        // no dangling reference to an undefined type.
         QVERIFY(result.contains("struct Outer {"));
-        QVERIFY(result.contains("struct Vec2f pos;"));
+        QVERIFY(result.contains("struct Vec2f {"));
+        QVERIFY(result.contains("float x;"));
+        QVERIFY(result.contains("float y;"));
+        QVERIFY(result.contains("} pos;"));
+        QVERIFY(!result.contains("struct Vec2f pos;"));
         QVERIFY(result.contains("int32_t score;"));
         QVERIFY(result.contains("static_assert(sizeof(Outer) == 0xC"));
     }
@@ -1086,10 +1091,14 @@ private slots:
 
         QString result = rcx::renderCpp(tree, aId);
 
-        // Vergilius-style: named sub-types referenced by name with struct prefix
-        // Only the root type gets a top-level definition
+        // Named sub-structs carrying their own body are emitted inline at
+        // every depth (struct TypeB { struct TypeC { ... } c; } b;).
         QVERIFY(result.contains("struct TypeA {"));
-        QVERIFY(result.contains("struct TypeB b;"));
+        QVERIFY(result.contains("struct TypeB {"));
+        QVERIFY(result.contains("struct TypeC {"));
+        QVERIFY(result.contains("} c;"));
+        QVERIFY(result.contains("} b;"));
+        QVERIFY(!result.contains("struct TypeB b;"));
     }
 
     // ── Inline anonymous struct/union ──
@@ -1150,6 +1159,65 @@ private slots:
         QVERIFY(result.contains("uint64_t Flags;"));
         QVERIFY(result.contains("};"));
         QVERIFY(result.contains("uint64_t PfnCount;"));
+    }
+
+    // ── Inline named struct: struct B { ... } Inner; ──
+
+    void testInlineNamedStruct() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "A";
+        root.structTypeName = "A";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // struct B { int32_t x; int32_t y; } Inner;  (named inline, no
+        // top-level B definition)
+        rcx::Node inner;
+        inner.kind = rcx::NodeKind::Struct;
+        inner.name = "Inner";
+        inner.structTypeName = "B";
+        inner.parentId = rootId;
+        inner.offset = 0;
+        int ii = tree.addNode(inner);
+        uint64_t innerId = tree.nodes[ii].id;
+
+        rcx::Node x; x.kind = rcx::NodeKind::Int32; x.name = "x";
+        x.parentId = innerId; x.offset = 0;
+        tree.addNode(x);
+        rcx::Node y; y.kind = rcx::NodeKind::Int32; y.name = "y";
+        y.parentId = innerId; y.offset = 4;
+        tree.addNode(y);
+
+        // struct { int32_t z; } Inner2;  (anonymous inline)
+        rcx::Node inner2;
+        inner2.kind = rcx::NodeKind::Struct;
+        inner2.name = "Inner2";
+        inner2.structTypeName.clear();
+        inner2.parentId = rootId;
+        inner2.offset = 8;
+        int i2 = tree.addNode(inner2);
+        uint64_t inner2Id = tree.nodes[i2].id;
+
+        rcx::Node z; z.kind = rcx::NodeKind::Int32; z.name = "z";
+        z.parentId = inner2Id; z.offset = 0;
+        tree.addNode(z);
+
+        QString result = rcx::renderCpp(tree, rootId);
+
+        // Named inline member carries its body — never a bare reference.
+        QVERIFY(result.contains("struct B {"));
+        QVERIFY(result.contains("int32_t x;"));
+        QVERIFY(result.contains("int32_t y;"));
+        QVERIFY(result.contains("} Inner;"));
+        QVERIFY(!result.contains("struct B Inner;"));
+        // Anonymous member keeps the existing inline form.
+        QVERIFY(result.contains("struct {"));
+        QVERIFY(result.contains("int32_t z;"));
+        QVERIFY(result.contains("} Inner2;"));
     }
 
     // ── Opaque types: no stub definition ──
@@ -1534,6 +1602,54 @@ private slots:
         QVERIFY(result.contains("[FieldOffset(0x0)] public int health;"));
         QVERIFY(result.contains("[FieldOffset(0x4)] public float speed;"));
         QVERIFY(result.contains("[FieldOffset(0x8)] public ulong id;"));
+    }
+
+    // ── C#: named inline struct at a NON-zero offset ──
+    // The nested type's members must be laid out relative to ITS OWN
+    // origin (FieldOffset 0x0/0x4), never the enclosing struct's absolute
+    // offsets (which would corrupt the layout / throw at runtime).
+    void testCSharpInlineNamedStruct() {
+        rcx::NodeTree tree;
+
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "A";
+        root.structTypeName = "A";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node pad; pad.kind = rcx::NodeKind::UInt8; pad.name = "pad0";
+        pad.parentId = rootId; pad.offset = 0;
+        tree.addNode(pad);
+
+        // struct B { int x; int y; } Inner;  at offset 8
+        rcx::Node inner;
+        inner.kind = rcx::NodeKind::Struct;
+        inner.name = "Inner";
+        inner.structTypeName = "B";
+        inner.parentId = rootId;
+        inner.offset = 8;
+        int ii = tree.addNode(inner);
+        uint64_t innerId = tree.nodes[ii].id;
+
+        rcx::Node x; x.kind = rcx::NodeKind::Int32; x.name = "x";
+        x.parentId = innerId; x.offset = 0;
+        tree.addNode(x);
+        rcx::Node y; y.kind = rcx::NodeKind::Int32; y.name = "y";
+        y.parentId = innerId; y.offset = 4;
+        tree.addNode(y);
+
+        QString result = rcx::renderCSharp(tree, rootId);
+
+        QVERIFY(result.contains("public unsafe struct B"));
+        QVERIFY(result.contains("[FieldOffset(0x0)] public int x;"));
+        QVERIFY(result.contains("[FieldOffset(0x4)] public int y;"));
+        // The outer field references the nested type at its own offset.
+        QVERIFY(result.contains("[FieldOffset(0x8)] public B Inner;"));
+        // Members must NOT be shifted by the parent offset.
+        QVERIFY(!result.contains("[FieldOffset(0x8)] public int x;"));
+        QVERIFY(!result.contains("[FieldOffset(0xC)] public int y;"));
     }
 
     void testCSharpPointers() {
