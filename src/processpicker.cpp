@@ -339,6 +339,13 @@ void ProcessPicker::enumerateProcesses()
 
 void ProcessPicker::populateTable(const QList<ProcessInfo>& processes)
 {
+    // Sorting must be off while we fill cells, otherwise Qt re-sorts mid-fill
+    // and the row-index → process mapping breaks: cells land on the wrong rows
+    // and rows end up with a PID but empty Process Name / Path (reproduced by
+    // typing a filter with no matches and then clearing it). Same pattern as
+    // ScannerPanel::populateTable.
+    ui->processTable->setSortingEnabled(false);
+
     ui->processTable->setRowCount(processes.size());
     
     for (int i = 0; i < processes.size(); ++i) {
@@ -367,7 +374,10 @@ void ProcessPicker::populateTable(const QList<ProcessInfo>& processes)
         ui->processTable->setItem(i, 2, pathItem);
     }
 
-    // Default sort: highest PID first (most recently launched processes on top)
+    // Re-enable click-to-sort and apply the default order: highest PID first
+    // (most recently launched processes on top). Rows move whole, so cells
+    // stay paired now that the fill is complete.
+    ui->processTable->setSortingEnabled(true);
     ui->processTable->sortItems(0, Qt::DescendingOrder);
 }
 

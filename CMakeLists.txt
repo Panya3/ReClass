@@ -661,6 +661,21 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME test_scanner_panel COMMAND test_scanner_panel)
 
+    # UI regression tests for the ProcessPicker dialog (Process Memory attach
+    # picker). Constructed with a fixed custom process list — no live process
+    # enumeration or modal exec — so it runs headless. Covers the filter-clear
+    # path that used to scramble the table's cells when repopulating.
+    add_executable(test_process_picker tests/test_process_picker.cpp
+        src/processpicker.cpp src/processpicker.ui
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS})
+    target_include_directories(test_process_picker PRIVATE src)
+    target_link_libraries(test_process_picker PRIVATE
+        ${QT}::Widgets ${QT}::Test ${QT}::Svg)
+    if(WIN32)
+        target_link_libraries(test_process_picker PRIVATE psapi ${_QT_WINEXTRAS})
+    endif()
+    add_test(NAME test_process_picker COMMAND test_process_picker)
+
     # Offscreen render harness for the custom window title bar — grabs the
     # chrome buttons + icons to a PNG so vertical-centering of the SVG glyphs
     # can be verified deterministically. qrc linked so :/vsicons resolve.
