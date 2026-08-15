@@ -149,12 +149,21 @@ public:
     // ── New-field / layout dialog flow ──
     // Open the Insert Field dialog for the node at `nodeIdx` (or the view
     // root when -1), pre-filled with the first free slot before it. On
-    // commit: exact placement (no sibling shifting); a conflicting offset
-    // commits the field as a DRAFT unless the user cancels.
+    // commit the field is INSERTED: an offset colliding with an existing
+    // sibling snaps up to that sibling's start and pushes every sibling at
+    // or after the insertion point down by the new field's size, so the
+    // placement always lands free. Scalar kinds only — containers
+    // (struct/array, whose span is unknown at insert time) are placed
+    // as-is without pushing.
     void insertNodeFromDialog(int nodeIdx, NodeKind defaultKind);
-    // Open the Edit Offset dialog for an existing field. A valid new offset
-    // applies immediately (and clears any draft flag — a fixed field is
-    // usable again); a conflicting one offers "Save as Draft".
+    // Open the Create Field dialog for the node at `nodeIdx` (or the view
+    // root when -1). Same form as Insert Field, but the placement is exact:
+    // no sibling shifting and overlaps are allowed (union-style annotation
+    // fields).
+    void createNodeFromDialog(int nodeIdx, NodeKind defaultKind);
+    // Open the Edit Offset dialog for an existing field. The new offset is
+    // applied as-is: overlaps are allowed (positioning is explicit), no
+    // sibling shifting, no draft.
     void editNodeOffset(int nodeIdx);
     // Open the Shift Offsets dialog for the current multi-selection (all
     // selected fields must share one parent). Moves the block so its first
@@ -171,7 +180,9 @@ public:
     bool collectSameParentIndices(const QSet<uint64_t>& selIds,
                                   QVector<int>& outIndices,
                                   uint64_t& parentId) const;
-    // Toggle the draft flag (context-menu "Mark as draft / active").
+    // Toggle the draft flag directly. No production UI remains (the
+    // context-menu toggle was removed; insert/edit flows no longer create
+    // drafts) — kept for tests and legacy .rcx files that carry the flag.
     void setNodeDraft(uint64_t nodeId, bool draft);
     // Human-readable conflict description for a candidate placement, or an
     // empty string when [offset, offset+size) is free among non-draft
@@ -184,6 +195,22 @@ public:
     int suggestedInsertOffset(uint64_t parentId, int nodeIdx, NodeKind kind) const;
     // Aligned offset just past the last (non-draft) sibling of `parentId`.
     int structEndAligned(uint64_t parentId, NodeKind kind) const;
+    // Select the node by id after an insert: clears the old selection,
+    // re-applies the overlay on the fresh row, and emits selection signals.
+    void selectNodeById(uint64_t id);
+    // Resolve the parent + suggested default offset for a dialog-driven
+    // insert at `nodeIdx` (-1 = view root / document root).
+    void resolveInsertContext(int nodeIdx, NodeKind defaultKind,
+                              uint64_t& parentId, int& defaultOffset) const;
+    // Push-mode offset plan for inserting a field of `insertSize` bytes at
+    // `inOutOffset` under `parentId`: when the span collides with a sibling
+    // it snaps the offset up to that sibling's start and returns offset
+    // adjustments shifting every sibling at/after the point down by
+    // `insertSize` (empty = no push needed, offset stays). Callers push
+    // these via cmd::Insert's offAdjs.
+    QVector<cmd::OffsetAdj> pushAdjustmentsForInsert(uint64_t parentId,
+                                                     int insertSize,
+                                                     int& inOutOffset) const;
     // keepOffsets=true deletes without shifting remaining siblings up
     // (leaves a gap at the old offsets).
     void removeNode(int nodeIdx, bool keepOffsets = false);

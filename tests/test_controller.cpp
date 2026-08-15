@@ -15,6 +15,7 @@
 #include "core.h"
 #include "typeselectorpopup.h"
 #include "widgets/fieldlayoutdialog.h"
+#include <QComboBox>
 #include <QLineEdit>
 #include <QPushButton>
 
@@ -397,10 +398,10 @@ private slots:
         QVERIFY(!m_ctrl->collectSameParentIndices(cross, indices, parent));
     }
 
-    // ── Insert dialog button honesty: a malformed / negative offset must
-    //    disable OK (nothing committable) instead of offering a misleading
-    //    "Insert as Draft" that silently no-ops on click. Only a real
-    //    overlap gets the draft escape hatch.
+    // ── Insert dialog button honesty: a malformed / negative offset /
+    //    unknown type must disable OK (nothing committable). A real overlap
+    //    does NOT disable it — Insert resolves it by pushing the colliding
+    //    siblings down (no more draft escape hatch).
     void testFieldDialogOkDisabledOnBadOffset() {
         using rcx::FieldLayoutDialog;
         FieldLayoutDialog dlg(FieldLayoutDialog::InsertField, 0x10,
@@ -416,19 +417,18 @@ private slots:
         QVERIFY(offsetEdit);
         QPushButton* ok = nullptr;
         for (auto* b : dlg.findChildren<QPushButton*>()) {
-            if (b->text() == QStringLiteral("Insert")
-                || b->text() == QStringLiteral("Insert as Draft")) {
+            if (b->text() == QStringLiteral("Insert")) {
                 ok = b;
                 break;
             }
         }
         QVERIFY(ok);
 
-        // Default offset conflicts → draft escape hatch offered
+        // Default offset conflicts → Insert stays enabled (push resolves it)
         QVERIFY(ok->isEnabled());
-        QCOMPARE(ok->text(), QStringLiteral("Insert as Draft"));
+        QCOMPARE(ok->text(), QStringLiteral("Insert"));
 
-        // Malformed offset → OK disabled, no misleading draft label
+        // Malformed offset → OK disabled
         offsetEdit->setText(QStringLiteral("zzz"));
         QVERIFY(!ok->isEnabled());
 
@@ -436,12 +436,116 @@ private slots:
         offsetEdit->setText(QStringLiteral("-0x4"));
         QVERIFY(!ok->isEnabled());
 
-        // Free offset → plain "Insert", enabled
+        // Unknown type text → OK disabled
         offsetEdit->setText(QStringLiteral("0x20"));
+        auto* typeCombo = dlg.findChild<QComboBox*>();
+        QVERIFY(typeCombo);
+        typeCombo->setCurrentText(QStringLiteral("not_a_type"));
+        QVERIFY(!ok->isEnabled());
+
+        // Free offset + known type → plain "Insert", enabled
+        typeCombo->setCurrentText(QStringLiteral("hex32"));
         QVERIFY(ok->isEnabled());
         QCOMPARE(ok->text(), QStringLiteral("Insert"));
     }
 
+    // ── Push-mode insert plan (Insert Field with a conflicting offset):
+    //    an offset landing inside an existing field snaps up to that
+    //    field's start, then every sibling at/after the point shifts down
+    //    by the new field's size. Free offsets push nothing.
+    void testPushAdjustmentsForInsert() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;  // TestStruct
+        auto offOf = [&](const QString& name) {
+            for (int i = 0; i < m_doc->tree.nodes.size(); i++)
+                if (m_doc->tree.nodes[i].name == name)
+                    return m_doc->tree.nodes[i].offset;
+            return -1;
+        };
+        // Layout: field_u32@0(4), field_float@4(4), field_u8@8(1),
+        // pad0@9(2), pad1@11(1), field_hex@12(4).
+
+        // Case 1: exact start of an existing field → no snap, push it and
+        // everything after down by the insert size.
+        int off = 4;
+        auto adjs = m_ctrl->pushAdjustmentsForInsert(rootId, 4, off);
+        QCOMPARE(off, 4);                        // offset kept
+        QCOMPARE(adjs.size(), 5);                // field_float + u8 + pad0 + pad1 + hex
+        QCOMPARE(offOf(QStringLiteral("field_float")), 4);
+        QCOMPARE(offOf(QStringLiteral("field_u8")), 8);
+        for (const auto& a : adjs) {
+            QCOMPARE(a.newOffset, a.oldOffset + 4);
+            QVERIFY(a.oldOffset >= 4);
+        }
+
+        // Case 2: offset in the middle of a field → snap to that field's
+        // start, then push everything from there down.
+        off = 2;
+        adjs = m_ctrl->pushAdjustmentsForInsert(rootId, 4, off);
+        QCOMPARE(off, 0);                        // snapped up to field_u32
+        QCOMPARE(adjs.size(), 6);                // every sibling shifts
+        for (const auto& a : adjs)
+            QCOMPARE(a.newOffset, a.oldOffset + 4);
+
+        // Case 3: free offset → no push at all, offset untouched.
+        off = 0x20;
+        adjs = m_ctrl->pushAdjustmentsForInsert(rootId, 4, off);
+        QVERIFY(adjs.isEmpty());
+        QCOMPARE(off, 0x20);
+
+        // Case 4: exact start of a later field, size eats into the next
+        // ones → push from that field on (no snap needed).
+        off = 8;
+        adjs = m_ctrl->pushAdjustmentsForInsert(rootId, 4, off);
+        QCOMPARE(off, 8);
+        QCOMPARE(adjs.size(), 4);                // u8 + pad0 + pad1 + hex
+        for (const auto& a : adjs) {
+            QVERIFY(a.oldOffset >= 8);
+            QCOMPARE(a.newOffset, a.oldOffset + 4);
+        }
+
+        // Case 5: container (size 0) — span unknown at insert time, so a
+        // conflicting offset never pushes; the placement stays as-is.
+        off = 4;
+        adjs = m_ctrl->pushAdjustmentsForInsert(rootId, 0, off);
+        QVERIFY(adjs.isEmpty());
+        QCOMPARE(off, 4);
+    }
+
+    // ── Create Field dialog: overlaps are allowed by design — OK stays
+    //    enabled on a conflict (no push, no draft) and the button reads
+    //    "Create"; malformed offsets still disable it.
+    void testCreateFieldDialogAllowsOverlap() {
+        using rcx::FieldLayoutDialog;
+        FieldLayoutDialog dlg(FieldLayoutDialog::CreateField, 0x10,
+                              NodeKind::Hex32, QStringLiteral("f"),
+                              [](int off, NodeKind) -> QString {
+                                  return off == 0x10
+                                      ? QStringLiteral("0x10 is taken")
+                                      : QString();
+                              },
+                              QStringLiteral("Create Field"));
+
+        auto* offsetEdit = dlg.findChild<QLineEdit*>();
+        QVERIFY(offsetEdit);
+        QPushButton* ok = nullptr;
+        for (auto* b : dlg.findChildren<QPushButton*>()) {
+            if (b->text() == QStringLiteral("Create")) { ok = b; break; }
+        }
+        QVERIFY(ok);
+
+        // Conflict → still committable as "Create" (overlap allowed).
+        QVERIFY(ok->isEnabled());
+        QCOMPARE(ok->text(), QStringLiteral("Create"));
+
+        // Malformed offset → disabled (nothing committable).
+        offsetEdit->setText(QStringLiteral("zzz"));
+        QVERIFY(!ok->isEnabled());
+
+        // Free offset → enabled "Create".
+        offsetEdit->setText(QStringLiteral("0x20"));
+        QVERIFY(ok->isEnabled());
+        QCOMPARE(ok->text(), QStringLiteral("Create"));
+    }
     // ── Repro: renaming a field around a virtually-expanded typed pointer
     //    must not duplicate anything across a save/load round trip ──
     //
@@ -1727,7 +1831,6 @@ private slots:
         }
         QVERIFY(found);
     }
-
     void testUnionAppendPlacesAtExactEnd() {
         // A union whose members end at 0x14 (member at offset 4 sized 0x10)
         // must append the next member at exactly 0x14 — not round it up to

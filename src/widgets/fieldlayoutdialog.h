@@ -12,30 +12,35 @@ class QPushButton;
 
 namespace rcx {
 
-// Modal dialog for the "new variable declaration" flow. Three modes:
+// Modal dialog for the "new variable declaration" flow. Four modes:
 //
-//   InsertField  — declare a brand-new field: offset (exact placement, no
-//                  sibling shifting), type (full kind list), name (optional,
-//                  auto "field_XX" when empty). If the offset collides with
-//                  an existing sibling (duplicate offset, or the field's size
-//                  eating into another field), the OK button becomes
-//                  "Insert as Draft" — committing keeps the field as a
-//                  non-counted placeholder until the offset is fixed.
+//   InsertField  — declare a brand-new field: offset, type (full kind list,
+//                  editable + filterable combo), name (optional, auto
+//                  "field_XX" when empty). A conflicting offset does NOT
+//                  block the commit: the controller pushes existing fields
+//                  at/after the insertion point down by the new field's
+//                  size, so the placement always lands free.
+//   CreateField   — same form as InsertField, but the placement is exact:
+//                  no sibling shifting, overlaps allowed (union-style
+//                  annotation fields).
 //   EditOffset   — retarget an existing field's offset. Same live conflict
-//                  check; on conflict OK becomes "Save as Draft".
+//                  check; the move is committed as-is even when it overlaps
+//                  (positioning is explicit — no draft, no push).
 //   ShiftOffsets — move a selected block so its first field lands exactly at
 //                  the given offset (relative gaps preserved). Conflicts
 //                  disable the OK button entirely — the whole block is
-//                  skipped rather than committed as a draft.
+//                  skipped.
 //
 // Live validation: the caller supplies a validate(offset, kind) callback
 // returning an empty string when the placement is legal and a human-readable
 // conflict description otherwise. It re-runs on every keystroke / type
-// change so the user sees the problem before committing.
+// change so the user sees the problem before committing. The type combo is
+// an editable dropdown: typing filters the list (case-insensitive contains)
+// and the popup is height-bounded.
 class FieldLayoutDialog : public ThemedDialog {
     Q_OBJECT
 public:
-    enum Mode { InsertField, EditOffset, ShiftOffsets };
+    enum Mode { InsertField, CreateField, EditOffset, ShiftOffsets };
 
     using ValidateFn = std::function<QString(int offset, NodeKind kind)>;
 
@@ -44,7 +49,6 @@ public:
         int      offset   = 0;
         NodeKind kind     = NodeKind::Hex64;
         QString  name;
-        bool     asDraft  = false;  // true when committed despite a conflict
     };
 
     FieldLayoutDialog(Mode mode, int defaultOffset, NodeKind defaultKind,
@@ -63,6 +67,10 @@ private:
     void restyle();
     void revalidate();
     static int parseOffset(const QString& text, bool* ok);
+    // Resolve the combo's text to a NodeKind: exact typeName, then
+    // case-insensitive exact, then a unique case-insensitive substring
+    // match. `ok` is false when the text names no single kind.
+    static NodeKind kindFromComboText(const QString& text, bool* ok);
 
     Mode        m_mode;
     ValidateFn  m_validate;

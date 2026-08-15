@@ -42,6 +42,7 @@
 #include <QRegularExpression>
 #include <QtConcurrent/QtConcurrentRun>
 #include <limits>
+#include <functional>
 
 namespace rcx {
 
@@ -1134,9 +1135,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
     });
 
     // Insert key shortcut — opens the Insert Field dialog (offset, type,
-    // name) instead of the old blind insert-above-and-shift. The dialog
-    // live-checks the offset against siblings; a conflicting offset commits
-    // as a draft or is cancelled.
+    // name) instead of the old blind insert-above-and-shift. A conflicting
+    // offset pushes the colliding siblings down (insert semantics).
     connect(editor, &RcxEditor::insertAboveRequested,
             this, [this](int nodeIdx, NodeKind kind) {
         insertNodeFromDialog(nodeIdx, kind);
@@ -3058,6 +3058,57 @@ QString RcxController::describeOffsetConflict(uint64_t parentId, int offset,
     return QString();
 }
 
+void RcxController::resolveInsertContext(int nodeIdx, NodeKind defaultKind,
+                                         uint64_t& parentId,
+                                         int& defaultOffset) const {
+    if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
+        const Node& before = m_doc->tree.nodes[nodeIdx];
+        parentId = before.parentId;
+        defaultOffset = suggestedInsertOffset(parentId, nodeIdx, defaultKind);
+    } else {
+        parentId = m_viewRootId ? m_viewRootId : 0;
+        defaultOffset = (parentId == 0) ? 0 : structEndAligned(parentId, defaultKind);
+    }
+}
+
+QVector<cmd::OffsetAdj> RcxController::pushAdjustmentsForInsert(
+    uint64_t parentId, int insertSize, int& inOutOffset) const {
+    QVector<cmd::OffsetAdj> adjs;
+    // No push when the span is already free (union containers always return
+    // "free" from describeOffsetConflict — overlap is by design there).
+    if (describeOffsetConflict(parentId, inOutOffset, insertSize).isEmpty())
+        return adjs;
+
+    int insertOffset = inOutOffset;
+
+    // Snap: an offset landing in the middle of an existing field moves up
+    // to that field's start, so the uniform shift below vacates exactly
+    // [offset, offset + size).
+    auto siblings = m_doc->tree.childrenOf(parentId);
+    for (int si : siblings) {
+        const Node& sib = m_doc->tree.nodes[si];
+        if (sib.draft) continue;
+        int sz = (sib.kind == NodeKind::Struct || sib.kind == NodeKind::Array)
+            ? m_doc->tree.structSpan(sib.id) : sib.byteSize();
+        if (sz <= 0) continue;
+        if (sib.offset < insertOffset && insertOffset < sib.offset + sz) {
+            insertOffset = sib.offset;
+            break;
+        }
+    }
+
+    // Shift every sibling at/after the insertion point down by insertSize.
+    siblings = m_doc->tree.childrenOf(parentId);
+    for (int si : siblings) {
+        auto& sib = m_doc->tree.nodes[si];
+        if (sib.offset >= insertOffset)
+            adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset + insertSize});
+    }
+
+    inOutOffset = insertOffset;
+    return adjs;
+}
+
 void RcxController::insertNodeFromDialog(int nodeIdx, NodeKind defaultKind) {
     // A structural insert shifts the layout: drop any armed byte selection
     // so it doesn't re-paint onto the fresh field's address range (the
@@ -3067,14 +3118,7 @@ void RcxController::insertNodeFromDialog(int nodeIdx, NodeKind defaultKind) {
 
     uint64_t parentId;
     int defaultOffset;
-    if (nodeIdx >= 0 && nodeIdx < m_doc->tree.nodes.size()) {
-        const Node& before = m_doc->tree.nodes[nodeIdx];
-        parentId = before.parentId;
-        defaultOffset = suggestedInsertOffset(parentId, nodeIdx, defaultKind);
-    } else {
-        parentId = m_viewRootId ? m_viewRootId : 0;
-        defaultOffset = (parentId == 0) ? 0 : structEndAligned(parentId, defaultKind);
-    }
+    resolveInsertContext(nodeIdx, defaultKind, parentId, defaultOffset);
 
     auto validate = [this, parentId](int offset, NodeKind kind) -> QString {
         int size = sizeForKind(kind);
@@ -3089,34 +3133,79 @@ void RcxController::insertNodeFromDialog(int nodeIdx, NodeKind defaultKind) {
     if (dlg.exec() != QDialog::Accepted) return;
     auto r = dlg.result();
 
+    // Insert = push: a conflicting offset snaps to the colliding field's
+    // start and shifts every sibling at/after it down by the new size.
+    // Containers (struct/array, size 0) are placed as-is: their span is
+    // unknown at insert time, so pushing by a guessed size would either
+    // leave a phantom gap or fail to vacate the real footprint.
+    int insertSize = sizeForKind(r.kind);
+    int insertOffset = r.offset;
+    QVector<cmd::OffsetAdj> adjs;
+    if (insertSize > 0)
+        adjs = pushAdjustmentsForInsert(parentId, insertSize, insertOffset);
+
     Node n;
     n.kind     = r.kind;
     n.name     = r.name.isEmpty() ? QStringLiteral("field") : r.name;
     n.parentId = parentId;
-    n.offset   = r.offset;
-    n.draft    = r.asDraft;
+    n.offset   = insertOffset;
     n.id       = m_doc->tree.reserveId();
 
-    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n, adjs}));
     refresh();
 
     // Select the fresh field so the user sees what just landed. refresh()
     // (above) painted the OLD selection, so re-apply the overlay here —
     // otherwise the new row stays unpainted until the next ~200 ms tick.
-    int ni = m_doc->tree.indexOfId(n.id);
-    if (ni >= 0) {
-        m_selIds.clear();
-        m_selIds.insert(n.id);
-        m_anchorLine = -1;
-        applySelectionOverlays();
-        emit selectionChanged(1);
-        emit nodeSelected(ni);
-    }
-    if (n.draft)
-        emit statusHint(QStringLiteral(
-            "Inserted as draft \u2014 offset conflicts with an existing field; "
-            "not counted or emitted until the offset is fixed."));
+    selectNodeById(n.id);
 }
+
+void RcxController::createNodeFromDialog(int nodeIdx, NodeKind defaultKind) {
+    // Exact placement never shifts the layout, but drop any armed byte
+    // selection for consistency with the insert flow.
+    for (auto* ed : m_editors)
+        if (ed) ed->clearByteSelection();
+
+    uint64_t parentId;
+    int defaultOffset;
+    resolveInsertContext(nodeIdx, defaultKind, parentId, defaultOffset);
+
+    auto validate = [this, parentId](int offset, NodeKind kind) -> QString {
+        int size = sizeForKind(kind);
+        if (size <= 0) size = 8;
+        return describeOffsetConflict(parentId, offset, size);
+    };
+
+    FieldLayoutDialog dlg(FieldLayoutDialog::CreateField, defaultOffset,
+                          defaultKind, QStringLiteral("field"), validate,
+                          QStringLiteral("Create Field"),
+                          qobject_cast<QWidget*>(parent()));
+    if (dlg.exec() != QDialog::Accepted) return;
+    auto r = dlg.result();
+
+    Node n;
+    n.kind     = r.kind;
+    n.name     = r.name.isEmpty() ? QStringLiteral("field") : r.name;
+    n.parentId = parentId;
+    n.offset   = r.offset;  // exact placement — overlaps allowed, no push
+    n.id       = m_doc->tree.reserveId();
+
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n}));
+    refresh();
+    selectNodeById(n.id);
+}
+
+void RcxController::selectNodeById(uint64_t id) {
+    int ni = m_doc->tree.indexOfId(id);
+    if (ni < 0) return;
+    m_selIds.clear();
+    m_selIds.insert(id);
+    m_anchorLine = -1;
+    applySelectionOverlays();
+    emit selectionChanged(1);
+    emit nodeSelected(ni);
+}
+
 
 void RcxController::editNodeOffset(int nodeIdx) {
     if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
@@ -3133,17 +3222,13 @@ void RcxController::editNodeOffset(int nodeIdx) {
                           qobject_cast<QWidget*>(parent()));
     if (dlg.exec() != QDialog::Accepted) return;
     auto r = dlg.result();
-    if (r.offset == node.offset && r.asDraft == node.draft) return;
+    if (r.offset == node.offset) return;
 
+    // The new offset is applied as-is: overlaps are allowed (positioning is
+    // explicit), no sibling shifting, no draft.
     m_doc->undoStack.beginMacro(QStringLiteral("Edit offset"));
-    if (r.offset != node.offset)
-        m_doc->undoStack.push(new RcxCommand(this,
-            cmd::ChangeOffset{node.id, node.offset, r.offset}));
-    // A field whose offset is fixed to a valid position becomes usable
-    // again immediately; saving it onto a conflicting position marks draft.
-    if (node.draft != r.asDraft)
-        m_doc->undoStack.push(new RcxCommand(this,
-            cmd::SetDraft{node.id, node.draft, r.asDraft}));
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::ChangeOffset{node.id, node.offset, r.offset}));
     m_doc->undoStack.endMacro();
     refresh();
 }
@@ -5169,6 +5254,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             insertMenu->addAction("Insert Field...", [this, firstIdx]() {
                 insertNodeFromDialog(firstIdx, NodeKind::Hex64);
             });
+            insertMenu->addAction("Create Field...", [this, firstIdx]() {
+                createNodeFromDialog(firstIdx, NodeKind::Hex64);
+            });
         }
 
         // ── Shift Offsets (same-parent selection) ──
@@ -5731,6 +5819,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             auto* insertMenu = menu.addMenu(icon("diff-added.svg"), "Insert");
             insertMenu->addAction("Insert Field...\tIns", [this, nodeIdx]() {
                 insertNodeFromDialog(nodeIdx, NodeKind::Hex64);
+            });
+            insertMenu->addAction("Create Field...", [this, nodeIdx]() {
+                createNodeFromDialog(nodeIdx, NodeKind::Hex64);
             });
             insertMenu->addSeparator();
             insertMenu->addAction("Append bytes...", [this, &menu]() {
