@@ -1740,16 +1740,13 @@ private slots:
         QRect itemRect = menu.actionGeometry(actions[1]);
         QPoint localCenter = itemRect.center();
 
-        // Enter event — tells QMenu the mouse is inside
-        QEvent enter(QEvent::Enter);
-        QApplication::sendEvent(&menu, &enter);
-        QApplication::processEvents();
-
-        // MouseMove to the second item — triggers hover/select
-        QMouseEvent move(QEvent::MouseMove, QPointF(localCenter),
-                         menu.mapToGlobal(localCenter),
-                         Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-        QApplication::sendEvent(&menu, &move);
+        // QMenu::setActiveAction is the public hover-state setter — it
+        // triggers the same repaint path a real mouse hover would (the
+        // amber style reads State_Selected from the action's option).
+        // Synthetic mouse moves via sendEvent/QTest::mouseMove don't
+        // reliably drive QMenu's internal hover state in a test window
+        // without a full platform event loop.
+        menu.setActiveAction(actions[1]);
         QApplication::processEvents();
         QTest::qWait(50);  // let repaint settle
 
@@ -1871,7 +1868,11 @@ private slots:
                                              lm.effectiveTypeW, lm.effectiveNameW);
         QVERIFY2(vs.valid, "Value span for pointer line is not valid");
 
-        int hoverCol = (vs.start + vs.end) / 2;  // middle of value span
+        // Hover the LEFT EDGE of the value glyph, not the span midpoint:
+        // a wide value span's midpoint can land past the viewport's right
+        // edge, and the editor's right-margin guard suppresses the preview
+        // when the cursor sits right of the value's actual glyph.
+        int hoverCol = vs.start + 1;
         QPoint vp = colToViewport(m_editor->scintilla(), ptrLine, hoverCol);
         // Reactivate the editor — a previous test that popped its own
         // top-level window (QMenu screen-capture, etc.) leaves m_editor
@@ -2019,17 +2020,18 @@ private slots:
         }
         QVERIFY2(ptrFooterLine > ptrHeaderLine, "Should have a pointer footer after header");
 
-        // Verify the composed text contains the child field values
-        // UInt32 displays as hex (e.g. 100 → "0x00000064"), Float as decimal
+        // Verify the composed text contains the child field values.
+        // Unsigned ints render DECIMAL by default (the "decimal unsigned
+        // default" feature); floats render decimal too.
         QStringList lines = cr.text.split('\n');
         bool foundX = false, foundY = false, foundZ = false;
         for (const QString& line : lines) {
-            if (line.contains("0x64") && line.contains("x")) foundX = true;  // 100 = 0x64
-            if (line.contains("0xc8") && line.contains("y")) foundY = true;  // 200 = 0xc8
+            if (line.contains("100") && line.contains("x")) foundX = true;  // x = 100
+            if (line.contains("200") && line.contains("y")) foundY = true;  // y = 200
             if (line.contains("3.14") && line.contains("z")) foundZ = true;
         }
-        QVERIFY2(foundX, "Child field 'x' with value 0x64 should appear in output");
-        QVERIFY2(foundY, "Child field 'y' with value 0xc8 should appear in output");
+        QVERIFY2(foundX, "Child field 'x' with value 100 should appear in output");
+        QVERIFY2(foundY, "Child field 'y' with value 200 should appear in output");
         QVERIFY2(foundZ, "Child field 'z' with value 3.14 should appear in output");
 
         // Verify the pointer type name appears
@@ -2234,9 +2236,10 @@ private slots:
                  qPrintable(QString("Expected max depth >= 3 for chain, got %1")
                      .arg(maxDepth)));
 
-        // Verify innermost value (999 = 0x3e7) appears in the output
-        QVERIFY2(cr.text.contains("0x3e7"),
-                 "Innermost field 'value = 0x3e7' should appear in chain expansion");
+        // Verify innermost value (999) appears in the output — unsigned
+        // ints render DECIMAL by default ("decimal unsigned default").
+        QVERIFY2(cr.text.contains("999"),
+                 "Innermost field 'value = 999' should appear in chain expansion");
 
         m_editor->applyDocument(m_result);
     }
@@ -2827,11 +2830,16 @@ private slots:
                                              lm.effectiveTypeW, lm.effectiveNameW);
         QVERIFY2(vs.valid, "Value span for FuncPtr line is not valid");
 
-        int hoverCol = (vs.start + vs.end) / 2;
+        // Hover the LEFT EDGE of the value glyph (not the span midpoint):
+        // a wide span's midpoint can sit past the viewport's right edge and
+        // the editor's right-margin guard suppresses the preview.
+        int hoverCol = vs.start + 1;
         QPoint vpFP = colToViewport(m_editor->scintilla(), fpLine, hoverCol);
+        m_editor->raise();
+        m_editor->activateWindow();
+        QApplication::processEvents();
         sendMouseMove(m_editor->scintilla()->viewport(), vpFP);
-        // Preview popups dwell for 700ms before showing — poll with
-        // generous timeout to absorb event-loop scheduling slop.
+        // Preview popups dwell before showing — poll with generous timeout.
         QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup() != nullptr, 2000);
         QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup()->isVisible(), 2000);
         QCOMPARE(m_editor->hoverPopupActiveId(), QStringLiteral("disasm"));
@@ -2914,9 +2922,20 @@ private slots:
         ColumnSpan vs = m_editor->valueSpan(lm, lineText.size(),
                                             lm.effectiveTypeW, lm.effectiveNameW);
         QVERIFY(vs.valid);
+        // Hover the LEFT EDGE of the value glyph (not the span midpoint):
+        // the midpoint of a wide value span can land past the viewport's
+        // right edge, and the editor's right-margin guard treats a cursor
+        // right of the value's actual glyph as "not over the value" and
+        // suppresses the preview. vs.start + 1 is inside the glyph and
+        // safely within the viewport.
         QPoint vpFP = colToViewport(m_editor->scintilla(),
-                                    fpLine, (vs.start + vs.end) / 2);
+                                    fpLine, vs.start + 1);
+        m_editor->raise();
+        m_editor->activateWindow();
+        QApplication::processEvents();
         sendMouseMove(m_editor->scintilla()->viewport(), vpFP);
+        QApplication::processEvents();
+        QTest::qWait(50);
         QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup() != nullptr, 2000);
         QTRY_VERIFY_WITH_TIMEOUT(m_editor->hoverPopup()->isVisible(), 2000);
 
@@ -3289,6 +3308,7 @@ private slots:
         // Left arrow should collapse selection to its left end (spanStart)
         sendKey(Qt::Key_Left);
         QApplication::processEvents();
+        QTest::qWait(20);  // let the queued key event settle before reading the cursor
 
         int line, col;
         getCursor(line, col);
