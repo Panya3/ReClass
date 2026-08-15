@@ -4771,10 +4771,23 @@ static ColumnSpan headerNameSpan(const LineMeta& lm, const QString& lineText) {
 
     if (nameStart >= lineText.size()) return {};
 
-    // Name ends before " {" suffix (expanded) or at line end (collapsed)
+    // Name ends before " {" suffix (expanded) or at line end (collapsed),
+    // but never past the name column — ONLY for pointer headers. Pointer
+    // headers render "Type*  Name  <value> {" with the value column
+    // between the name and the brace, so ending at " {" would swallow the
+    // value into the name span (hover highlight, click-to-edit, and commit
+    // all act on that oversized span). Pointer names are padded to the
+    // name column width (fit(node.name, nameW) in fmtPointerHeader), so
+    // nameStart + nameW is exactly their right edge. Struct/array headers
+    // (fmtStructHeader / fmtArrayHeader) render node.name UNTRUNCATED —
+    // their names can legitimately outgrow effectiveNameW (per-scope width
+    // is computed from children only), so capping there would truncate
+    // the name span mid-token and break editing the tail of long names.
     int nameEnd = lineText.size();
     if (lineText.endsWith(QStringLiteral(" {")))
         nameEnd = lineText.size() - 2;
+    if (lm.nodeKind == NodeKind::Pointer32 || lm.nodeKind == NodeKind::Pointer64)
+        nameEnd = qMin(nameEnd, nameStart + lm.effectiveNameW);
 
     if (nameEnd <= nameStart) return {};
 
@@ -4891,6 +4904,17 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     }
 
     if (lm->nodeIdx < 0) return false;
+
+    // vftable block: the block name ("__vptr") is fixed by design (Q19) —
+    // never editable via click / F2 / hover. The FuncPtr entries inside it
+    // are ordinary fields and stay fully editable. NOTE: this guard depends
+    // on m_disasmTree being set (controller.refresh() calls setProviderRef
+    // on every refresh) — a synthetic editor without a provider ref would
+    // bypass the lock. Keep that call in place.
+    if (t == EditTarget::Name
+        && m_disasmTree && lm->nodeIdx < m_disasmTree->nodes.size()
+        && m_disasmTree->nodes[lm->nodeIdx].isVftable())
+        return false;
 
     // Hex nodes: only Type is editable (ASCII preview + hex bytes are display-only)
     if ((t == EditTarget::Name || t == EditTarget::Value) && isHexNode(lm->nodeKind))

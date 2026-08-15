@@ -3371,6 +3371,248 @@ private slots:
 
         QCOMPARE(spy.count(), 1);
     }
+
+    // ── Test: long struct name in a narrow scope keeps a full name span ──
+    // The pointer-header name cap (nameStart + nameW) must apply ONLY to
+    // pointer kinds. Struct headers render node.name untruncated, so a
+    // name longer than the scope's effectiveNameW must still be fully
+    // editable — capping it would cut the name span mid-token.
+    void testLongStructNameSpanNotTruncated() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        tree.pointerSize = 8;
+
+        Node root; root.kind = NodeKind::Struct; root.name = "Root";
+        root.structTypeName = "Root"; root.parentId = 0; root.offset = 0;
+        root.collapsed = false;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Long-named embedded struct child of Root.
+        const QString longName =
+            QStringLiteral("ThisStructNameIsQuiteLongAndExceedsScopeNameWidth");
+        Node inner; inner.kind = NodeKind::Struct; inner.name = longName;
+        inner.structTypeName = longName; inner.parentId = rootId; inner.offset = 0;
+        inner.collapsed = false;
+        int ii = tree.addNode(inner);
+        uint64_t innerId = tree.nodes[ii].id;
+        Node f0; f0.kind = NodeKind::Int32; f0.name = "a";
+        f0.parentId = innerId; f0.offset = 0;
+        tree.addNode(f0);
+
+        // Short sibling keeps the scope name width small.
+        Node sib; sib.kind = NodeKind::Int32; sib.name = "b";
+        sib.parentId = rootId; sib.offset = 8;
+        tree.addNode(sib);
+
+        QByteArray data(64, '\0');
+        BufferProvider prov(data, "structs");
+
+        ComposeResult cr = compose(tree, prov);
+        m_editor->setProviderRef(&prov, &prov, &tree);
+        m_editor->applyDocument(cr);
+        QApplication::processEvents();
+
+        // Find the embedded struct header line (nodeIdx == ii, Header).
+        int hdrLine = -1;
+        for (int i = 0; i < cr.meta.size(); ++i) {
+            const LineMeta& lm = cr.meta[i];
+            if (lm.lineKind == LineKind::Header && lm.nodeIdx == ii
+                && (lm.nodeKind == NodeKind::Struct
+                 || lm.nodeKind == NodeKind::Pointer32
+                 || lm.nodeKind == NodeKind::Pointer64)) {
+                hdrLine = i;
+                break;
+            }
+        }
+        QVERIFY2(hdrLine >= 0, "Should find the embedded struct header");
+
+        // Verify the scope name width is indeed narrower than the name.
+        const LineMeta& lm = cr.meta[hdrLine];
+        QVERIFY2(lm.effectiveNameW < longName.size(),
+                 "Test premise: scope name width must be narrower than the long name");
+
+        // A name edit must span the FULL long name — end column must reach
+        // past the name-column boundary (which would have truncated it).
+        QVERIFY2(m_editor->beginInlineEdit(EditTarget::Name, hdrLine),
+                 "Name edit should start on the long struct header");
+        QVERIFY(m_editor->isEditing());
+        int nameEnd = m_editor->editEnd();
+        QStringList crLines = cr.text.split('\n');
+        QString lineText = crLines[hdrLine];
+        QString edited = lineText.mid(m_editor->editSpanStart(),
+                                      nameEnd - m_editor->editSpanStart()).trimmed();
+        QCOMPARE(edited, longName);
+        m_editor->cancelInlineEdit();
+        QVERIFY(!m_editor->isEditing());
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: pointer header name span must not swallow the value ──
+    // Pointer headers render "ChildData*  child  <value> {" — the name
+    // span must end at the name column, not at the trailing " {" (which
+    // would cover the pointer value and make hover/click/commit act on
+    // the whole tail). This was the root cause of the vftable block's
+    // "hover sticks the whole row + click copies the value into the name"
+    // bug; it applies to every typed-pointer header.
+    void testVftableHeaderNameSpanNarrow() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        tree.pointerSize = 8;
+
+        // Root FIRST in the node array so it composes before ChildData
+        // (mirrors test_compose's Main-before-VTable layout; otherwise the
+        // child root renders standalone first and the pointer gets
+        // force-collapsed by the virtual-expansion cycle guard).
+        Node root; root.kind = NodeKind::Struct; root.name = "Foo";
+        root.structTypeName = "Foo"; root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Referenced struct "ChildData" (one Int32 = 4 bytes) — must be
+        // added before the pointer so its id exists for ptr.refId.
+        Node child; child.kind = NodeKind::Struct; child.name = "ChildData";
+        child.structTypeName = "ChildData"; child.parentId = 0; child.offset = 0;
+        int childIdx = tree.addNode(child);
+        uint64_t childId = tree.nodes[childIdx].id;
+        Node cf; cf.kind = NodeKind::Int32; cf.name = "x";
+        cf.parentId = childId; cf.offset = 0;
+        tree.addNode(cf);
+
+        // Typed pointer field at offset 0 (refId → ChildData), refId set
+        // BEFORE addNode — addNode copies the node, so a late refId write
+        // would never reach the tree and the pointer would stay a leaf.
+        Node ptr; ptr.kind = NodeKind::Pointer64; ptr.name = "child";
+        ptr.parentId = rootId; ptr.offset = 0;
+        ptr.refId = childId;
+        ptr.collapsed = false;  // expanded so the header row is a Header
+        int pi = tree.addNode(ptr);
+
+        QByteArray data(64, '\0');
+        uint64_t childAddr = 0x7FF600001234ULL;
+        memcpy(data.data() + 0, &childAddr, 8);  // pointer value
+        BufferProvider prov(data, "ptr");
+
+        ComposeResult cr = compose(tree, prov);
+        m_editor->setProviderRef(&prov, &prov, &tree);
+        m_editor->applyDocument(cr);
+        QApplication::processEvents();
+
+        // Locate the typed-pointer header line (first expanded pointer header
+        // — the root's own header is suppressed, so the only Header on a
+        // Pointer64 row is the merged pointer/struct fold header).
+        int hdrLine = -1;
+        for (int i = 0; i < cr.meta.size(); ++i) {
+            const LineMeta& lm = cr.meta[i];
+            if (lm.lineKind == LineKind::Header
+                && (lm.nodeKind == NodeKind::Pointer64
+                 || lm.nodeKind == NodeKind::Pointer32)) {
+                hdrLine = i;
+                break;
+            }
+        }
+        QVERIFY2(hdrLine >= 0, "Should find the expanded typed-pointer header");
+        QCOMPARE(cr.meta[hdrLine].nodeIdx, pi);
+
+        const LineMeta& lm = cr.meta[hdrLine];
+        QStringList crLines = cr.text.split('\n');
+        QVERIFY2(hdrLine < crLines.size(), "Compose output should have the header line");
+        QString lineText = crLines[hdrLine];
+        QVERIFY2(lineText.contains("child"), "Header should contain the field name");
+        QVERIFY2(lineText.contains("{"), "Expanded header should end with a brace");
+
+        // Name span must end at the name column — it must NOT cover the
+        // pointer value or the brace. Start a name edit: the edit span
+        // (editSpanStart..editEnd) must be exactly the "child" token,
+        // well before the pointer-value hex digits.
+        QVERIFY2(m_editor->beginInlineEdit(EditTarget::Name, hdrLine),
+                 "Name edit should start on the pointer header");
+        QVERIFY(m_editor->isEditing());
+        int nameEnd = m_editor->editEnd();
+        int nameStart = m_editor->editSpanStart();
+        int nameColLimit = lm.depth * kTreeIndent + kFoldCol
+                         + lm.effectiveTypeW + kSepWidth + lm.effectiveNameW;
+        QVERIFY2(nameEnd <= nameColLimit,
+                 "Name edit span must end at the name column, not swallow the value");
+        QString name = lineText.mid(nameStart, nameEnd - nameStart).trimmed();
+        QCOMPARE(name, QStringLiteral("child"));
+        m_editor->cancelInlineEdit();
+        QVERIFY(!m_editor->isEditing());
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ── Test: vftable block name is locked (not editable via F2/click) ──
+    void testVftableBlockNameLocked() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        tree.pointerSize = 8;
+
+        Node root; root.kind = NodeKind::Struct; root.name = "Foo";
+        root.structTypeName = "Foo"; root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        Node vf; vf.kind = NodeKind::Pointer64; vf.name = "__vptr";
+        vf.parentId = rootId; vf.offset = 0;
+        vf.classKeyword = "vftable";
+        vf.collapsed = false;  // expanded so the header row is a Header
+        int vi = tree.addNode(vf);
+        uint64_t vfId = tree.nodes[vi].id;
+
+        Node fn0; fn0.kind = NodeKind::FuncPtr64; fn0.name = "fn0";
+        fn0.parentId = vfId; fn0.offset = 0;
+        tree.addNode(fn0);
+
+        QByteArray data(64, '\0');
+        uint64_t vtableAddr = 0x7FF600001234ULL;
+        memcpy(data.data() + 0, &vtableAddr, 8);
+        BufferProvider prov(data, "vftable");
+
+        ComposeResult cr = compose(tree, prov);
+        m_editor->setProviderRef(&prov, &prov, &tree);
+        m_editor->applyDocument(cr);
+        QApplication::processEvents();
+
+        int hdrLine = -1;
+        for (int i = 0; i < cr.meta.size(); ++i) {
+            const LineMeta& lm = cr.meta[i];
+            if (lm.lineKind == LineKind::Header
+                && (lm.nodeKind == NodeKind::Pointer64
+                 || lm.nodeKind == NodeKind::Pointer32)
+                && lm.nodeIdx == vi) {
+                hdrLine = i;
+                break;
+            }
+        }
+        QVERIFY2(hdrLine >= 0, "Should find the vftable pointer header");
+
+        // Name edit must be refused (fixed "__vptr" name).
+        QVERIFY2(!m_editor->beginInlineEdit(EditTarget::Name, hdrLine),
+                 "beginInlineEdit(Name) must be refused on the vftable block");
+        QVERIFY(!m_editor->isEditing());
+
+        // The block's FuncPtr entries remain editable (name edit on them
+        // still starts). Entry rows are Field lines under the header.
+        int entryLine = -1;
+        for (int i = hdrLine + 1; i < cr.meta.size(); ++i) {
+            const LineMeta& e = cr.meta[i];
+            if (e.lineKind == LineKind::Footer) break;
+            if (e.lineKind == LineKind::Field
+                && (e.nodeKind == NodeKind::FuncPtr64 || e.nodeKind == NodeKind::FuncPtr32)) {
+                entryLine = i;
+                break;
+            }
+        }
+        QVERIFY2(entryLine >= 0, "Should find a vf entry field line");
+        QVERIFY2(m_editor->beginInlineEdit(EditTarget::Name, entryLine),
+                 "vf entry name edit should still start");
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+
+        m_editor->applyDocument(m_result);
+    }
 };
 
 // Border alignment test removed — requires full MenuBarStyle which lives in main.cpp.
