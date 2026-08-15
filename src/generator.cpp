@@ -334,7 +334,18 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
             .arg(QString::number(size, 16).toUpper());
     };
 
+    // Pending unannotated run (gaps + hex nodes): bytes that carry no
+    // generated field are buffered and flushed as ONE pad array, so a hex
+    // field right after a gap merges into the preceding pad (`_pad_00[0xA8]`
+    // instead of `_pad_00[0xA4]` + `_pad_a4[0x4]`).
     int cursor = 0;
+    int padStart = -1;
+    auto flushPad = [&]() {
+        if (padStart < 0) return;
+        emitPadRun(padStart, cursor - padStart);
+        padStart = -1;
+    };
+
     int i = 0;
 
     while (i < children.size()) {
@@ -351,6 +362,11 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         if (child.isVftable() && isPointerKind(child.kind)) {
             int blockSz = child.byteSize();
             if (blockSz <= 0) blockSz = 8;
+            // The vptr block occupies real layout but is not emitted as a
+            // member — flush any pending pad first so the pad doesn't
+            // absorb the vptr's bytes (a Hex64 before a secondary vftable
+            // must stay its own `_pad_00[0x8]`, not stretch to 0x10).
+            flushPad();
             cursor = qMax(cursor, child.offset + blockSz);
             i++;
             continue;
@@ -361,19 +377,22 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         else
             childSize = child.byteSize();
 
-        // Gap/overlap handling (skip for unions)
+        // Gap/overlap handling (skip for unions). A gap is not emitted
+        // immediately — it merges with a following hex run (see below).
         if (!isUnion) {
-            if (child.offset > cursor)
-                emitPadRun(cursor, child.offset - cursor);
-            else if (child.offset < cursor)
+            if (child.offset > cursor) {
+                if (padStart < 0) padStart = cursor;
+                cursor = child.offset;
+            } else if (child.offset < cursor) {
+                flushPad();
                 ctx.output += ind + QStringLiteral("// WARNING: overlap at offset 0x%1 (previous field ends at 0x%2)\n")
                     .arg(QString::number(baseOffset + child.offset, 16).toUpper())
                     .arg(QString::number(baseOffset + cursor, 16).toUpper());
+            }
         }
 
-        // Collapse consecutive hex nodes into a single padding array
+        // Collapse consecutive hex nodes into the pending padding run
         if (isHexNode(child.kind)) {
-            int runStart = child.offset;
             int runEnd = child.offset + childSize;
             int j = i + 1;
             while (j < children.size()) {
@@ -384,11 +403,14 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
                 runEnd = next.offset + nextSize;
                 j++;
             }
-            emitPadRun(runStart, runEnd - runStart);
-            cursor = runEnd;
+            if (padStart < 0) padStart = child.offset;
+            cursor = qMax(cursor, runEnd);
             i = j;
             continue;
         }
+
+        // Real field: flush any pending padding first
+        flushPad();
 
         // Emit the field
         if (child.kind == NodeKind::Struct) {
@@ -508,9 +530,13 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
         i++;
     }
 
-    // Tail padding (skip for unions)
-    if (!isUnion && cursor < structSize)
-        emitPadRun(cursor, structSize - cursor);
+    // Tail padding (skip for unions): folds into the pending run so a hex
+    // field flush against the end of the struct merges with the tail gap.
+    if (!isUnion && cursor < structSize) {
+        if (padStart < 0) padStart = cursor;
+        cursor = structSize;
+    }
+    flushPad();
 
 }
 
@@ -773,7 +799,17 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
             + QStringLiteral("\n");
     };
 
+    // Pending unannotated run (gaps + hex nodes): buffered and flushed as
+    // ONE pad array, so a hex field right after a gap merges into the
+    // preceding pad instead of emitting two adjacent pads.
     int cursor = 0;
+    int padStart = -1;
+    auto flushPad = [&]() {
+        if (padStart < 0) return;
+        emitPadRun(padStart, cursor - padStart);
+        padStart = -1;
+    };
+
     int i = 0;
 
     while (i < children.size()) {
@@ -785,12 +821,14 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
             childSize = child.byteSize();
 
         if (!isUnion) {
-            if (child.offset > cursor)
-                emitPadRun(cursor, child.offset - cursor);
+            if (child.offset > cursor) {
+                if (padStart < 0) padStart = cursor;
+                cursor = child.offset;
+            }
         }
 
+        // Collapse consecutive hex nodes into the pending padding run
         if (isHexNode(child.kind)) {
-            int runStart = child.offset;
             int runEnd = child.offset + childSize;
             int j = i + 1;
             while (j < children.size()) {
@@ -801,11 +839,14 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
                 runEnd = next.offset + nextSize;
                 j++;
             }
-            emitPadRun(runStart, runEnd - runStart);
-            cursor = runEnd;
+            if (padStart < 0) padStart = child.offset;
+            cursor = qMax(cursor, runEnd);
             i = j;
             continue;
         }
+
+        // Real field: flush any pending padding first
+        flushPad();
 
         if (child.kind == NodeKind::Struct) {
             if (child.isBitfield()
@@ -890,8 +931,12 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
         i++;
     }
 
-    if (!isUnion && cursor < structSize)
-        emitPadRun(cursor, structSize - cursor);
+    // Tail padding (skip for unions): folds into the pending run.
+    if (!isUnion && cursor < structSize) {
+        if (padStart < 0) padStart = cursor;
+        cursor = structSize;
+    }
+    flushPad();
 
 }
 
@@ -1347,7 +1392,17 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
             + QStringLiteral("\n");
     };
 
+    // Pending unannotated run (gaps + hex nodes): buffered and flushed as
+    // ONE pad field, so a hex field right after a gap merges into the
+    // preceding pad instead of emitting two adjacent pads.
     int cursor = 0;
+    int padStart = -1;
+    auto flushPad = [&]() {
+        if (padStart < 0) return;
+        emitPadField(padStart, cursor - padStart);
+        padStart = -1;
+    };
+
     int i = 0;
 
     while (i < children.size()) {
@@ -1359,13 +1414,14 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
             childSize = child.byteSize();
 
         if (!isUnion) {
-            if (child.offset > cursor)
-                emitPadField(cursor, child.offset - cursor);
+            if (child.offset > cursor) {
+                if (padStart < 0) padStart = cursor;
+                cursor = child.offset;
+            }
         }
 
-        // Collapse hex nodes into padding
+        // Collapse consecutive hex nodes into the pending padding run
         if (isHexNode(child.kind)) {
-            int runStart = child.offset;
             int runEnd = child.offset + childSize;
             int j = i + 1;
             while (j < children.size()) {
@@ -1376,11 +1432,14 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
                 runEnd = next.offset + nextSize;
                 j++;
             }
-            emitPadField(runStart, runEnd - runStart);
-            cursor = runEnd;
+            if (padStart < 0) padStart = child.offset;
+            cursor = qMax(cursor, runEnd);
             i = j;
             continue;
         }
+
+        // Real field: flush any pending padding first
+        flushPad();
 
         int absOffset = baseOffset + child.offset;
         QString name = sanitizeIdent(child.name.isEmpty()
@@ -1501,9 +1560,12 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
         i++;
     }
 
-    // Tail padding
-    if (!isUnion && cursor < structSize)
-        emitPadField(cursor, structSize - cursor);
+    // Tail padding (skip for unions): folds into the pending run.
+    if (!isUnion && cursor < structSize) {
+        if (padStart < 0) padStart = cursor;
+        cursor = structSize;
+    }
+    flushPad();
 }
 
 static void emitPythonStruct(GenContext& ctx, uint64_t structId) {

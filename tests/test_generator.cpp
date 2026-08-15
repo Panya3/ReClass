@@ -285,7 +285,10 @@ private slots:
         QString result = rcx::renderCpp(tree, rootId, nullptr, true, true);
 
         QVERIFY(result.contains("struct Padded {"));
-        QVERIFY(result.contains("/* 01 */ uint8_t _pad_01[0xF]"));
+        // The gap after `flag` and the trailing Hex64 merge into one pad
+        // (0x01..0x18 = 0x17 bytes) instead of two adjacent pads.
+        QVERIFY(result.contains("/* 01 */ uint8_t _pad_01[0x17]"));
+        QVERIFY(!result.contains("_pad_10"));
         QVERIFY(!result.contains("public:"));
         QVERIFY(!result.contains("private:"));
     }
@@ -334,6 +337,136 @@ private slots:
         QVERIFY(result.contains("private:\n        /* 14 */ uint8_t _pad_14[0x8]"));
         // Enclosing struct untouched — no sections at its level
         QVERIFY(result.contains("struct Holder {\n    class {"));
+    }
+
+    // ── Gap + trailing hex field merges into a single pad ──
+    // A struct whose only content is a Hex32 at the end (bytes 0x00..0xA4
+    // unannotated) must emit ONE pad `_pad_00[0xA8]`, not a gap pad plus a
+    // separate `_pad_a4[0x4]` for the hex field.
+
+    void testGapAndHexTailMergeIntoSinglePad() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "name";
+        root.structTypeName = "name";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h;
+        h.kind = rcx::NodeKind::Hex32;
+        h.parentId = rootId;
+        h.offset = 0xA4;
+        tree.addNode(h);
+
+        // C++
+        QString cpp = rcx::renderCpp(tree, rootId, nullptr, true);
+        QVERIFY(cpp.contains("/* 00 */ uint8_t _pad_00[0xA8]"));
+        QVERIFY(!cpp.contains("_pad_a4"));
+        QVERIFY(cpp.contains("sizeof 0xA8"));
+
+        // Rust
+        QString rust = rcx::renderRust(tree, rootId, nullptr, true);
+        QVERIFY(rust.contains("/* 00 */ pub _pad_00: [u8; 0xA8],"));
+        QVERIFY(!rust.contains("_pad_a4"));
+
+        // Python
+        QString py = rcx::renderPython(tree, rootId);
+        QVERIFY(py.contains("(\"_pad_00\", ctypes.c_uint8 * 0xA8),"));
+        QVERIFY(!py.contains("_pad_a4"));
+    }
+
+    // ── Mid-struct gap + hex also merges (rule applies everywhere) ──
+    // Gap 0x00..0x04 + Hex32 at 0x04 + Int32 at 0x08: the gap and the hex
+    // field collapse into `_pad_00[0x8]` before the real field.
+
+    void testGapAndHexMidStructMerge() {
+        rcx::NodeTree tree;
+        rcx::Node root;
+        root.kind = rcx::NodeKind::Struct;
+        root.name = "Mid";
+        root.structTypeName = "Mid";
+        root.parentId = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h;
+        h.kind = rcx::NodeKind::Hex32;
+        h.parentId = rootId;
+        h.offset = 0x04;
+        tree.addNode(h);
+
+        rcx::Node f;
+        f.kind = rcx::NodeKind::Int32;
+        f.name = "m_x";
+        f.parentId = rootId;
+        f.offset = 0x08;
+        tree.addNode(f);
+
+        QString cpp = rcx::renderCpp(tree, rootId, nullptr, true);
+        QVERIFY(cpp.contains("/* 00 */ uint8_t _pad_00[0x8]"));
+        QVERIFY(!cpp.contains("_pad_04"));
+        QVERIFY(cpp.contains("/* 08 */ int32_t m_x;"));
+    }
+
+    // ── Hex run before a vftable block keeps its own pad ──
+    // A Hex64 at 0x00 before a secondary vftable block (0x08..0x10) must
+    // NOT absorb the vptr's bytes: the pad stays `_pad_00[0x8]`.
+
+    void testHexBeforeVftableStaysOwnPad() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.name = "V"; root.structTypeName = "V";
+        root.classKeyword = QStringLiteral("class");
+        root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h; h.kind = rcx::NodeKind::Hex64;
+        h.parentId = rootId; h.offset = 0;
+        tree.addNode(h);
+
+        rcx::Node blk; blk.kind = rcx::NodeKind::Pointer64;
+        blk.name = "__vptr"; blk.classKeyword = QStringLiteral("vftable");
+        blk.parentId = rootId; blk.offset = 8;
+        int bi = tree.addNode(blk);
+        uint64_t blkId = tree.nodes[bi].id;
+
+        rcx::Node fn0; fn0.kind = rcx::NodeKind::FuncPtr64;
+        fn0.name = "f"; fn0.parentId = blkId; fn0.offset = 0;
+        tree.addNode(fn0);
+
+        QString cpp = rcx::renderCpp(tree, rootId, nullptr, true);
+        QVERIFY(cpp.contains("/* 00 */ uint8_t _pad_00[0x8]"));
+        QVERIFY(!cpp.contains("_pad_00[0x10]"));
+        QVERIFY(cpp.contains("virtual void f() = 0;"));
+    }
+
+    // ── Gap + hex + gap before a field merges into one maximal pad ──
+    // Bytes 0x00..0x04 (gap), 0x04..0x0C (Hex64), 0x0C..0x10 (gap) are all
+    // unannotated, so they collapse into `_pad_00[0x10]` before the field.
+
+    void testGapHexGapFieldMergesMaximalRun() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.name = "T"; root.structTypeName = "T";
+        root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node h; h.kind = rcx::NodeKind::Hex64;
+        h.parentId = rootId; h.offset = 4;
+        tree.addNode(h);
+
+        rcx::Node f; f.kind = rcx::NodeKind::UInt8;
+        f.name = "b"; f.parentId = rootId; f.offset = 0x10;
+        tree.addNode(f);
+
+        QString cpp = rcx::renderCpp(tree, rootId, nullptr, true);
+        QVERIFY(cpp.contains("/* 00 */ uint8_t _pad_00[0x10]"));
+        QVERIFY(!cpp.contains("_pad_04"));
+        QVERIFY(cpp.contains("/* 10 */ uint8_t b;"));
     }
 
     // ── Offset-based pad names dedup on collision ──
