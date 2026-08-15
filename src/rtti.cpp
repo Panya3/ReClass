@@ -1,10 +1,13 @@
 #include "rtti.h"
 #include "providers/provider.h"
 #include "symbolstore.h"
+#include "llvm/Demangle/Demangle.h"
+#include <QSet>
 #include <QStringList>
 #include <QRegularExpression>
 #include <memory>
 #include <cstdlib>
+#include <string_view>
 
 // __cxa_demangle is provided by libstdc++ on GCC/Clang and by MinGW.
 // MSVC has no equivalent — we ship a fallback parser for the common forms.
@@ -38,23 +41,65 @@ OwningModule findOwningModule(const Provider& prov, uint64_t addr) {
 
 // ── Demangler ──
 
+namespace {
+
+// Normalize the output of llvm::microsoftDemangle for RTTI type-descriptor
+// names. Feeding ".?AVFoo@@" to the LLVM demangler yields the *typeinfo
+// name* form — LLVM parses it as a variable of the class type whose name is
+// "`RTTI Type Descriptor Name'" — i.e. "class Foo `RTTI Type Descriptor
+// Name'". Strip that synthetic suffix and the class/struct/enum/union
+// keywords (both the leading one and the ones embedded in template
+// arguments, e.g. "struct std::char_traits<char>"), leaving the bare
+// demangled name we display in chips and reports.
+QString normalizeMicrosoftDemangle(QString out) {
+    static const QString kRttiSuffix =
+        QStringLiteral("`RTTI Type Descriptor Name'");
+    const int s = out.indexOf(kRttiSuffix);
+    if (s >= 0) out = out.left(s);
+    // Keyword tokens always carry a trailing space in LLVM's output.
+    out.replace(QStringLiteral("class "), QString());
+    out.replace(QStringLiteral("struct "), QString());
+    out.replace(QStringLiteral("union "), QString());
+    out.replace(QStringLiteral("enum "), QString());
+    return out.trimmed();
+}
+
+} // anon namespace
+
 QString demangleRttiName(const QString& mangled) {
     if (mangled.isEmpty()) return {};
 
-    // The MSVC RTTI mangled-name format is well defined and small enough to
-    // parse in-house — far simpler than wrestling with dbghelp's
-    // UnDecorateSymbolName, which is designed for *full symbols* and emits
-    // garbage like "?? const Foo::&" when fed bare ".?AV" type strings.
-    // The Itanium-ABI demangler on Linux/macOS doesn't recognise this form
-    // either, so a portable in-house parser is the right call.
+    // 1. LLVM MicrosoftDemangle (vendored, llvmorg-20.1.0) — the reference
+    //    MSVC demangler. Its parse() routes leading-'.' strings to
+    //    demangleTypeinfoName, so ".?A<kind><name>@@" typeinfo names work
+    //    directly — including template instantiations ("?$...@...@@" with
+    //    @N@ back-references), anonymous namespaces, and nested scope
+    //    chains. Returns nullptr + status != 0 for anything it can't parse;
+    //    the in-house parser below is the fallback (it also covers the
+    //    no-dot "?A..." variant that LLVM's typeinfo path doesn't see).
+    if (mangled.startsWith(QStringLiteral(".?A"))
+        || mangled.startsWith(QStringLiteral("?A"))) {
+        const QByteArray utf8 = mangled.toUtf8();  // keep alive for string_view
+        int status = 0;
+        char* out = llvm::microsoftDemangle(
+            std::string_view(utf8.constData(), (size_t)utf8.size()),
+            nullptr, &status, llvm::MSDF_None);
+        if (out) {
+            const QString s = normalizeMicrosoftDemangle(QString::fromUtf8(out));
+            std::free(out);
+            if (!s.isEmpty()) return s;
+        }
+    }
+
+    // 2. In-house fallback for the simple forms:
     //
-    // Format:   .?AV<segments>@@   (V = class, U = struct, W = enum, X = void)
-    //   .?AVFoo@@           → Foo
-    //   .?AVBar@Foo@@       → Foo::Bar           (segments listed inner→outer)
-    //   .?AUMyStruct@N@@    → N::MyStruct
+    //    Format:   .?AV<segments>@@   (V = class, U = struct, W = enum, X = void)
+    //      .?AVFoo@@           → Foo
+    //      .?AVBar@Foo@@       → Foo::Bar           (segments listed inner→outer)
+    //      .?AUMyStruct@N@@    → N::MyStruct
     //
-    // Anything that doesn't fit the form is returned verbatim — callers (UI
-    // text, "Copy as Tree" reports) tolerate it and tests assert on it.
+    //    Anything that doesn't fit the form is returned verbatim — callers
+    //    (UI text, "Copy as Tree" reports) tolerate it and tests assert on it.
     if (!mangled.startsWith(QStringLiteral(".?A")) &&
         !mangled.startsWith(QStringLiteral("?A"))) {
         return mangled;
@@ -74,6 +119,28 @@ QString demangleRttiName(const QString& mangled) {
     // Segments are listed inner-most first; reverse for outer::inner display.
     std::reverse(parts.begin(), parts.end());
     return parts.join(QStringLiteral("::"));
+}
+
+QString formatRttiDisplayName(const RttiInfo& info) {
+    QString cls = info.demangledName.isEmpty() ? info.rawName : info.demangledName;
+    if (info.bases.isEmpty()) return cls;
+
+    QStringList names;
+    QSet<QString> seen;
+    for (const auto& b : info.bases) {
+        QString n = b.demangledName.isEmpty() ? b.rawName : b.demangledName;
+        if (n.isEmpty()) continue;
+        // The CHD lists the whole hierarchy including the class itself (and
+        // under repeated non-virtual inheritance the same base twice) — the
+        // chip should read as "what does Foo inherit from", so drop self
+        // and dedupe (first occurrence wins, MSVC array order preserved).
+        if (n == cls) continue;
+        if (seen.contains(n)) continue;
+        seen.insert(n);
+        names.append(n);
+    }
+    if (names.isEmpty()) return cls;
+    return cls + QStringLiteral(" : ") + names.join(QStringLiteral(", "));
 }
 
 // ── RTTI walker helpers ──

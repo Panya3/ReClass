@@ -67,11 +67,24 @@ RttiInfo walkRtti(const Provider& prov, uint64_t vtableAddr,
                   int pointerSize = 8, int maxVtableSlots = 64);
 
 // Demangle an MSVC RTTI mangled name (e.g. ".?AVFoo@Bar@@" → "Bar::Foo").
-// On Windows this calls UnDecorateSymbolName via dbghelp.
-// On other platforms we run a small built-in parser that handles the common
-// .?AV / .?AU / nested namespace forms — enough for testing and for the
-// occasional MSVC-built blob someone analyses on Linux.
+// Primary path is the vendored LLVM MicrosoftDemangle (third_party/
+// llvm-demangle, llvmorg-20.1.0) — the reference implementation, so
+// template instantiations ("std::basic_string<...>"), anonymous
+// namespaces, and nested scope back-references all demangle correctly on
+// every platform. Falls back to a small in-house parser for inputs LLVM
+// rejects (and for the no-dot "?A..." variant), which also keeps
+// non-mangled input passing through verbatim.
 QString demangleRttiName(const QString& mangled);
+
+// Build the single-line RTTI display name for a walked class:
+//   "Foo"                     — no bases
+//   "Foo : Bar, Baz"          — flat list of base classes
+// The MSVC class-hierarchy descriptor lists the whole hierarchy INCLUDING
+// the class itself and, under repeated (non-virtual) inheritance, the same
+// base more than once; this helper drops the self entry and dedupes by
+// demangled name (first occurrence wins), matching how the inline
+// {RTTI: …} chip should read. Never returns a trailing colon.
+QString formatRttiDisplayName(const RttiInfo& info);
 
 // Walk Itanium ABI RTTI from a vtable address. Used by GCC/Clang/MinGW
 // binaries (Linux, macOS, MinGW-built Windows binaries). Itanium layout:

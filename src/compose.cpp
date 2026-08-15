@@ -633,7 +633,11 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                         } else if (candidate != 0 && candidate != nullSentinel) {
                             const RttiInfo& info = rttiForVtable(state, prov, candidate);
                             if (info.ok && !info.demangledName.isEmpty()) {
-                                rttiName = info.demangledName;
+                                // Display the inheritance chain too:
+                                // "Foo : Bar, Baz" (self excluded, deduped).
+                                // The bare demangled name still flows to the
+                                // discovery hook / registry via rttiForVtable.
+                                rttiName = formatRttiDisplayName(info);
                                 rttiVtable = candidate;
                             }
                         }
@@ -1407,7 +1411,9 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                         if (state.showRtti) {
                             const RttiInfo& info = rttiForVtable(state, prov, candidate);
                             if (info.ok && !info.demangledName.isEmpty()) {
-                                rttiName = info.demangledName;
+                                // Same inheritance-chain display as composeLeaf:
+                                // "Foo : Bar, Baz" (self excluded, deduped).
+                                rttiName = formatRttiDisplayName(info);
                                 rttiVtable = candidate;
                             }
                         }
