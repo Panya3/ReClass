@@ -2009,6 +2009,104 @@ private slots:
         QString cpp = rcx::renderCpp(tree, tree.nodes[0].id, &aliases);
         QVERIFY(cpp.contains("LONG"));
     }
+
+    // ── Vftable block in non-C++ backends ──
+    // Rust/C#/Python have no native virtual declaration; the vptr stays a
+    // real pointer field and the entries surface as a trailing comment (they
+    // live outside the object, so emitting them as members would corrupt
+    // the layout).
+    void testVftableNonCppBackendsKeepEntriesAsComment() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.name = "Animal"; root.structTypeName = "Animal";
+        root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        rcx::Node blk; blk.kind = rcx::NodeKind::Pointer64;
+        blk.name = "__vptr"; blk.classKeyword = QStringLiteral("vftable");
+        blk.parentId = rootId; blk.offset = 0;
+        int bi = tree.addNode(blk);
+        uint64_t blkId = tree.nodes[bi].id;
+
+        rcx::Node fn0; fn0.kind = rcx::NodeKind::FuncPtr64;
+        fn0.name = "speak"; fn0.parentId = blkId; fn0.offset = 0;
+        tree.addNode(fn0);
+        rcx::Node fn1; fn1.kind = rcx::NodeKind::FuncPtr64;
+        fn1.name = "age"; fn1.parentId = blkId; fn1.offset = 8;
+        fn1.vfReturnType = QStringLiteral("int");
+        fn1.vfParams = QStringLiteral("bool fast");
+        tree.addNode(fn1);
+
+        // Rust: vptr is *mut c_void, entries appear as a comment.
+        QString rust = rcx::renderRust(tree, rootId);
+        QVERIFY2(rust.contains("__vptr: *mut core::ffi::c_void"), qPrintable(rust));
+        QVERIFY2(rust.contains("// virtual: void speak(), int age(bool fast)"), qPrintable(rust));
+
+        // C#: vptr is IntPtr, entries appear as a comment.
+        QString cs = rcx::renderCSharp(tree, rootId);
+        QVERIFY2(cs.contains("public IntPtr __vptr;"), qPrintable(cs));
+        QVERIFY2(cs.contains("// virtual: void speak(), int age(bool fast)"), qPrintable(cs));
+
+        // Python: vptr is c_void_p, entries appear as a comment (the backend
+        // uses // for its offset comments, same as the other C-like outputs).
+        QString py = rcx::renderPython(tree, rootId);
+        QVERIFY2(py.contains("\"__vptr\", ctypes.c_void_p)"), qPrintable(py));
+        QVERIFY2(py.contains("// virtual: void speak(), int age(bool fast)"), qPrintable(py));
+    }
+
+    // ── Vftable block → pure-virtual declarations ──
+    // The vftable block is a pointer (classKeyword="vftable", __vptr) whose
+    // FuncPtr children become `virtual <type> <name>(<params>) = 0;` at the
+    // top of the class body — NOT a member field. Members still start after
+    // the pointer (offset 0x8), matching a real C++ object.
+    void testVftableEmitsVirtualDeclarations() {
+        rcx::NodeTree tree;
+        rcx::Node root; root.kind = rcx::NodeKind::Struct;
+        root.name = "Animal"; root.structTypeName = "Animal";
+        root.classKeyword = QStringLiteral("class");
+        root.parentId = 0; root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Vftable block at offset 0
+        rcx::Node blk; blk.kind = rcx::NodeKind::Pointer64;
+        blk.name = "__vptr"; blk.classKeyword = QStringLiteral("vftable");
+        blk.parentId = rootId; blk.offset = 0;
+        int bi = tree.addNode(blk);
+        uint64_t blkId = tree.nodes[bi].id;
+
+        // Two vf entries
+        rcx::Node fn0; fn0.kind = rcx::NodeKind::FuncPtr64;
+        fn0.name = "speak"; fn0.parentId = blkId; fn0.offset = 0;
+        tree.addNode(fn0);
+        rcx::Node fn1; fn1.kind = rcx::NodeKind::FuncPtr64;
+        fn1.name = "age"; fn1.parentId = blkId; fn1.offset = 8;
+        fn1.vfReturnType = QStringLiteral("int");
+        fn1.vfParams = QStringLiteral("bool fast");
+        tree.addNode(fn1);
+
+        // Member after the vptr
+        rcx::Node m; m.kind = rcx::NodeKind::UInt32;
+        m.name = "id"; m.parentId = rootId; m.offset = 8;
+        tree.addNode(m);
+
+        QString cpp = rcx::renderCpp(tree, rootId, nullptr, true);
+
+        QVERIFY(cpp.contains("virtual void speak() = 0;"));
+        QVERIFY(cpp.contains("virtual int age(bool fast) = 0;"));
+        // Virtual declarations must NOT carry an offset comment: the vptr
+        // slot offset (0x0) is not the function's offset — vfns live in
+        // the vtable, outside the object layout. A `/* XX */` prefix would
+        // be wrong and duplicated on every entry.
+        QVERIFY2(!cpp.contains("/* 00 */ virtual"),
+                 qPrintable(cpp));
+        QVERIFY(cpp.contains("uint32_t id;"));
+        // The block itself is not a member field (no "void* __vptr;" / no
+        // struct member), and members follow at 0x8.
+        QVERIFY(!cpp.contains("__vptr;"));
+        QVERIFY(!cpp.contains("vftable"));
+    }
 };
 
 QTEST_MAIN(TestGenerator)

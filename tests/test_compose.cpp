@@ -3323,6 +3323,76 @@ private slots:
         ComposeResult r2 = compose(tree, prov);
         QVERIFY(lineFor(r2, ptrIdx).endsWith(QStringLiteral("-> 0x7")));
     }
+
+    // ── Vftable block (pointer with real FuncPtr children, no refId) ──
+    // The vftable block renders as a typed pointer at offset 0 whose
+    // entries are read from the pointer's TARGET address — i.e. the
+    // vtable lives where the vptr points, never in the object bytes.
+    void testVftableBlockRendersPointerExpansion() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+
+        Node root;
+        root.kind = NodeKind::Struct;
+        root.name = "Animal";
+        root.structTypeName = "Animal";
+        root.parentId = 0;
+        root.offset = 0;
+        int ri = tree.addNode(root);
+        uint64_t rootId = tree.nodes[ri].id;
+
+        // Vftable block at offset 0 — pointer with children, NO refId.
+        Node blk;
+        blk.kind = NodeKind::Pointer64;
+        blk.name = QStringLiteral("__vptr");
+        blk.classKeyword = QStringLiteral("vftable");
+        blk.parentId = rootId;
+        blk.offset = 0;
+        blk.collapsed = false;
+        int bi = tree.addNode(blk);
+        uint64_t blkId = tree.nodes[bi].id;
+
+        // vf entries — children of the block.
+        Node fn0; fn0.kind = NodeKind::FuncPtr64;
+        fn0.name = QStringLiteral("speak"); fn0.parentId = blkId; fn0.offset = 0;
+        tree.addNode(fn0);
+        Node fn1; fn1.kind = NodeKind::FuncPtr64;
+        fn1.name = QStringLiteral("age"); fn1.parentId = blkId; fn1.offset = 8;
+        tree.addNode(fn1);
+
+        // Member after the vptr.
+        Node m; m.kind = NodeKind::UInt32;
+        m.name = QStringLiteral("id"); m.parentId = rootId; m.offset = 8;
+        tree.addNode(m);
+
+        // Buffer: object at 0x0 with vptr = 0x100; vtable at 0x100 with
+        // two function pointers (0x1000, 0x2000); member id = 7.
+        QByteArray data(0x300, '\0');
+        uint64_t vptr = 0x100; memcpy(data.data() + 0, &vptr, 8);
+        uint64_t fnAddr0 = 0x1000; memcpy(data.data() + 0x100, &fnAddr0, 8);
+        uint64_t fnAddr1 = 0x2000; memcpy(data.data() + 0x108, &fnAddr1, 8);
+        uint32_t idv = 7; memcpy(data.data() + 8, &idv, 4);
+        BufferProvider prov(data);
+
+        ComposeResult r = compose(tree, prov);
+        QString all = r.text;
+
+        // Header shows the vftable type + pointer value (0x100). Column
+        // padding may add extra spaces between the type and the name.
+        QVERIFY2(all.contains(QStringLiteral("vftable*"))
+                 && all.contains(QStringLiteral("__vptr"))
+                 && all.contains(QStringLiteral("0x100")),
+                 qPrintable(all));
+        // Entries read function addresses FROM the vtable (0x100), not the
+        // object's own bytes.
+        QVERIFY2(all.contains(QStringLiteral("speak")), qPrintable(all));
+        QVERIFY2(all.contains(QStringLiteral("age")), qPrintable(all));
+        QVERIFY2(all.contains(QStringLiteral("0x1000")), qPrintable(all));
+        QVERIFY2(all.contains(QStringLiteral("0x2000")), qPrintable(all));
+        // Member id still reads from the object at +8.
+        QVERIFY2(all.contains(QStringLiteral("id")), qPrintable(all));
+        QVERIFY2(all.contains(QStringLiteral("7")), qPrintable(all));
+    }
 };
 
 QTEST_MAIN(TestCompose)

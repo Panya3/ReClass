@@ -1479,6 +1479,12 @@ void RcxController::connectEditor(RcxEditor* editor) {
         refresh();
     });
 
+    // Footer "+vf" pill on a vftable block — append a virtual function entry.
+    connect(editor, &RcxEditor::appendVfRequested,
+            this, [this](uint64_t blockId) {
+        appendVirtualFunction(blockId);
+    });
+
     // Footer "Trim" button — remove trailing hex nodes from end of struct
     connect(editor, &RcxEditor::trimHexRequested,
             this, [this](uint64_t structId) {
@@ -3855,6 +3861,12 @@ bool RcxController::applyCommand(const Command& command, bool isUndo) {
             int idx = tree.indexOfId(c.nodeId);
             if (idx >= 0)
                 tree.nodes[idx].draft = isUndo ? c.oldVal : c.newVal;
+        } else if constexpr (std::is_same_v<T, cmd::ChangeVfMeta>) {
+            int idx = tree.indexOfId(c.nodeId);
+            if (idx >= 0) {
+                tree.nodes[idx].vfReturnType = isUndo ? c.oldReturnType : c.newReturnType;
+                tree.nodes[idx].vfParams     = isUndo ? c.oldParams : c.newParams;
+            }
         }
     }, command);
 
@@ -4111,6 +4123,205 @@ uint64_t RcxController::attachRttiClassToPointer(uint64_t nodeId,
     m_suppressRefresh = false;
     refresh();
     return newId;
+}
+
+// ── Virtual-function (vftable) block ──
+// The block is a pointer-sized field at offset 0 of the class
+// (classKeyword="vftable", name "__vptr") whose children are the
+// FuncPtr entries. compose renders those children at the pointer's
+// target address (materialized-children path), so the vtable lives
+// where a real C++ vptr points — never inside the object bytes.
+
+bool RcxController::classHasVftable(uint64_t classId) const {
+    int ci = m_doc->tree.indexOfId(classId);
+    if (ci < 0) return false;
+    for (int childIdx : m_doc->tree.childrenOf(classId)) {
+        if (m_doc->tree.nodes[childIdx].isVftable())
+            return true;
+    }
+    return false;
+}
+
+// Append one FuncPtr entry to the block. Computes the next free slot
+// (max end of existing entries), names it fnN, and pushes cmd::Insert.
+uint64_t RcxController::appendVirtualFunction(uint64_t blockId) {
+    int bi = m_doc->tree.indexOfId(blockId);
+    if (bi < 0) return 0;
+    const Node& block = m_doc->tree.nodes[bi];
+    if (!block.isVftable()) return 0;
+
+    const bool is32 = (m_doc->tree.pointerSize < 8);
+    const NodeKind fnKind = is32 ? NodeKind::FuncPtr32 : NodeKind::FuncPtr64;
+    const int stride = is32 ? 4 : 8;
+
+    int nextSlot = 0;
+    QSet<QString> usedNames;
+    for (int ci : m_doc->tree.childrenOf(blockId)) {
+        const Node& sib = m_doc->tree.nodes[ci];
+        nextSlot = qMax(nextSlot, sib.offset + sib.byteSize());
+        if (!sib.name.isEmpty()) usedNames.insert(sib.name);
+    }
+
+    // Pick the first free fnN name (skip ones the user renamed to, so a
+    // later append never collides with an existing entry).
+    int n = 0;
+    while (usedNames.contains(QStringLiteral("fn%1").arg(n))) n++;
+
+    Node n2;
+    n2.kind     = fnKind;
+    n2.name     = QStringLiteral("fn%1").arg(n);
+    n2.parentId = blockId;
+    n2.offset   = nextSlot;
+    n2.id       = m_doc->tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{n2, {}}));
+    return blockId;
+}
+
+uint64_t RcxController::addVirtualFunction(uint64_t classId) {
+    int ci = m_doc->tree.indexOfId(classId);
+    if (ci < 0) return 0;
+    const Node& cls = m_doc->tree.nodes[ci];
+    if (cls.kind != NodeKind::Struct) {
+        emit statusHint(QStringLiteral("Add Virtual Function works on classes/structs only."));
+        return 0;
+    }
+    if (cls.isUnion()) {
+        emit statusHint(QStringLiteral("Unions can't have virtual functions."));
+        return 0;
+    }
+
+    // Already has a vftable block → just append another entry.
+    for (int childIdx : m_doc->tree.childrenOf(classId)) {
+        const Node& child = m_doc->tree.nodes[childIdx];
+        if (child.isVftable())
+            return appendVirtualFunction(child.id);
+    }
+
+    // First virtual function: build the block. All in one undo macro:
+    //  1. shift every sibling down by one pointer,
+    //  2. insert the vftable pointer at offset 0,
+    //  3. add the first FuncPtr entry.
+    const bool is32 = (m_doc->tree.pointerSize < 8);
+    const NodeKind ptrKind = is32 ? NodeKind::Pointer32 : NodeKind::Pointer64;
+    const NodeKind fnKind  = is32 ? NodeKind::FuncPtr32 : NodeKind::FuncPtr64;
+    const int stride = is32 ? 4 : 8;
+
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Add Virtual Function"));
+
+    QVector<cmd::OffsetAdj> adjs;
+    for (int childIdx : m_doc->tree.childrenOf(classId)) {
+        const Node& sib = m_doc->tree.nodes[childIdx];
+        if (sib.isVftable()) continue;
+        adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset + stride});
+    }
+
+    Node block;
+    block.kind         = ptrKind;
+    block.name         = QStringLiteral("__vptr");
+    block.classKeyword = QStringLiteral("vftable");
+    block.parentId     = classId;
+    block.offset       = 0;
+    block.collapsed    = false;
+    block.id           = m_doc->tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{block, adjs}));
+
+    Node fn;
+    fn.kind     = fnKind;
+    fn.name     = QStringLiteral("fn0");
+    fn.parentId = block.id;
+    fn.offset   = 0;
+    fn.id       = m_doc->tree.reserveId();
+    m_doc->undoStack.push(new RcxCommand(this, cmd::Insert{fn, {}}));
+
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+    refresh();
+    return block.id;
+}
+
+void RcxController::removeVftableBlock(uint64_t blockId) {
+    int bi = m_doc->tree.indexOfId(blockId);
+    if (bi < 0) return;
+    const Node& block = m_doc->tree.nodes[bi];
+    if (!block.isVftable()) return;
+    const uint64_t parentId = block.parentId;
+    if (parentId == 0) return;
+
+    const bool is32 = (m_doc->tree.pointerSize < 8);
+    const int stride = is32 ? 4 : 8;
+
+    // Collect the subtree (block + its FuncPtr children) for the Remove cmd.
+    QVector<Node> subtree;
+    subtree.append(block);
+    for (int ci : m_doc->tree.childrenOf(blockId))
+        subtree.append(m_doc->tree.nodes[ci]);
+
+    // Shift siblings at offset >= stride back up by one pointer.
+    QVector<cmd::OffsetAdj> adjs;
+    for (int ci : m_doc->tree.childrenOf(parentId)) {
+        const Node& sib = m_doc->tree.nodes[ci];
+        if (sib.id == blockId) continue;
+        if (sib.offset >= stride)
+            adjs.push_back(cmd::OffsetAdj{sib.id, sib.offset, sib.offset - stride});
+    }
+
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Remove Virtual Functions"));
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::Remove{blockId, subtree, adjs}));
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+    refresh();
+}
+
+void RcxController::editVfSignature(uint64_t nodeId) {
+    int ni = m_doc->tree.indexOfId(nodeId);
+    if (ni < 0) return;
+    const Node& node = m_doc->tree.nodes[ni];
+    if (!isFuncPtr(node.kind)) return;
+
+    QString retType = node.vfReturnType.isEmpty()
+        ? QStringLiteral("void") : node.vfReturnType;
+    QString params  = node.vfParams;
+
+    auto retOpt = ThemedInputDialog::getText(nullptr,
+        QStringLiteral("Virtual Function Signature"),
+        QStringLiteral("Return type (e.g. void, int, DWORD):"),
+        retType);
+    if (!retOpt || retOpt->trimmed().isEmpty()) return;
+
+    auto nameOpt = ThemedInputDialog::getText(nullptr,
+        QStringLiteral("Virtual Function Signature"),
+        QStringLiteral("Name:"),
+        node.name);
+    if (!nameOpt || nameOpt->trimmed().isEmpty()) return;
+
+    auto paramOpt = ThemedInputDialog::getText(nullptr,
+        QStringLiteral("Virtual Function Signature"),
+        QStringLiteral("Parameters (e.g. \"int a, void* b\", empty for none):"),
+        params);
+    if (!paramOpt) return;
+
+    const QString newRet = retOpt->trimmed();
+    const QString newName = nameOpt->trimmed();
+    const QString newParams = paramOpt->trimmed();
+
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Edit Virtual Function"));
+    if (node.name != newName) {
+        int idx = m_doc->tree.indexOfId(nodeId);
+        if (idx >= 0) renameNode(idx, newName);
+    }
+    if (node.vfReturnType != newRet || node.vfParams != newParams) {
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeVfMeta{nodeId,
+                node.vfReturnType, newRet,
+                node.vfParams, newParams}));
+    }
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = false;
+    refresh();
 }
 
 void RcxController::splitHexNode(uint64_t nodeId) {
@@ -5467,6 +5678,18 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             editor->beginInlineEdit(EditTarget::Type, line);
         });
 
+        // Virtual-function entry inside a vftable block: edit the signature
+        // (return type / name / params) via a dialog.
+        if (isFuncPtr(node.kind) && node.parentId != 0) {
+            int pIdx = m_doc->tree.indexOfId(node.parentId);
+            if (pIdx >= 0 && m_doc->tree.nodes[pIdx].isVftable()) {
+                menu.addAction(icon("edit.svg"), "Edit Virtual Function Signature...",
+                               [this, nodeId]() {
+                    editVfSignature(nodeId);
+                });
+            }
+        }
+
         // Comment is always available — see batch path for rationale.
         menu.addAction(icon("edit.svg"), "&Comment\t;", [editor, line]() {
             editor->beginInlineEdit(EditTarget::Comment, line);
@@ -5666,9 +5889,29 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             bool hasStructAction = false;
 
             if (node.kind == NodeKind::Struct || node.kind == NodeKind::Array) {
+                // Virtual functions — only on classes/structs (never unions).
+                if (node.kind == NodeKind::Struct && !node.isUnion()) {
+                    structMenu->addAction(icon("symbol-method.svg"),
+                                          "Add &Virtual Function", [this, nodeId]() {
+                        addVirtualFunction(nodeId);
+                    });
+                    structMenu->addSeparator();
+                }
                 structMenu->addAction(icon("diff-added.svg"), "Add &Child", [this, nodeId]() {
                     insertNode(nodeId, 0, NodeKind::Hex64, "newField");
                 });
+                // Whole-block ops on the vftable block itself.
+                if (node.isVftable()) {
+                    structMenu->addAction(icon("diff-added.svg"),
+                                          "Add Virtual &Function", [this, nodeId]() {
+                        appendVirtualFunction(nodeId);
+                    });
+                    structMenu->addAction(icon("trash.svg"),
+                                          "Remove &Virtual Functions", [this, nodeId]() {
+                        removeVftableBlock(nodeId);
+                    });
+                    structMenu->addSeparator();
+                }
                 if (node.collapsed) {
                     structMenu->addAction(icon("expand-all.svg"), "&Expand", [this, nodeId]() {
                         int ni = m_doc->tree.indexOfId(nodeId);

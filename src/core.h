@@ -275,6 +275,12 @@ struct Node {
     // pointer address itself always stays hex). Driven by the right-click
     // "Display as Hex" toggle; resets on reload because it is transient.
     bool     displayHex = false;
+    // Virtual-function signature on a FuncPtr32/64 entry inside a vftable
+    // block: return type (default "void") and parameter list (default empty
+    // — the generated declaration is `virtual <type> <name>(<params>) = 0;`).
+    // Additive keys, no format version bump.
+    QString  vfReturnType;
+    QString  vfParams;
 
     // Leaf-only byte size. Returns 0 for Struct (container, unless it's a
     // bitfield which has a fixed container size) and Array-of-Struct/Array
@@ -353,6 +359,10 @@ struct Node {
             o["bigEndian"] = true;
         if (draft)
             o["draft"] = true;
+        if (!vfReturnType.isEmpty())
+            o["vfReturnType"] = vfReturnType;
+        if (!vfParams.isEmpty())
+            o["vfParams"] = vfParams;
         return o;
     }
     static Node fromJson(const QJsonObject& o) {
@@ -393,6 +403,8 @@ struct Node {
         n.comment = o["comment"].toString();
         n.bigEndian = o["bigEndian"].toBool(false);
         n.draft     = o["draft"].toBool(false);
+        n.vfReturnType = o["vfReturnType"].toString();
+        n.vfParams     = o["vfParams"].toString();
         return n;
     }
 
@@ -403,6 +415,10 @@ struct Node {
     bool isUnion() const { return resolvedClassKeyword() == QStringLiteral("union"); }
     bool isBitfield() const { return classKeyword == QStringLiteral("bitfield"); }
     bool isEnum() const { return resolvedClassKeyword() == QStringLiteral("enum"); }
+    // True for the vftable block: a pointer field (offset 0 of a class)
+    // whose children are FuncPtr entries. The generator emits those
+    // children as `virtual ... = 0;` declarations instead of a member field.
+    bool isVftable() const { return classKeyword == QStringLiteral("vftable"); }
 };
 
 // Can this node's value column flip between decimal (default) and hex via
@@ -1405,6 +1421,10 @@ namespace cmd {
     struct ToggleBigEndian  { uint64_t nodeId; bool oldVal, newVal; };
     struct ChangeComment    { uint64_t nodeId; QString oldComment, newComment; };
     struct SetDraft         { uint64_t nodeId; bool oldVal, newVal; };
+    // Virtual-function signature edit on a vftable entry: return type + params.
+    struct ChangeVfMeta     { uint64_t nodeId;
+                              QString oldReturnType, newReturnType;
+                              QString oldParams, newParams; };
 }
 
 using Command = std::variant<
@@ -1414,7 +1434,8 @@ using Command = std::variant<
     cmd::ChangeClassKeyword, cmd::ChangeOffset, cmd::ChangeEnumMembers,
     cmd::ChangeParent,
     cmd::ToggleRelative,
-    cmd::ToggleBigEndian, cmd::ChangeComment, cmd::SetDraft
+    cmd::ToggleBigEndian, cmd::ChangeComment, cmd::SetDraft,
+    cmd::ChangeVfMeta
 >;
 
 // ── Column spans (for inline editing) ──

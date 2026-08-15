@@ -200,6 +200,9 @@ signals:
     // Single-field append from footer "+Field" pill. Adds one Hex64 field
     // (or one enum member, when the parent is an enum) at the end.
     void appendSingleFieldRequested(uint64_t structId);
+    // Footer "+vf" pill on a vftable block: append another virtual-function
+    // entry to the block.
+    void appendVfRequested(uint64_t blockId);
     void deleteSelectedRequested();
     // Shift+Delete — delete without shifting remaining siblings up
     // (the deleted span stays as a gap at the old offsets).
@@ -627,7 +630,7 @@ private:
     // pill can never look clickable somewhere it isn't (they used to carry
     // three separate copies of the same indexOf() chain).
     struct FooterPill {
-        enum class Action { None, AddField, AddBytes, AddEnumMembers, Trim, Top };
+        enum class Action { None, AddField, AddBytes, AddEnumMembers, AddVf, Trim, Top };
         Action   action = Action::None;
         int      start  = -1;   // hit region: first column that responds to a click
         int      len    = 0;

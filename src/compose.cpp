@@ -1288,10 +1288,18 @@ void composeNode(ComposeState& state, const NodeTree& tree,
     int typeW = state.effectiveTypeW(scopeId);
     int nameW = state.effectiveNameW(scopeId);
 
-    // Pointer deref expansion — single fold header merges pointer + struct header
+    // Pointer deref expansion — single fold header merges pointer + struct header.
+    // Entered for refId pointers AND for the vftable block (a pointer whose
+    // FuncPtr children render at the pointer's target address, no separate
+    // root struct). Gated tightly — a generic pointer that happens to have
+    // children but no refId keeps its old leaf rendering.
     if ((node.kind == NodeKind::Pointer32 || node.kind == NodeKind::Pointer64)
-        && node.refId != 0) {
-        QString ptrTargetName = resolvePointerTarget(tree, node.refId);
+        && (node.isVftable() || node.refId != 0)) {
+        QString ptrTargetName;
+        if (node.isVftable())
+            ptrTargetName = QStringLiteral("vftable");
+        else
+            ptrTargetName = resolvePointerTarget(tree, node.refId);
         QString stars = QString(node.ptrDepth + 1, QChar('*'));
         QString ptrTypeOverride = (ptrTargetName.isEmpty() ? QStringLiteral("void") : ptrTargetName) + stars;
         if (node.isRelative)
@@ -1565,12 +1573,21 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 lm.offsetText.clear();
                 lm.foldLevel = computeFoldLevel(depth, false);
                 lm.markerMask = 0;
-                QString footerText = fmt::indent(depth)
-                    + QStringLiteral("}  +1 +10h +100h +1000h Trim Top");
-                int refSz = tree.structSpan(node.refId, &state.childMap);
-                if (refSz > 0)
-                    footerText += QStringLiteral("  // 0x%1 (%2)")
-                        .arg(QString::number(refSz, 16).toUpper()).arg(refSz);
+                QString footerText;
+                if (node.isVftable()) {
+                    // Vftable block footer: grow the virtual-function list.
+                    // The block's own pointer holds no vtable bytes, so there
+                    // is no size comment — only the +vf pill.
+                    footerText = fmt::indent(depth)
+                        + QStringLiteral("}  +vf");
+                } else {
+                    footerText = fmt::indent(depth)
+                        + QStringLiteral("}  +1 +10h +100h +1000h Trim Top");
+                    int refSz = tree.structSpan(node.refId, &state.childMap);
+                    if (refSz > 0)
+                        footerText += QStringLiteral("  // 0x%1 (%2)")
+                            .arg(QString::number(refSz, 16).toUpper()).arg(refSz);
+                }
                 state.emitLine(footerText, std::move(lm));
             }
         }

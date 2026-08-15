@@ -241,11 +241,29 @@ static QString emitField(GenContext& ctx, const Node& node, int depth, int baseO
     default:
         return ind + oc + QStringLiteral("%1 %2;").arg(ctx.cType(node.kind), name);
     }
-}
+}    // ── Emit struct body (fields + padding) — Vergilius-style ──
 
-// ── Emit struct body (fields + padding) — Vergilius-style ──
+    // Build a trailing comment listing a vftable block's virtual-function
+    // entries, e.g. " // virtual: void speak(), int age(bool fast)". Used by
+    // the non-C++ backends (Rust/C#/Python), which have no native virtual
+    // declaration — the entries live outside the object, so emitting them as
+    // members would corrupt the layout; a comment preserves the information.
+    static QString vfEntriesComment(const NodeTree& tree, const Node& block) {
+        if (!(block.isVftable() && isPointerKind(block.kind))) return {};
+        QStringList sigs;
+        for (int ci : tree.childrenOf(block.id)) {
+            const Node& vf = tree.nodes[ci];
+            if (vf.draft) continue;
+            QString ret = vf.vfReturnType.isEmpty()
+                ? QStringLiteral("void") : vf.vfReturnType;
+            sigs << ret + QStringLiteral(" ") + vf.name
+                 + QStringLiteral("(") + vf.vfParams + QStringLiteral(")");
+        }
+        if (sigs.isEmpty()) return {};
+        return QStringLiteral(" // virtual: %1").arg(sigs.join(QStringLiteral(", ")));
+    }
 
-static void emitStructBody(GenContext& ctx, uint64_t structId,
+    static void emitStructBody(GenContext& ctx, uint64_t structId,
                            bool isUnion, int depth, int baseOffset,
                            bool classSections = false) {
     const NodeTree& tree = ctx.tree;
@@ -273,6 +291,35 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
         }
     };
 
+    // ── Virtual-function declarations ──
+    // A vftable block (classKeyword="vftable" pointer at offset 0) is not a
+    // member field: its FuncPtr children become pure-virtual declarations
+    // emitted at the TOP of the class body, before any members. The block's
+    // pointer size still counts toward the layout (members follow after it),
+    // which the field loop below handles by skipping the block node itself.
+    for (int ci : children) {
+        const Node& block = tree.nodes[ci];
+        // Guarded by kind: only a pointer-marked vftable block is special —
+        // a hand-authored struct that happens to carry classKeyword
+        // "vftable" stays a normal member.
+        if (!(block.isVftable() && isPointerKind(block.kind))) continue;
+        ensurePublic();
+        for (int vci : tree.childrenOf(block.id)) {
+            const Node& vf = tree.nodes[vci];
+            if (vf.draft) continue;
+            QString ret = vf.vfReturnType.isEmpty()
+                ? QStringLiteral("void") : vf.vfReturnType;
+            QString vfName = sanitizeIdent(vf.name);
+            // No offset comment on virtual declarations: the block.offset
+            // (the __vptr slot in the object) is NOT the function's offset —
+            // virtual functions live in the vtable, outside the object's
+            // layout, so a front `/* XX */` here would be wrong/duplicated
+            // on every entry.
+            ctx.output += ind + QStringLiteral("virtual %1 %2(%3) = 0;\n")
+                .arg(ret, vfName, vf.vfParams);
+        }
+    }
+
     // Helper: emit a padding/hex run as a single collapsed byte array
     auto emitPadRun = [&](int relOffset, int size) {
         if (size <= 0) return;
@@ -296,6 +343,18 @@ static void emitStructBody(GenContext& ctx, uint64_t structId,
         // Their bytes fall into the pad/gap runs below, so the generated
         // layout stays contiguous without the conflicting field.
         if (child.draft) { i++; continue; }
+        // Vftable block: its FuncPtr children were already emitted as
+        // virtual declarations above; the block itself is not a member
+        // field, but it does occupy pointer size at its offset (members
+        // follow after it in a real object). Kind-guarded: only pointer
+        // nodes can be vftable blocks.
+        if (child.isVftable() && isPointerKind(child.kind)) {
+            int blockSz = child.byteSize();
+            if (blockSz <= 0) blockSz = 8;
+            cursor = qMax(cursor, child.offset + blockSz);
+            i++;
+            continue;
+        }
         int childSize;
         if (child.kind == NodeKind::Struct || child.kind == NodeKind::Array)
             childSize = tree.structSpan(child.id, &ctx.childMap);
@@ -789,7 +848,12 @@ static void emitRustStructBody(GenContext& ctx, uint64_t structId,
                     + QStringLiteral("\n");
             }
         } else {
-            ctx.output += emitRustField(ctx, child, depth, baseOffset) + QStringLiteral("\n");
+            // Vftable block: the pointer field is real layout (the vptr), the
+            // virtual entries live outside the object — surface them as a
+            // comment rather than members (members would corrupt the layout).
+            QString vfNote = vfEntriesComment(tree, child);
+            ctx.output += emitRustField(ctx, child, depth, baseOffset)
+                + vfNote + QStringLiteral("\n");
         }
 
         int childEnd = child.offset + childSize;
@@ -1085,13 +1149,17 @@ static void emitCSharpStructBody(GenContext& ctx, uint64_t structId,
             case NodeKind::Pointer64: {
                 bool isNativePtr = (child.kind == NodeKind::Pointer32 && ctx.tree.pointerSize <= 4)
                                 || (child.kind == NodeKind::Pointer64 && ctx.tree.pointerSize >= 8);
+                // Vftable block: vptr is real layout, entries live outside
+                // the object — comment, never members.
+                QString vfNote = vfEntriesComment(tree, child);
                 if (isNativePtr)
                     ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public IntPtr %2;")
-                        .arg(QString::number(absOffset, 16).toUpper(), name) + QStringLiteral("\n");
+                        .arg(QString::number(absOffset, 16).toUpper(), name)
+                        + vfNote + QStringLiteral("\n");
                 else
                     ctx.output += ind + oc + QStringLiteral("[FieldOffset(0x%1)] public %2 %3;")
                         .arg(QString::number(absOffset, 16).toUpper(), csType(ctx, child.kind), name)
-                        + QStringLiteral("\n");
+                        + vfNote + QStringLiteral("\n");
                 break;
             }
             case NodeKind::FuncPtr32:
@@ -1346,21 +1414,22 @@ static void emitPythonStructBody(GenContext& ctx, uint64_t structId,
             case NodeKind::Pointer64: {
                 bool isNativePtr = (child.kind == NodeKind::Pointer32 && ctx.tree.pointerSize <= 4)
                                 || (child.kind == NodeKind::Pointer64 && ctx.tree.pointerSize >= 8);
+                QString vfNote = vfEntriesComment(tree, child);
                 if (child.refId != 0) {
                     int refIdx = tree.indexOfId(child.refId);
                     if (refIdx >= 0) {
                         QString target = ctx.nameFor(tree.nodes[refIdx]);
                         ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.POINTER(%2)),").arg(name, target)
-                            + QStringLiteral("\n");
+                            + vfNote + QStringLiteral("\n");
                         break;
                     }
                 }
                 if (isNativePtr)
                     ctx.output += ind + oc + QStringLiteral("(\"%1\", ctypes.c_void_p),").arg(name)
-                        + QStringLiteral("\n");
+                        + vfNote + QStringLiteral("\n");
                 else
                     ctx.output += ind + oc + QStringLiteral("(\"%1\", %2),").arg(name, pyTypeName(child.kind))
-                        + QStringLiteral("\n");
+                        + vfNote + QStringLiteral("\n");
                 break;
             }
             case NodeKind::FuncPtr32:

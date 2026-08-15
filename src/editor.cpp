@@ -2861,6 +2861,9 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
         if (pPlusOne >= 0)
             fillIndicatorCols(IND_CMD_PILL, i, pPlusOne + 1, pPlusOne + 3);
+        int pVf = ft.indexOf(QStringLiteral("+vf"));
+        if (pVf >= 0)
+            fillIndicatorCols(IND_CMD_PILL, i, pVf, pVf + 3);
         // Struct footer: +10h +100h +1000h Trim (search longest first)
         int p1000 = ft.indexOf(QStringLiteral("+1000h"));
         if (p1000 >= 0)
@@ -5344,6 +5347,9 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 case FooterPill::Action::AddField:
                     emit appendSingleFieldRequested(nid);
                     return true;
+                case FooterPill::Action::AddVf:
+                    emit appendVfRequested(nid);
+                    return true;
                 case FooterPill::Action::AddBytes:
                     emit appendBytesRequested(nid, pill.bytes);
                     return true;
@@ -7423,10 +7429,13 @@ RcxEditor::FooterPill RcxEditor::footerPillAt(int line, int col) const {
     const int p100     = ft.indexOf(QStringLiteral("+100h"));
     const int p10      = ft.indexOf(QStringLiteral("+10h"));
     const int p10enum  = ft.indexOf(QStringLiteral("+10"));
+    const int pVf      = ft.indexOf(QStringLiteral("+vf"));
     const int pTrim    = ft.indexOf(QStringLiteral("Trim"));
     const int pTop     = ft.indexOf(QStringLiteral("Top"));
 
-    if (within(pPlusOne, 4)) {
+    if (within(pVf, 3)) {
+        p.action = FooterPill::Action::AddVf;  p.start = pVf; p.len = 3;
+    } else if (within(pPlusOne, 4)) {
         p.action = FooterPill::Action::AddField;  p.start = pPlusOne; p.len = 4;
         // paint only the "+1" glyphs, not the surrounding padding
         p.textStart = pPlusOne + 1; p.textLen = 2;

@@ -3227,6 +3227,203 @@ private slots:
         QCOMPARE(doc.filePath, real + QStringLiteral(".autosave"));
     }
 
+    // ── Virtual-function (vftable) block ──
+    void testAddVirtualFunctionCreatesBlockAndShiftsFields() {
+        // Root struct with fields at 0/4/8... — first "Add Virtual
+        // Function" must create the __vptr block at offset 0 and shift
+        // every existing field down by one pointer (8 on x64).
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        QVERIFY(!m_ctrl->classHasVftable(rootId));
+
+        auto before = m_doc->tree.childrenOf(rootId);
+        QVERIFY(before.size() >= 3);
+        const int field0Before = m_doc->tree.nodes[before[0]].offset;
+
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        QVERIFY(blockId != 0);
+        QVERIFY(m_ctrl->classHasVftable(rootId));
+
+        int bi = m_doc->tree.indexOfId(blockId);
+        QVERIFY(bi >= 0);
+        const Node& block = m_doc->tree.nodes[bi];
+        QVERIFY(block.isVftable());
+        QCOMPARE(block.kind, NodeKind::Pointer64);
+        QCOMPARE(block.name, QStringLiteral("__vptr"));
+        QCOMPARE(block.offset, 0);
+
+        // Exactly one entry fn0 at slot 0.
+        auto kids = m_doc->tree.childrenOf(blockId);
+        QCOMPARE(kids.size(), 1);
+        QCOMPARE(m_doc->tree.nodes[kids[0]].kind, NodeKind::FuncPtr64);
+        QCOMPARE(m_doc->tree.nodes[kids[0]].name, QStringLiteral("fn0"));
+        QCOMPARE(m_doc->tree.nodes[kids[0]].offset, 0);
+
+        // Old fields shifted down by 8; the first one now starts at 8.
+        int field0After = -1;
+        for (int ci : m_doc->tree.childrenOf(rootId)) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (n.name == QStringLiteral("field_u32"))
+                field0After = n.offset;
+        }
+        QCOMPARE(field0After, field0Before + 8);
+    }
+
+    void testAddVirtualFunctionAppendsEntries() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        QVERIFY(blockId != 0);
+
+        m_ctrl->appendVirtualFunction(blockId);
+        m_ctrl->appendVirtualFunction(blockId);
+
+        auto kids = m_doc->tree.childrenOf(blockId);
+        QCOMPARE(kids.size(), 3);
+        QCOMPARE(m_doc->tree.nodes[kids[0]].offset, 0);
+        QCOMPARE(m_doc->tree.nodes[kids[1]].offset, 8);
+        QCOMPARE(m_doc->tree.nodes[kids[2]].offset, 16);
+        QCOMPARE(m_doc->tree.nodes[kids[2]].name, QStringLiteral("fn2"));
+    }
+
+    void testRemoveVftableBlockRestoresOffsets() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        int field0Before = -1;
+        for (int ci : m_doc->tree.childrenOf(rootId)) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (n.name == QStringLiteral("field_u32"))
+                field0Before = n.offset;
+        }
+
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        m_ctrl->appendVirtualFunction(blockId);
+        m_ctrl->removeVftableBlock(blockId);
+
+        QVERIFY(!m_ctrl->classHasVftable(rootId));
+        int field0After = -1;
+        for (int ci : m_doc->tree.childrenOf(rootId)) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (n.name == QStringLiteral("field_u32"))
+                field0After = n.offset;
+        }
+        QCOMPARE(field0After, field0Before);
+    }
+
+    void testAddVirtualFunctionRefusesUnion() {
+        Node root; root.kind = NodeKind::Struct;
+        root.name = QStringLiteral("u");
+        root.structTypeName = QStringLiteral("U");
+        root.classKeyword = QStringLiteral("union");
+        root.parentId = 0; root.offset = 0;
+        m_doc->tree.addNode(root);
+        uint64_t uid = m_doc->tree.nodes.last().id;
+
+        uint64_t blockId = m_ctrl->addVirtualFunction(uid);
+        QCOMPARE(blockId, (uint64_t)0);
+        QVERIFY(!m_ctrl->classHasVftable(uid));
+    }
+
+    void testAddVirtualFunctionUndoRestoresOffsets() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        int field0Before = -1;
+        for (int ci : m_doc->tree.childrenOf(rootId)) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (n.name == QStringLiteral("field_u32"))
+                field0Before = n.offset;
+        }
+
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        QVERIFY(blockId != 0);
+        QVERIFY(m_ctrl->classHasVftable(rootId));
+
+        m_doc->undoStack.undo();
+        QVERIFY(!m_ctrl->classHasVftable(rootId));
+        int field0After = -1;
+        for (int ci : m_doc->tree.childrenOf(rootId)) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (n.name == QStringLiteral("field_u32"))
+                field0After = n.offset;
+        }
+        QCOMPARE(field0After, field0Before);
+    }
+
+    void testAddVirtualFunction32Bit() {
+        m_doc->tree.pointerSize = 4;
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        QVERIFY(blockId != 0);
+
+        int bi = m_doc->tree.indexOfId(blockId);
+        QVERIFY(bi >= 0);
+        QCOMPARE(m_doc->tree.nodes[bi].kind, NodeKind::Pointer32);
+
+        auto kids = m_doc->tree.childrenOf(blockId);
+        QCOMPARE(kids.size(), 1);
+        QCOMPARE(m_doc->tree.nodes[kids[0]].kind, NodeKind::FuncPtr32);
+
+        // Fields shifted down by 4, not 8.
+        int field0After = -1;
+        for (int ci : m_doc->tree.childrenOf(rootId)) {
+            const Node& n = m_doc->tree.nodes[ci];
+            if (n.name == QStringLiteral("field_u32"))
+                field0After = n.offset;
+        }
+        QCOMPARE(field0After, 4);
+
+        m_ctrl->appendVirtualFunction(blockId);
+        kids = m_doc->tree.childrenOf(blockId);
+        QCOMPARE(kids.size(), 2);
+        QCOMPARE(m_doc->tree.nodes[kids[1]].offset, 4);
+    }
+
+    void testAppendVirtualFunctionSkipsRenamedSlot() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        auto kids = m_doc->tree.childrenOf(blockId);
+        QCOMPARE(kids.size(), 1);
+
+        // Rename fn0 -> speak, then append twice. The first append should
+        // reuse fn1 (free), the second must NOT collide with a renamed entry.
+        int fi = m_doc->tree.indexOfId(m_doc->tree.nodes[kids[0]].id);
+        m_ctrl->renameNode(fi, QStringLiteral("speak"));
+        m_ctrl->appendVirtualFunction(blockId);
+        m_ctrl->appendVirtualFunction(blockId);
+
+        auto after = m_doc->tree.childrenOf(blockId);
+        QCOMPARE(after.size(), 3);
+        QStringList names;
+        for (int ci : after)
+            names << m_doc->tree.nodes[ci].name;
+        QVERIFY(names.contains(QStringLiteral("speak")));
+        QVERIFY(names.contains(QStringLiteral("fn1")));
+        QVERIFY(names.contains(QStringLiteral("fn0")));
+    }
+
+    void testVfSignatureRoundTrip() {
+        uint64_t rootId = m_doc->tree.nodes[0].id;
+        uint64_t blockId = m_ctrl->addVirtualFunction(rootId);
+        auto kids = m_doc->tree.childrenOf(blockId);
+        uint64_t fnId = m_doc->tree.nodes[kids[0]].id;
+
+        // Direct tree mutation is how editVfSignature commits its dialog
+        // (dialog itself is interactive); verify the storage + JSON round-trip.
+        int fi = m_doc->tree.indexOfId(fnId);
+        m_doc->tree.nodes[fi].vfReturnType = QStringLiteral("int");
+        m_doc->tree.nodes[fi].vfParams = QStringLiteral("DWORD dw");
+
+        RcxDocument copy;
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        const QString path = f.fileName();
+        f.close();
+        QVERIFY(m_doc->save(path));
+        QVERIFY(copy.load(path));
+
+        int ci = copy.tree.indexOfId(fnId);
+        QVERIFY(ci >= 0);
+        QCOMPARE(copy.tree.nodes[ci].vfReturnType, QStringLiteral("int"));
+        QCOMPARE(copy.tree.nodes[ci].vfParams, QStringLiteral("DWORD dw"));
+    }
+
     // save() keeps its original contract: write the file AND make the
     // document reflect that save (filePath retargeted, undo stack clean).
     void testSaveStillRetargetsDocument() {

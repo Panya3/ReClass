@@ -227,6 +227,22 @@ public:
     // even when the type names match. Pointer kind + refId are set in
     // one undo macro. Returns the resulting struct id.
     uint64_t attachRttiClassToPointer(uint64_t nodeId, const QString& baseName);
+    // ── Virtual-function (vftable) block ──
+    // Add a virtual function to the class at `classId`. First call creates
+    // the vftable block (a pointer field at offset 0, classKeyword="vftable")
+    // and shifts the class's existing fields down by one pointer; subsequent
+    // calls append a new FuncPtr entry to the existing block. Returns the
+    // block id (0 on refusal, e.g. unions). All one undo step.
+    uint64_t addVirtualFunction(uint64_t classId);
+    // Append another virtual-function entry to an existing vftable block.
+    uint64_t appendVirtualFunction(uint64_t blockId);
+    // Remove the whole vftable block from its class and shift the class's
+    // fields back up by one pointer (inverse of the block creation).
+    void removeVftableBlock(uint64_t blockId);
+    // Edit the signature (return type / name / parameters) of a vf entry.
+    void editVfSignature(uint64_t nodeId);
+    // True when a vftable block already exists among the class's children.
+    bool classHasVftable(uint64_t classId) const;
     void splitHexNode(uint64_t nodeId);
     void toggleBitfieldBit(uint64_t nodeId, int memberIdx);
     void editBitfieldValue(uint64_t nodeId, int memberIdx);
