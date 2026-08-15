@@ -5442,6 +5442,8 @@ void MainWindow::about() {
         "(Microsoft PDB parser fork)</li>"
         "<li><a href='https://github.com/aengelke/fadec' style='color:%2;'>"
         "fadec</a> — BSD 2-Clause (x86 decoder)</li>"
+        "<li><a href='https://llvm.org/' style='color:%2;'>LLVM</a> "
+        "— Apache-2.0 WITH LLVM-exception (MicrosoftDemangle, vendored)</li>"
         "<li><a href='https://github.com/JetBrains/JetBrainsMono' "
         "style='color:%2;'>JetBrains Mono</a> — SIL Open Font License 1.1</li>"
         "<li><a href='https://github.com/IBM/plex' style='color:%2;'>"
