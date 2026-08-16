@@ -25,7 +25,7 @@ namespace rcx {
 // keys, so old builds still read new files (and new builds default the
 // missing keys on old files). load() warns when a file claims a newer
 // version and proceeds best-effort.
-constexpr int kRcxFileVersion = 1;
+constexpr int kRcxFileVersion = 2;
 
 // ── Node kind enum ──
 

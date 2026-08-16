@@ -52,6 +52,11 @@
 #include <QListWidget>
 #include <QPushButton>
 #include "workspace_model.h"
+#include "session.h"
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QVBoxLayout>
@@ -6243,6 +6248,7 @@ void MainWindow::setActiveDocDock(QDockWidget* dock) {
     m_activeDocDock = dock;
     updateWindowTitle();      // chains updateScannerTitle() + updateSourceChip()
     refreshBookmarksDock();
+    scheduleSessionSave();    // active-tab changes persist too
 }
 
 void MainWindow::updateScannerTitle() {
@@ -7496,12 +7502,57 @@ QDockWidget* MainWindow::project_open(const QString& path, bool interactive) {
     }
     QApplication::processEvents();
 
+    // The opened file may already have tabs open. Capture their layout
+    // (view root + title, in m_docDocks order) from the LIVE state BEFORE
+    // the workspace is replaced — the in-memory tabs are the freshest source
+    // of truth, fresher than the session file which lags behind its 1s
+    // debounce (and may have been clobbered by an earlier failed open).
+    // Interactive opens only — automation expects a single clean tab.
+    QVector<QPair<uint64_t, QString>> liveLayout;
+    int liveActiveIdx = -1;
+    if (interactive) {
+        const QString norm = QFileInfo(filePath).absoluteFilePath();
+        int n = 0;
+        for (QDockWidget* d : m_docDocks) {
+            auto tit = m_tabs.constFind(d);
+            if (tit == m_tabs.constEnd()) continue;
+            if (tit->doc->filePath.isEmpty()) continue;
+            if (QFileInfo(tit->doc->filePath).absoluteFilePath() != norm) continue;
+            if (d == m_activeDocDock)
+                liveActiveIdx = n;
+            liveLayout.append({tit->ctrl->viewRootId(), d->windowTitle()});
+            ++n;
+        }
+    }
+
     // Close all existing tabs so the project replaces the current state
     QDockWidget* dock;
     { ClosingGuard guard(m_closingAll);
       closeAllDocDocks();
       m_allDocs.clear();
-      dock = createTab(doc);
+      // Bring the tab layout back. The .rcx's OWN saved tabs (format v2+)
+      // are authoritative — opening a project applies the layout it was
+      // saved with, replacing whatever is currently open (even when the
+      // same file is already open in this session). The live capture only
+      // steps in for files with no saved tabs (legacy v1 or never
+      // re-saved), where the user's current in-memory tabs beat collapsing
+      // to a single view. Session file last, then a single tab.
+      QDockWidget* savedDock = nullptr;
+      if (interactive && doc->hasSavedTabs()) {
+          QVector<QPair<uint64_t, QString>> savedLayout;
+          for (uint64_t vr : doc->savedViewRoots())
+              savedLayout.append({vr, rootName(doc->tree, vr)});
+          savedDock = createTabsFromLayout(doc, savedLayout,
+                                           doc->savedActiveTab());
+      }
+      dock = savedDock;
+      if (!dock && !liveLayout.isEmpty())
+          dock = createTabsFromLayout(doc, liveLayout, liveActiveIdx);
+      if (!dock)
+          dock = interactive ? restoreTabsForOpenedDoc(doc, doc->filePath)
+                             : nullptr;
+      if (!dock)
+          dock = createTab(doc);
     }
     rebuildWorkspaceModel();
     addRecentFile(filePath);
@@ -7788,6 +7839,25 @@ bool MainWindow::project_save(QDockWidget* dock, bool saveAs) {
         doc = m_allDocs.last();
     }
     if (!doc) return false;
+
+    // Snapshot this document's open-tab layout into the .rcx (format v2+):
+    // the file itself then carries which tabs were open, so a fresh open
+    // restores the same views. Order = m_docDocks (tab-bar) order, matching
+    // how collectSession records the session tabs.
+    {
+        QVector<uint64_t> vrs;
+        int active = -1;
+        int n = 0;
+        for (QDockWidget* d : m_docDocks) {
+            auto tit = m_tabs.constFind(d);
+            if (tit == m_tabs.constEnd() || tit->doc != doc) continue;
+            vrs.append(tit->ctrl->viewRootId());
+            if (d == m_activeDocDock)
+                active = n;
+            ++n;
+        }
+        doc->setTabStateForSave(vrs, active);
+    }
 
     QString savedPath;
     if (saveAs || doc->filePath.isEmpty()) {
@@ -9015,6 +9085,7 @@ void MainWindow::createWorkspaceDock() {
             int pi = tree.indexOfId(parentId);
             if (pi >= 0) tree.nodes[pi].collapsed = false;
             tab.ctrl->setViewRootId(parentId);
+            scheduleSessionSave();  // view-root switch inside a tab persists
             tab.ctrl->scrollToNodeId(structId);
             QPointer<QDockWidget> dockRef = ownerDock;
             QTimer::singleShot(0, this, [this, dockRef]() {
@@ -9088,6 +9159,7 @@ void MainWindow::createWorkspaceDock() {
             int pi = tree.indexOfId(parentId);
             if (pi >= 0) tree.nodes[pi].collapsed = false;
             tab.ctrl->setViewRootId(parentId);
+            scheduleSessionSave();  // view-root switch inside a tab persists
             tab.ctrl->scrollToNodeId(structId);
             QPointer<QDockWidget> dockRef = ownerDock;
             QTimer::singleShot(0, this, [this, dockRef]() {
@@ -9997,6 +10069,10 @@ void MainWindow::rebuildWorkspaceModel() {
                 this, &MainWindow::rebuildWorkspaceModelNow);
     }
     m_workspaceRebuildTimer->start();
+    // Tab open/close/rename/pin/project operations all funnel through here;
+    // keep the session file in step (the byte-guard in saveSessionNow makes
+    // the frequent documentChanged-driven calls no-ops).
+    scheduleSessionSave();
 }
 
 void MainWindow::rebuildWorkspaceModelNow() {
@@ -10129,6 +10205,360 @@ void MainWindow::rebuildWorkspaceModelNow() {
     // Restore scroll position after rebuild
     if (m_workspaceTree && m_workspaceTree->verticalScrollBar())
         m_workspaceTree->verticalScrollBar()->setValue(savedScroll);
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Session (open-tabs) persistence
+//
+// The open-tab set is per-user UI state, so it lives in a session file in
+// the app-data dir — NOT inside the .rcx project format (which keeps its
+// own kRcxFileVersion). The session file carries its own
+// kSessionFileVersion for forward compatibility.
+// ════════════════════════════════════════════════════════════════════
+
+static QString sessionFilePath() {
+    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation)
+         + QStringLiteral("/session.json");
+}
+
+void MainWindow::scheduleSessionSave() {
+    if (!m_sessionSaveTimer) {
+        m_sessionSaveTimer = new QTimer(this);
+        m_sessionSaveTimer->setSingleShot(true);
+        m_sessionSaveTimer->setInterval(1000);
+        connect(m_sessionSaveTimer, &QTimer::timeout,
+                this, &MainWindow::saveSessionNow);
+    }
+    m_sessionSaveTimer->start();
+}
+
+rcx::Session MainWindow::collectSession() const {
+    rcx::Session s;
+    QHash<RcxDocument*, int> docIndex;
+    for (RcxDocument* doc : m_allDocs) {
+        if (!doc) continue;
+        rcx::SessionDoc sd;
+        sd.filePath = doc->filePath;
+        sd.title    = rootName(doc->tree);
+        if (sd.filePath.isEmpty()) {
+            // Untitled docs have no on-disk bytes — embed a content
+            // snapshot so the restore can rebuild them. Saved docs restore
+            // by path; in-flight edits are recovered from the autosave
+            // shadow during restore when it's fresher (see
+            // restoreSessionIfAny / rcx::shadowIsFresher).
+            QJsonObject content = doc->tree.toJson();
+            if (!doc->typeAliases.isEmpty()) {
+                QJsonObject al;
+                for (auto it = doc->typeAliases.begin();
+                     it != doc->typeAliases.end(); ++it)
+                    al[rcx::kindToString(it.key())] = it.value();
+                content[QStringLiteral("typeAliases")] = al;
+            }
+            sd.contentJson = QJsonDocument(content).toJson(QJsonDocument::Compact);
+            sd.hasContent  = true;
+        }
+        docIndex.insert(doc, s.docs.size());
+        s.docs.append(sd);
+    }
+    // Iterate m_docDocks (creation order), NOT the m_tabs hash order — the
+    // session's tab array doubles as the tab-bar order on restore, and the
+    // hash's bucket order is arbitrary. m_docDocks is the same canonical
+    // order the layout presets use when tabifying docks, so a restore that
+    // recreates tabs in this order lands the tab bar back where it was
+    // (tabs opened 0 → 2 → 3 come back 0 → 2 → 3).
+    for (QDockWidget* dock : m_docDocks) {
+        auto tit = m_tabs.constFind(dock);
+        if (tit == m_tabs.constEnd()) continue;
+        auto hit = docIndex.find(tit->doc);
+        if (hit == docIndex.end()) continue;
+        rcx::SessionTab st;
+        st.docIndex   = hit.value();
+        st.viewRootId = tit->ctrl->viewRootId();
+        st.title      = dock->windowTitle();
+        s.tabs.append(st);
+        if (m_activeDocDock == dock)
+            s.activeTab = s.tabs.size() - 1;
+    }
+    return s;
+}
+
+void MainWindow::saveSessionNow() {
+    rcx::Session s = collectSession();
+    if (s.tabs.isEmpty()) {
+        // Nothing open — drop any stale session file so a later restart
+        // doesn't restore a half-forgotten layout.
+        QFile::remove(sessionFilePath());
+        m_lastSessionBytes.clear();
+        return;
+    }
+    const QByteArray bytes = QJsonDocument(rcx::sessionToJson(s))
+                                 .toJson(QJsonDocument::Compact);
+    // Skip the write when the session state is byte-identical — e.g. edits
+    // inside a saved doc (path/tab set unchanged) shouldn't churn the disk
+    // on every debounced save.
+    if (bytes == m_lastSessionBytes)
+        return;
+    m_lastSessionBytes = bytes;
+    // writableLocation() does NOT create the directory (and nothing else
+    // does at startup — the only other AppLocalDataLocation user, the
+    // symbol downloader, mkpaths on demand). Without this the open below
+    // fails silently on a fresh machine and the session never persists.
+    const QString path = sessionFilePath();
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return;
+    f.write(bytes);
+}
+
+bool MainWindow::restoreSessionIfAny() {
+    const QString path = sessionFilePath();
+    QFile f(path);
+    if (!f.exists() || !f.open(QIODevice::ReadOnly))
+        return false;
+    QJsonParseError jerr;
+    QJsonDocument jdoc = QJsonDocument::fromJson(f.readAll(), &jerr);
+    if (jdoc.isNull() || !jdoc.isObject())
+        return false;
+    rcx::Session s;
+    if (!rcx::sessionFromJson(jdoc.object(), s) || s.tabs.isEmpty())
+        return false;
+
+    // Load every referenced document FIRST, while the ctor's preload tab is
+    // still intact. If nothing restorable comes back we bail out untouched
+    // and the normal start-page flow (with its preload) proceeds — no point
+    // destroying the preload for a session that can't be rebuilt.
+    QVector<RcxDocument*> docsByIndex;
+    docsByIndex.reserve(s.docs.size());
+    QStringList restoredFromShadow;   // original paths recovered via .autosave
+    for (const auto& d : s.docs) {
+        auto* doc = new RcxDocument(this);
+        bool ok = false;
+        if (d.hasContent) {
+            QJsonParseError e;
+            QJsonDocument cd = QJsonDocument::fromJson(d.contentJson, &e);
+            if (!cd.isNull() && cd.isObject()) {
+                const QJsonObject root = cd.object();
+                doc->tree = rcx::NodeTree::fromJson(root);
+                if (root.contains(QStringLiteral("typeAliases"))
+                    && root[QStringLiteral("typeAliases")].isObject()) {
+                    const QJsonObject al =
+                        root[QStringLiteral("typeAliases")].toObject();
+                    for (auto it = al.begin(); it != al.end(); ++it) {
+                        NodeKind k = rcx::kindFromString(it.key());
+                        const QString v = it.value().toString();
+                        if (!v.isEmpty()) doc->typeAliases[k] = v;
+                    }
+                }
+                ok = true;
+            }
+        } else if (!d.filePath.isEmpty()) {
+            // Mirror the interactive-open recovery: when a fresher
+            // .autosave shadow sits next to the real file, load IT so
+            // in-flight edits aren't silently dropped by the restore.
+            QString loadPath = d.filePath;
+            const bool fromShadow = rcx::shadowIsFresher(d.filePath);
+            if (fromShadow)
+                loadPath += QStringLiteral(".autosave");
+            ok = doc->load(loadPath);
+            if (ok && fromShadow) {
+                // Same fixup as project_open: Save must target the real
+                // file, and the recovered content was an in-flight edit,
+                // not a committed state.
+                doc->filePath = d.filePath;
+                doc->modified = true;
+                restoredFromShadow.append(d.filePath);
+            }
+        }
+        if (!ok) {
+            delete doc;
+            docsByIndex.append(nullptr);
+            continue;
+        }
+        docsByIndex.append(doc);
+    }
+
+    bool anyDoc = false;
+    for (auto* d : docsByIndex)
+        if (d) { anyDoc = true; break; }
+    if (!anyDoc)
+        return false;   // session unrecoverable — keep the preload
+
+    // The ctor preloads a scratch class; the session is authoritative, so
+    // drop it before rebuilding the workspace from the session.
+    { ClosingGuard guard(m_closingAll); closeAllDocDocks(); m_allDocs.clear(); }
+
+    // Register every restored doc (createTab's rebuildAllDocs dedups for
+    // the tabbed ones) so tab-less docs still surface in the workspace
+    // sidebar, matching how a live session keeps closed-tab docs around.
+    for (auto* d : docsByIndex)
+        if (d) m_allDocs.append(d);
+
+    // Per-doc .rcx tab layout (format v2+ files are authoritative for
+    // their own tabs — a stale/clobbered session.json can no longer
+    // collapse a project to a single tab). Docs without one (untitled docs
+    // and legacy v0/v1 files) keep their session tabs.
+    struct DocTabs { QVector<QPair<uint64_t, QString>> tabs; int active = -1; };
+    QVector<DocTabs> docTabs(docsByIndex.size());
+    for (int di = 0; di < docsByIndex.size(); ++di) {
+        auto* doc = docsByIndex[di];
+        if (doc && doc->hasSavedTabs()) {
+            for (uint64_t vr : doc->savedViewRoots())
+                docTabs[di].tabs.append({vr, rootName(doc->tree, vr)});
+            docTabs[di].active = doc->savedActiveTab();
+        }
+    }
+
+    // Walk the session's tab array (== the live tab-bar order) so the
+    // restored bar keeps the SAME cross-doc ordering it was saved with.
+    // A doc with .rcx tabs emits them all at the position of its first
+    // session tab, and its session entries are SKIPPED ENTIRELY (they are
+    // the same views — emitting them too would double the tabs, e.g.
+    // 3 saved tabs coming back as 6). A per-doc dedup also guards against
+    // any duplicated entries in a hand-edited .rcx/session file.
+    QVector<QDockWidget*> tabDocks;   // one per restored tab, bar order
+    int globalActive = -1;
+    QVector<bool> emittedOverride(docsByIndex.size(), false);
+    QVector<QSet<uint64_t>> seen(docsByIndex.size());
+    for (int ti = 0; ti < s.tabs.size(); ++ti) {
+        const auto& t = s.tabs[ti];
+        if (t.docIndex < 0 || t.docIndex >= docsByIndex.size()) continue;
+        auto* doc = docsByIndex[t.docIndex];
+        if (!doc) continue;
+        const auto& dt = docTabs[t.docIndex];
+        if (!dt.tabs.isEmpty()) {
+            // .rcx layout replaces the doc's session tabs. Emit once, at
+            // the position of its first session tab; skip every session
+            // entry of this doc afterwards.
+            if (!emittedOverride[t.docIndex]) {
+                emittedOverride[t.docIndex] = true;
+                for (int i = 0; i < dt.tabs.size(); ++i) {
+                    // 0 is the valid "show all roots" view and is kept;
+                    // only a stale nonzero id falls back to the doc's
+                    // first root struct.
+                    const uint64_t vr = rcx::resolveRestoredViewRoot(
+                        doc->tree, dt.tabs[i].first);
+                    if (seen[t.docIndex].contains(vr)) continue;
+                    seen[t.docIndex].insert(vr);
+                    // A doc with several tabs gets several createTab calls
+                    // on the same document — matching how the live app
+                    // opens extra views.
+                    auto* dock = createTab(doc);
+                    if (!dock) continue;
+                    // createTab registered the dock in m_tabs — the
+                    // controller (and its view root) lives there, not on
+                    // the QDockWidget itself.
+                    m_tabs[dock].ctrl->setViewRootId(vr);
+                    m_tabs[dock].ctrl->refresh();
+                    if (!dt.tabs[i].second.isEmpty())
+                        dock->setWindowTitle(dt.tabs[i].second);
+                    if (i == dt.active)
+                        globalActive = tabDocks.size();
+                    tabDocks.append(dock);
+                }
+            }
+            continue;
+        }
+        // Session tab for a doc without .rcx tabs.
+        const uint64_t vr =
+            rcx::resolveRestoredViewRoot(doc->tree, t.viewRootId);
+        if (seen[t.docIndex].contains(vr)) continue;
+        seen[t.docIndex].insert(vr);
+        auto* dock = createTab(doc);
+        if (!dock) continue;
+        m_tabs[dock].ctrl->setViewRootId(vr);
+        m_tabs[dock].ctrl->refresh();
+        if (!t.title.isEmpty())
+            dock->setWindowTitle(t.title);
+        if (s.activeTab == ti)
+            globalActive = tabDocks.size();
+        tabDocks.append(dock);
+    }
+    if (tabDocks.isEmpty())
+        return false;   // nothing actually restored
+
+    if (globalActive >= 0 && globalActive < tabDocks.size()) {
+        tabDocks[globalActive]->raise();
+        tabDocks[globalActive]->show();
+        setActiveDocDock(tabDocks[globalActive]);
+    }
+    if (!restoredFromShadow.isEmpty()) {
+        setAppStatus(QStringLiteral("Session restored \u2014 %1 recovered from autosave")
+                         .arg(restoredFromShadow.join(QStringLiteral(", "))));
+    }
+    rebuildWorkspaceModel();
+    m_lastSessionBytes =
+        QJsonDocument(rcx::sessionToJson(s)).toJson(QJsonDocument::Compact);
+    return true;
+}
+
+QDockWidget* MainWindow::restoreTabsForOpenedDoc(RcxDocument* doc,
+                                                 const QString& filePath) {
+    // The session's tab layout is a per-file memory: when the user opens a
+    // project they previously had tabs in, bring those tabs back instead of
+    // collapsing to a single view. Matched by filePath, so opening an
+    // unrelated file is untouched. Fallback path only — when the file is
+    // already open the caller captures the LIVE layout instead (the session
+    // file lags behind its 1s debounce and can be stale).
+    QFile f(sessionFilePath());
+    if (!f.exists() || !f.open(QIODevice::ReadOnly))
+        return nullptr;
+    QJsonParseError jerr;
+    QJsonDocument jdoc = QJsonDocument::fromJson(f.readAll(), &jerr);
+    if (jdoc.isNull() || !jdoc.isObject())
+        return nullptr;
+    rcx::Session s;
+    if (!rcx::sessionFromJson(jdoc.object(), s) || s.tabs.isEmpty())
+        return nullptr;
+    const int docIndex = rcx::sessionDocIndexForPath(s, filePath);
+    if (docIndex < 0)
+        return nullptr;
+
+    QVector<QPair<uint64_t, QString>> layout;
+    int activeIdx = -1;
+    for (int ti = 0; ti < s.tabs.size(); ++ti) {
+        const auto& t = s.tabs[ti];
+        if (t.docIndex != docIndex) continue;
+        if (s.activeTab == ti)
+            activeIdx = layout.size();
+        layout.append({t.viewRootId, t.title});
+    }
+    return createTabsFromLayout(doc, layout, activeIdx);
+}
+
+QDockWidget* MainWindow::createTabsFromLayout(
+    RcxDocument* doc, const QVector<QPair<uint64_t, QString>>& layout,
+    int activeIdx) {
+    // One dock per entry, in order — each new dock tabifies after the
+    // previous one, so the tab bar lands back in the recorded order. 0 is
+    // the valid "show all roots" view; only stale nonzero ids fall back.
+    // Dedup by resolved view root: the live app never opens the same view
+    // twice in one doc (sidebar raises the existing tab), so duplicates in
+    // a hand-edited .rcx/session file are skipped rather than doubled.
+    QVector<QDockWidget*> docks;
+    QSet<uint64_t> seen;
+    for (int i = 0; i < layout.size(); ++i) {
+        const uint64_t vr = rcx::resolveRestoredViewRoot(doc->tree, layout[i].first);
+        if (seen.contains(vr)) continue;
+        seen.insert(vr);
+        auto* d = createTab(doc);
+        if (!d) continue;
+        m_tabs[d].ctrl->setViewRootId(vr);
+        m_tabs[d].ctrl->refresh();
+        if (!layout[i].second.isEmpty())
+            d->setWindowTitle(layout[i].second);
+        if (i == activeIdx)
+            activeIdx = docks.size();
+        docks.append(d);
+    }
+    if (docks.isEmpty())
+        return nullptr;
+    if (activeIdx >= 0 && activeIdx < docks.size()) {
+        docks[activeIdx]->raise();
+        docks[activeIdx]->show();
+        setActiveDocDock(docks[activeIdx]);
+    }
+    return docks.first();
 }
 
 int MainWindow::computeWorkspaceDockWidth() const {
@@ -10595,6 +11025,7 @@ void MainWindow::closeEvent(QCloseEvent* event) {
         }
     }
     // Discard → fall through and accept
+    saveSessionNow();   // capture the final tab layout before quitting
     event->accept();
 }
 
@@ -11232,8 +11663,11 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Show VS2022-style start page instead of jumping straight to demo
-    QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);
+    // Restore the previous session's open tabs, if any; otherwise show the
+    // VS2022-style start page. Session restore lands the user back where
+    // they left off (the start page stays reachable via the Home button).
+    if (!window.restoreSessionIfAny())
+        QMetaObject::invokeMethod(&window, "showStartPage", Qt::QueuedConnection);
 
     return app.exec();
 }

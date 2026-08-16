@@ -199,6 +199,19 @@ bool RcxDocument::saveCopy(const QString& path) {
         json["typeAliases"] = aliasObj;
     }
 
+    // Save the open-tab layout (format v2+): the MainWindow snapshots it
+    // into setTabStateForSave() right before save(). On load the window
+    // recreates these tabs, so opening a project brings back the exact
+    // view layout it was saved with. Ids are stored as strings (uint64
+    // precision — same convention as node ids).
+    if (m_hasSavedTabs) {
+        QJsonArray tabsArr;
+        for (uint64_t vr : m_savedViewRoots)
+            tabsArr.append(QString::number(vr));
+        json["tabs"]      = tabsArr;
+        json["activeTab"] = m_savedActiveTab;
+    }
+
     QJsonDocument jdoc(json);
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly))
@@ -302,6 +315,25 @@ bool RcxDocument::load(const QString& path) {
                 qWarning().noquote() << "  └ ... (+"
                     << (overlaps.size() - 5) << "more)";
         }
+    }
+
+    // Load the saved tab layout (format v2+; absent on legacy v0/v1 files
+    // → no saved tabs, the window falls back to its single default tab).
+    // Only honored for files at or below the current version — a newer
+    // file's tabs could reference ids/keys this build doesn't understand.
+    m_savedViewRoots.clear();
+    m_savedActiveTab = -1;
+    m_hasSavedTabs   = false;
+    if (fileVersion >= 2 && fileVersion <= rcx::kRcxFileVersion
+        && root.contains(QStringLiteral("tabs")) && root["tabs"].isArray()) {
+        const QJsonArray tabsArr = root["tabs"].toArray();
+        for (const auto& v : tabsArr) {
+            const QString idStr = v.toString();
+            if (!idStr.isEmpty())
+                m_savedViewRoots.append(idStr.toULongLong());
+        }
+        m_savedActiveTab = root["activeTab"].toInt(-1);
+        m_hasSavedTabs   = true;
     }
 
     // Load type aliases

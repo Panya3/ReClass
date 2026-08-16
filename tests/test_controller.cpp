@@ -221,6 +221,77 @@ private slots:
         delete future;
     }
 
+    // ── Tab layout persisted in the .rcx (format v2+) ──
+    // The main window snapshots its open-tab layout into the doc right
+    // before save(); load() must bring it back so a fresh open recreates
+    // the same tabs. viewRootId 0 (the "show all roots" view) must survive
+    // the round-trip too, and a legacy file (no "tabs" key) must load with
+    // no saved tabs.
+    void testRcxTabStateRoundTrip() {
+        auto* doc = new RcxDocument();
+        for (const QString& name : {QStringLiteral("ClassA"),
+                                    QStringLiteral("ClassB"),
+                                    QStringLiteral("ClassC")}) {
+            Node root; root.kind = NodeKind::Struct; root.name = name;
+            root.structTypeName = name; root.parentId = 0; root.offset = 0;
+            doc->tree.addNode(root);
+        }
+        const uint64_t idA = doc->tree.nodes[0].id;
+        const uint64_t idC = doc->tree.nodes[2].id;
+
+        // Tabs open at save time: show-all + ClassA + ClassC, ClassA active.
+        doc->setTabStateForSave({0, idA, idC}, 1);
+
+        QTemporaryFile f;
+        QVERIFY(f.open());
+        const QString path = f.fileName();
+        f.close();
+        QVERIFY(doc->save(path));
+
+        // The raw JSON carries the layout + the bumped format version.
+        {
+            QFile rf(path);
+            QVERIFY(rf.open(QIODevice::ReadOnly));
+            const QJsonObject saved =
+                QJsonDocument::fromJson(rf.readAll()).object();
+            QCOMPARE(saved["fileVersion"].toInt(-1), rcx::kRcxFileVersion);
+            QVERIFY(saved["tabs"].isArray());
+            QCOMPARE(saved["tabs"].toArray().size(), 3);
+            QCOMPARE(saved["tabs"].toArray()[0].toString(), QStringLiteral("0"));
+            QCOMPARE(saved["tabs"].toArray()[1].toString(),
+                     QString::number(idA));
+            QCOMPARE(saved["activeTab"].toInt(-1), 1);
+        }
+
+        // load() restores the layout.
+        auto* doc2 = new RcxDocument();
+        QVERIFY(doc2->load(path));
+        QVERIFY2(doc2->hasSavedTabs(),
+                 "saved tabs must survive the file round-trip");
+        QCOMPARE(doc2->savedViewRoots().size(), 3);
+        QCOMPARE(doc2->savedViewRoots()[0], uint64_t(0));
+        QCOMPARE(doc2->savedViewRoots()[1], idA);
+        QCOMPARE(doc2->savedViewRoots()[2], idC);
+        QCOMPARE(doc2->savedActiveTab(), 1);
+
+        // A legacy file (no "tabs" key) loads with no saved tabs.
+        {
+            QFile wf(path);
+            QVERIFY(wf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            QJsonObject o;
+            o["baseAddress"] = QStringLiteral("400000");
+            o["nodes"] = QJsonArray();
+            wf.write(QJsonDocument(o).toJson());
+        }
+        auto* legacy = new RcxDocument();
+        QVERIFY(legacy->load(path));
+        QVERIFY(!legacy->hasSavedTabs());
+
+        delete doc;
+        delete doc2;
+        delete legacy;
+    }
+
     // ── Draft lifecycle (automatic system) ──
     // A draft only persists while its offset actually conflicts; the
     // auto-clear sweep in applyCommand wipes it the moment the conflict

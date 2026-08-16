@@ -78,6 +78,29 @@ public:
     // by the main window post-load.
     int                        m_loadFileVersionTooNew = 0;
 
+    // Tab layout persisted in the .rcx (format v2+): the view-root ids of
+    // every tab that was open for this document at save time, plus which
+    // of them was active. The MainWindow snapshots this from its live tab
+    // bar before save(); on load the window recreates the tabs from it so
+    // opening a project brings back the exact view layout it was saved
+    // with. m_hasSavedTabs is false for legacy files (no "tabs" key).
+    QVector<uint64_t>          m_savedViewRoots;
+    int                        m_savedActiveTab = -1;
+    bool                       m_hasSavedTabs   = false;
+
+    // Called by the main window right before save(): records the document's
+    // current open-tab layout so saveCopy() can persist it. Empty list is
+    // legal (doc saved with no tabs open → opens with the single default
+    // tab). Has no effect on in-memory editing state.
+    void setTabStateForSave(const QVector<uint64_t>& viewRoots, int activeTab) {
+        m_savedViewRoots = viewRoots;
+        m_savedActiveTab = activeTab;
+        m_hasSavedTabs   = true;
+    }
+    bool hasSavedTabs() const { return m_hasSavedTabs; }
+    const QVector<uint64_t>& savedViewRoots() const { return m_savedViewRoots; }
+    int  savedActiveTab() const { return m_savedActiveTab; }
+
     QString resolveTypeName(NodeKind kind) const {
         auto it = typeAliases.find(kind);
         if (it != typeAliases.end() && !it.value().isEmpty())

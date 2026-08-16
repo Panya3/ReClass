@@ -7,6 +7,7 @@
 #include "startpage.h"
 #include "generator.h"
 #include "workspace_model.h"
+#include "session.h"
 #include "names/name_provider.h"
 namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; }
 #include <QMainWindow>
@@ -345,6 +346,20 @@ private:
     // active controller's source + the given liveness status.
     void updateSourceChip();
     void closeAllDocDocks();
+    // Recreate the tab layout the session remembered for a freshly loaded
+    // project file (matched by filePath): one dock per recorded tab with its
+    // view root + title, active tab raised. Returns the primary dock, or
+    // nullptr when the session has no layout for this file — the caller then
+    // falls back to a single tab.
+    QDockWidget* restoreTabsForOpenedDoc(RcxDocument* doc, const QString& filePath);
+    // Create one dock per (viewRootId, title) entry in `layout` on `doc`, in
+    // order — the tab bar lands back in the recorded order (each new dock
+    // tabifies after the previous one). Raises the entry at `activeIdx` when
+    // valid. Returns the primary dock (first created), or nullptr when
+    // nothing was created.
+    QDockWidget* createTabsFromLayout(RcxDocument* doc,
+                                      const QVector<QPair<uint64_t, QString>>& layout,
+                                      int activeIdx);
     // Returns an existing tab showing doc, or opens a fresh one. Row
     // identifiers in the workspace sidebar now carry RcxDocument*; closed
     // docs stay alive in m_allDocs, so activation must be able to re-open.
@@ -402,12 +417,22 @@ private:
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
     void rebuildWorkspaceModelNow();    // immediate rebuild
     int  computeWorkspaceDockWidth() const;  // fit to longest type name
+
+    // ── Session (open-tabs) persistence ──
+    void scheduleSessionSave();         // debounced; coalesces rapid tab ops
+    void saveSessionNow();              // write the session file (byte-guarded)
+    rcx::Session collectSession() const;
+
     QTimer*               m_workspaceRebuildTimer = nullptr;
     QTimer*               m_workspaceSearchTimer  = nullptr;
     // Generation hash of (tab dock list, root struct names per doc). When
     // unchanged across a documentChanged signal we skip the (O(N) over all
     // docs) rebuild. Computed in rebuildWorkspaceModelNow.
     quint64               m_workspaceGen          = 0;
+    // Session save timer + last-written bytes (skip the write when the
+    // session state didn't change, e.g. while editing a saved doc).
+    QTimer*               m_sessionSaveTimer = nullptr;
+    QByteArray            m_lastSessionBytes;
     void updateBorderColor(const QColor& color);
 
     // Dock overlay drag system
@@ -491,6 +516,12 @@ private:
     void dismissStartPage();
 
 public:
+    // Reopen the tabs that were open when the app last closed (debounced
+    // session save), so a restart lands where the user left off. Called from
+    // main(); returns true when a session was restored (caller skips the
+    // start page).
+    bool restoreSessionIfAny();
+
     // Open the modal Go to Address dialog. Public so MCP / tests can drive it.
     // Wires AddressParser callbacks against the active controller's provider
     // (module resolution, pointer reads, kernel paging when available).
