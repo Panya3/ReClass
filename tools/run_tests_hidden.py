@@ -31,12 +31,25 @@ import ctypes.wintypes as wt
 import os
 import re
 import sys
-import tempfile
 import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BUILD = ROOT / "build"
+
+
+def find_build_dir() -> Path:
+    """Locate the configured CMake build tree (has CTestTestfile.cmake).
+
+    The repo builds into build/ by default but build-debug/ locally, and the
+    exes live wherever cmake was configured — never assume a fixed name.
+    """
+    for candidate in (ROOT / "build", ROOT / "build-debug"):
+        if (candidate / "CTestTestfile.cmake").is_file():
+            return candidate
+    return ROOT / "build"  # historical default; callers report NOT BUILT if wrong
+
+
+BUILD = find_build_dir()
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -112,8 +125,21 @@ def main() -> int:
     args, passthrough = ap.parse_known_args()
     passthrough = [a for a in passthrough if a != "--"]
 
-    tmp = Path(tempfile.gettempdir()) / f"rcxtests_{uuid.uuid4().hex}"
+    # Keep run logs inside the build tree (like the tests' own temp dirs) so
+    # a test run doesn't scatter rcxtests_* folders into %TEMP% (under
+    # %appdata%).
+    tmp = BUILD / f"rcxtests_{uuid.uuid4().hex}"
     tmp.mkdir(parents=True, exist_ok=True)
+
+    # Mirror the CMake ENVIRONMENT property for the direct-exe path below:
+    # run_hidden() spawns with the inherited environment, so tests run via
+    # `run_tests_hidden.py test_editor` (no ctest) would otherwise still send
+    # QTemporaryDir / QDir::tempPath() scratch into %LOCALAPPDATA%\Temp.
+    test_tmp = BUILD / "test-tmp"
+    test_tmp.mkdir(parents=True, exist_ok=True)
+    os.environ["TMP"] = str(test_tmp)
+    os.environ["TEMP"] = str(test_tmp)
+
     worst = 0
 
     for run in range(1, args.repeat + 1):

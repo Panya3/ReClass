@@ -39,6 +39,9 @@ private:
     bool      m_weSpawnedNotepad = false;
     bool      m_hasSession = false;  // true if a debug server is reachable
     QString   m_connString;
+#ifdef _WIN32
+    HANDLE m_notepadJob = nullptr;   // reaps a spawned debuggee if the suite crashes
+#endif
 
     static uint32_t findProcess(const wchar_t* name)
     {
@@ -68,6 +71,10 @@ private:
 #ifdef _WIN32
         STARTUPINFOW si{};
         si.cb = sizeof(si);
+        // The debuggee is only a memory-read target for cdb — don't flash a
+        // notepad window on the user's desktop while the suite runs.
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
         PROCESS_INFORMATION pi{};
         if (CreateProcessW(L"C:\\Windows\\notepad.exe", nullptr, nullptr, nullptr,
                            FALSE, 0, nullptr, nullptr, &si, &pi)) {
@@ -87,6 +94,44 @@ private:
 #ifdef _WIN32
         HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
         if (h) { TerminateProcess(h, 0); CloseHandle(h); }
+#else
+        Q_UNUSED(pid);
+#endif
+    }
+
+    /// Arm a Job Object with KILL_ON_JOB_CLOSE around a debuggee we spawned.
+    /// cleanupTestCase() is the normal reaper, but a crash (e.g. the known
+    /// dbgeng fault on a failed DebugConnect) skips it — the job makes the OS
+    /// kill the notepad when this test process dies, so a suite crash can't
+    /// leave a stray notepad.exe behind.
+    void armNotepadJob(uint32_t pid)
+    {
+#ifdef _WIN32
+        if (!pid) return;
+        m_notepadJob = CreateJobObjectW(nullptr, nullptr);
+        if (!m_notepadJob) return;
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (!SetInformationJobObject(m_notepadJob, JobObjectExtendedLimitInformation,
+                                     &info, sizeof(info))) {
+            CloseHandle(m_notepadJob);
+            m_notepadJob = nullptr;
+            return;
+        }
+        HANDLE h = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid);
+        if (h) {
+            if (!AssignProcessToJobObject(m_notepadJob, h)) {
+                // E.g. this test process is itself inside a job that forbids
+                // nesting (IDE/CI runners). The job protection is off — say so
+                // instead of silently relying on cleanupTestCase alone.
+                qWarning() << "AssignProcessToJobObject failed (err"
+                           << GetLastError() << ") — spawned debuggee won't"
+                           << "be auto-reaped on a suite crash";
+                CloseHandle(m_notepadJob);
+                m_notepadJob = nullptr;
+            }
+            CloseHandle(h);
+        }
 #else
         Q_UNUSED(pid);
 #endif
@@ -154,6 +199,7 @@ private slots:
         if (m_notepadPid == 0) {
             m_notepadPid = launchNotepad();
             m_weSpawnedNotepad = true;
+            armNotepadJob(m_notepadPid);
         }
         if (m_notepadPid == 0) {
             qDebug() << "No notepad.exe and could not launch — user-mode tests will skip";
@@ -195,6 +241,14 @@ private slots:
 
         if (m_weSpawnedNotepad && m_notepadPid)
             terminateProcess(m_notepadPid);
+#ifdef _WIN32
+        // Closing the job (KILL_ON_JOB_CLOSE) reaps anything still alive —
+        // the belt-and-suspenders half of the spawned-debuggee cleanup.
+        if (m_notepadJob) {
+            CloseHandle(m_notepadJob);
+            m_notepadJob = nullptr;
+        }
+#endif
     }
 
     // ── Plugin metadata ──

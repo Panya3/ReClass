@@ -1140,6 +1140,41 @@ if(BUILD_TESTING)
         endif()
 
     endif() # BUILD_UI_TESTS
+
+    # ── Keep test scratch files inside the build tree ──
+    # QTemporaryDir / QTemporaryFile / QDir::tempPath() resolve to the OS
+    # temp dir (%LOCALAPPDATA%\Temp on Windows) regardless of the test's
+    # working directory, so a test run scattered qt_temp.* dirs and
+    # rcx_test_*.bin files across %appdata%. Point every registered test's
+    # TMP/TEMP at a build-tree dir so `rm -rf build` sweeps the leftovers.
+    # NOTE: this must stay AFTER every add_test() call in this file — the
+    # TESTS directory property only lists tests registered so far, and no
+    # plugin subdirectory registers any (grep plugins/ for add_test to confirm
+    # before assuming a new subdir is covered).
+    set(_rcx_test_tmp "${CMAKE_BINARY_DIR}/test-tmp")
+    file(MAKE_DIRECTORY "${_rcx_test_tmp}")
+    get_property(_rcx_all_tests DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY TESTS)
+    foreach(_rcx_t IN LISTS _rcx_all_tests)
+        set_tests_properties(${_rcx_t} PROPERTIES
+            ENVIRONMENT "TMP=${_rcx_test_tmp};TEMP=${_rcx_test_tmp}")
+        # QTest names the app after the test exe, so ThemeManager's
+        # AppDataLocation would mkpath %APPDATA%\<testname> on Windows.
+        # Enable QStandardPaths test mode for every registered test.
+        # Note Qt's Windows impl does NOT move AppDataLocation under temp
+        # (it appends /qttest to the same %APPDATA% path), but
+        # ThemeManager::userDir() branches on isTestModeEnabled() to route
+        # user themes to the build tree, and QSettings honors the flag too.
+        # A linked TU is used instead of a forced-include (/FI) header:
+        # ninja does not recompile sources when compile flags change, so an
+        # existing build tree would silently keep stale test binaries;
+        # adding a source forces every test exe to relink instead.
+        if(TARGET ${_rcx_t})
+            target_sources(${_rcx_t} PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/cmake/qtest_testmode_init.cpp)
+        endif()
+    endforeach()
+    unset(_rcx_all_tests)
+    unset(_rcx_t)
 endif()
 add_subdirectory(plugins/ProcessMemory)
 if(NOT APPLE)

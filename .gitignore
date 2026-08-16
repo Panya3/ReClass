@@ -1,4 +1,5 @@
 build/
+build-debug/
 *.exe
 *.dll
 *.obj
@@ -20,6 +21,7 @@ plugins/RcNetPluginCompatLayer/bridge/bin
 # ── Out-of-tree build cruft (the real build is build/, ignored above) ──
 /build2/
 /build2_clean/
+/build-win-mingw/
 /CMakeCache.txt
 /CMakeFiles/
 /Testing/
@@ -50,3 +52,4 @@ src/*.png
 /*_stderr.txt
 /*.out
 *.log
+*.patch

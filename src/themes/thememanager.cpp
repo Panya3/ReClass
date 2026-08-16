@@ -123,8 +123,22 @@ void ThemeManager::removeTheme(int index) {
 // ── User theme persistence ──
 
 QString ThemeManager::userDir() const {
-    QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
-                  + "/themes";
+    // In test mode (enabled for every test binary via
+    // cmake/qtest_testmode_init.cpp), Qt's Windows implementation keeps
+    // AppDataLocation under %APPDATA% even with test mode on (it appends
+    // "/qttest" to the same roaming path), so route user themes next to the
+    // test executable instead — tests always run from the build tree, so
+    // scratch stays in the tree regardless of how the exe was launched
+    // (ctest, the test runner, or a bare run). The real app (test mode off)
+    // keeps using %APPDATA%\REECLASS\themes as before.
+    QString base;
+    if (QStandardPaths::isTestModeEnabled()) {
+        base = QCoreApplication::applicationDirPath()
+               + "/qttest/" + QCoreApplication::applicationName();
+    } else {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    }
+    QString dir = base + "/themes";
     QDir().mkpath(dir);
     return dir;
 }
