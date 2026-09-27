@@ -53,3 +53,11 @@ src/*.png
 /*.out
 *.log
 *.patch
+
+# ── Agent-skill local docs & scratch (per-user, never committed) ──
+/AGENTS.md
+/CLAUDE.md
+/CONTEXT.md
+/CONTEXT-MAP.md
+/docs/agents/
+/.scratch/
