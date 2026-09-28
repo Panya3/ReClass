@@ -195,7 +195,10 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         file.items = {
             codicon("home.file.open", "Open", "Open a project (Ctrl+O)", "folder-opened", GF::Plain, SZ::Large),
             codicon("home.file.save", "Save", "Save the project (Ctrl+S)", "save", GF::Plain, SZ::Large),
-            codicon("home.file.export", "Export", "Export the generated code — header, C#, JSON…",
+            // Not a file dialog: this SHOWS the generated code in the active
+            // editor's Code view, scoped to one class or the whole project.
+            // Writing it to disk still lives on File ▸ Export.
+            codicon("home.file.code", "Code", "Show the generated code in the editor — this class or all classes",
                     "file-code", GF::Plain, SZ::Small, true),
             codicon("home.file.close", "Close", "Close Project (Ctrl+W)", "close"),
         };

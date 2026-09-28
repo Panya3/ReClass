@@ -232,6 +232,7 @@ private:
     QAction*        m_actPresentationMode = nullptr;
     QMenu*          m_sourceMenu = nullptr;
     QMenu*          m_exportMenu = nullptr;
+    QMenu*          m_codeViewMenu = nullptr;   // ribbon ▸ Code: This Class / All Classes
 
     // ── Ribbon (ReClassEx-style Home | Modify strip above the doc tabs) ──
     RibbonBar*      m_ribbon        = nullptr;
@@ -416,6 +417,8 @@ private:
     // three views in a pane and sync the pane's zoom slider + % readout.
     void applyPaneZoom(SplitPane& pane, int level);
     void updateRenderedView(TabState& tab, SplitPane& pane);
+    // Ribbon ▸ Code: switch the active pane to its Code view at this scope.
+    void showCodeView(CodeScope scope);
     void updateAllRenderedPanes(TabState& tab);
     void updateDebugView(TabState& tab, SplitPane& pane);
     void updateAllDebugPanes(TabState& tab);

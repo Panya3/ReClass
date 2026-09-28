@@ -172,7 +172,7 @@ void TestRibbonLayout::basics() {
     QVERIFY(!bar.action(QStringLiteral("type.int32"))->icon().isNull());
     QVERIFY(!bar.action(QStringLiteral("sel.delete"))->toolTip().isEmpty());
     // 94 px at 10 pt: tab row 25 + body 69 (padTop 2 + 3×18 + caption 12 + hairline)
-    QVERIFY2(bar.preferredHeight() >= 91 && bar.preferredHeight() <= 97,
+    QVERIFY2(bar.preferredHeight() >= 94 && bar.preferredHeight() <= 102,
              qPrintable(QStringLiteral("height %1").arg(bar.preferredHeight())));
     QCOMPARE(bar.sizeHint().height(), bar.preferredHeight());
     QVERIFY(bar.minimumSizeHint().width() < 200);
@@ -769,25 +769,26 @@ void TestRibbonLayout::flatMetrics() {
     bar.resize(1920, bar.preferredHeight());
     const QFontMetrics fm(bar.font());
     QCOMPARE(bar.tabRowHeight(), fm.height() + 8);
-    QCOMPARE(bar.bodyHeight(), 2 + 3 * qMax(18, fm.height() + 1) + 12 + 1);
+    QCOMPARE(bar.bodyHeight(), 2 + 3 * qMax(18, fm.height() + 1) + 4 + 12 + 1);
     QCOMPARE(bar.preferredHeight(), bar.tabRowHeight() + bar.bodyHeight());
     // Tabs: Home first, kTabGap (8) apart, starting on the shared kGutter.
     const QRect modify = bar.tabRect(QStringLiteral("modify")), home = bar.tabRect(QStringLiteral("home"));
     QCOMPARE(home.left(), rcx::kGutter);
     QCOMPARE(modify.left(), home.right() + 1 + 8);
-    // Panels: 13 px gap; first row starts 2 px under the tab row.
+    // Panels: 10 px gap; first row starts 2 px under the tab row.
     bar.setCurrentTab(QStringLiteral("modify"));
     const QRect add = bar.panelRect(QStringLiteral("add")), ins = bar.panelRect(QStringLiteral("insert"));
-    QCOMPARE(ins.left(), add.right() + 1 + 13);
+    QCOMPARE(ins.left(), add.right() + 1 + 10);
     QCOMPARE(add.top(), bar.tabRowHeight() + 2);
-    QCOMPARE(add.height(), 3 * qMax(18, fm.height() + 1) + 12);
+    QCOMPARE(add.height(), 3 * qMax(18, fm.height() + 1) + 4 + 12);
     // Small rect is colW × 18 with a per-kind icon cell: H64 (24) column wider
     // than the H8 (16) column by exactly the cell difference (glyph-only).
     // A group caption can add a px or two to its group's last column.
     bar.setLabelMode(RibbonBar::LabelMode::IconsOnly);
-    QVERIFY(bar.itemRect(QStringLiteral("type.hex64")).width() >= 24 + 6);
-    QVERIFY(bar.itemRect(QStringLiteral("type.hex8")).width() >= 16 + 6);
-    QCOMPARE(bar.itemRect(QStringLiteral("type.utf16")).width(), 32 + 6);
+    QVERIFY(bar.itemRect(QStringLiteral("type.hex64")).width() >= rcx::pixelLabelCellWidth(QStringLiteral("H64")) + 6);
+    QVERIFY(bar.itemRect(QStringLiteral("type.hex8")).width() >= rcx::pixelLabelCellWidth(QStringLiteral("H8")) + 6);
+    QCOMPARE(bar.itemRect(QStringLiteral("type.utf16")).width(),
+             rcx::pixelLabelCellWidth(QStringLiteral("WSTR")) + 6);
     // DELIBERATE CHANGE (was 16 + 6, the icon-only cell): Structure is
     // keepLabel, so even in IconsOnly its three items carry words and the
     // column takes the widest of them.
@@ -812,8 +813,8 @@ void TestRibbonLayout::flatMetrics() {
     // A `menu` item reserves 10 px for its ▾.
     QCOMPARE(bar.itemRect(QStringLiteral("home.source.attach")).width(),
              qBound(48, fm.horizontalAdvance(QStringLiteral("Source")) + 8, 80) + 10);
-    QCOMPARE(bar.itemRect(QStringLiteral("home.file.export")).width(),
-             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Export")) + 6 + 10);
+    QCOMPARE(bar.itemRect(QStringLiteral("home.file.code")).width(),
+             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Code")) + 6 + 10);
     // Panels rhythm: Scanner + Symbols large, Bookmarks / Console / Split one small column.
     QCOMPARE(bar.itemRect(QStringLiteral("home.panels.symbols")).height(), 3 * qMax(18, fm.height() + 1));
     QCOMPARE(bar.itemRect(QStringLiteral("home.panels.console")).height(), qMax(18, fm.height() + 1));
@@ -867,13 +868,13 @@ void TestRibbonLayout::nothingFilledAtRest() {
     // clear of both hairlines (2 px), and nothing else in the gap.
     const QRect ins = bar.panelRect(QStringLiteral("insert"));
     const int gapL = add.right() + 1, gapR = ins.left() - 1;
-    QCOMPARE(gapR - gapL + 1, 13);
+    QCOMPARE(gapR - gapL + 1, 10);
     int cols = 0;
     const int yMid = qRound((add.top() + 20) * dpr);
     for (int x = qRound(gapL * dpr); x <= qRound((gapR + 1) * dpr); ++x)
         if (sameColour(img.pixel(x, yMid), m_dark.border)) ++cols;
     QCOMPARE(cols, 1);
-    const int divX = qFloor((add.right() + 7) * dpr + 0.5);
+    const int divX = qFloor((add.right() + 5) * dpr + 0.5);
     QVERIFY(sameColour(img.pixel(divX, yMid), m_dark.border));
     // 2 px clear of the strip hairline: rows tabRowH … tabRowH+1 are background at divX.
     for (int y = qRound(bar.tabRowHeight() * dpr); y < qRound((bar.tabRowHeight() + 2) * dpr); ++y)
@@ -1115,7 +1116,7 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
                               QStringLiteral("selected"), QStringLiteral("type"),
                               QStringLiteral("structure")})
         if (const QRect r = bar.panelRect(id); !r.isNull()) lastRight = qMax(lastRight, r.right());
-    QCOMPARE(ov.left(), lastRight + 7 + 5);
+    QCOMPARE(ov.left(), lastRight + 5 + 5);
     QVERIFY(ov.right() + 6 <= 760);
     bar.show();
     QTest::qWait(30);
@@ -1129,7 +1130,7 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     QCOMPARE(countColour(img, d, m_dark.hover), 0);
     QVERIFY(inkAmount(img, ov, m_dark.background) > 1.0);
     QCOMPARE(countColour(img, d, m_dark.text), 0);
-    QVERIFY(sameColour(img.pixel(qFloor((lastRight + 7) * dpr + 0.5), d.top() + d.height() / 2), m_dark.border));
+    QVERIFY(sameColour(img.pixel(qFloor((lastRight + 5) * dpr + 0.5), d.top() + d.height() / 2), m_dark.border));
     hoverAt(bar, ov.center());
     QApplication::processEvents();
     const QImage hov = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
@@ -1373,7 +1374,7 @@ void TestRibbonLayout::bothTabsFitTheUserWindow() {
     // Home: every label present at 1080.
     bar.setCurrentTab(QStringLiteral("home"));
     bar.resize(1080, bar.preferredHeight());
-    for (const char* id : {"home.file.open", "home.file.save", "home.file.export", "home.file.close",
+    for (const char* id : {"home.file.open", "home.file.save", "home.file.code", "home.file.close",
                            "home.class.newclass", "home.class.newstruct", "home.class.newenum",
                            "home.source.attach", "home.source.refresh", "home.source.goto",
                            "home.panels.scanner", "home.panels.symbols", "home.panels.bookmarks",

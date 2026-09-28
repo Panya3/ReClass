@@ -47,8 +47,12 @@ Theme fallbackTheme() {
 // (title label, breadcrumb, status) — one left edge down the whole app.
 constexpr int kLeftMargin   = kGutter;
 constexpr int kRightMargin  = 6;
-constexpr int kPanelGap     = 13;  // between panels ...
-constexpr int kDividerInset = 7;   // ... with the 1-device-px divider at A.right() + 7
+// Between panels, with the 1-device-px divider centred in the gap. Tightened
+// from 13/7 when the 5×7 font widened the Type cells: the gap is dead space,
+// the labels are not, and at 13 the Modify tab overflowed 1080 and dropped
+// the Add / Insert words.
+constexpr int kPanelGap     = 10;
+constexpr int kDividerInset = 5;
 constexpr int kColGap       = 3;   // `|`
 constexpr int kSepGap       = 7;   // `||` (hairline in the middle)
 // The tab titles get noticeably more air than the strip gutter: they are the
@@ -273,9 +277,12 @@ RibbonBar::Metrics RibbonBar::metrics() const {
     m.tabRowH  = fm.height() + 8;              // 25 at 10 pt (4 px of air above/below)
     m.rowH     = qMax(18, fm.height() + 1);    // 18
     m.captionH = 12;                           // 9 pt caption; glyphs overhang the rect
+    m.captionGap = 4;                          // air between the last item row and the caption
     m.padTop   = 2;
-    // padTop + 3 rows + caption + body bottom hairline -> 69; 94 with the tab row
-    m.bodyH = m.padTop + 3 * m.rowH + m.captionH + 1;
+    // padTop + 3 rows + captionGap + caption + body bottom hairline -> 73; 98 with
+    // the tab row. The gap is why the captions no longer sit right on the third
+    // row of buttons (user, 2026-09-06: "needs a little more room above").
+    m.bodyH = m.padTop + 3 * m.rowH + m.captionGap + m.captionH + 1;
     const qreal dpr = devicePixelRatioF() > 0 ? devicePixelRatioF() : 1.0;
     m.smallIcon    = 16;
     m.largeIconDev = ribbonLargeIconDev(dpr);
@@ -335,7 +342,7 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
     const QFontMetrics cfm(captionFont());
     const int itemsTop = m.tabRowH + m.padTop;
     const int itemsH   = 3 * m.rowH;
-    const int captionTop = itemsTop + itemsH;
+    const int captionTop = itemsTop + itemsH + m.captionGap;
 
     int x = kLeftMargin;
     int column = 0;
@@ -468,7 +475,7 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
             ++column;
         }
         closeGroup();
-        lp.rect = QRect(panelX, itemsTop, panelW, itemsH + m.captionH);
+        lp.rect = QRect(panelX, itemsTop, panelW, itemsH + m.captionGap + m.captionH);
         lp.captionRect = QRect(panelX, captionTop, panelW, m.captionH);
         // One divider per gap (none before the first panel).
         if (!L.panels.isEmpty()) L.dividerXs << L.panels.last().rect.right() + kDividerInset;

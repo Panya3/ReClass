@@ -5448,10 +5448,10 @@ void MainWindow::previewBothSplit() {
     tab->panes.first().tabWidget->setCurrentIndex(3);  // select the "Both" view
 }
 
+// --screenshot code: exercise the SAME path the ribbon's Code button uses, so
+// the capture proves the real command rather than a parallel shortcut.
 void MainWindow::previewCodeView() {
-    auto* tab = activeTab();
-    if (!tab || tab->panes.isEmpty()) return;
-    tab->panes.first().tabWidget->setCurrentIndex(1);  // select the "Code" view
+    showCodeView(CodeScope::FullSdk);
 }
 
 // --screenshot symbols: open the Symbols dock at the narrow width the header
@@ -6499,9 +6499,23 @@ void MainWindow::createRibbon() {
     if (QAction* a = m_ribbon->action(QStringLiteral("home.source.attach")))
         connect(a, &QAction::triggered, this,
                 [this, popupUnder]() { popupUnder("home.source.attach", m_sourceMenu); });
-    if (QAction* a = m_ribbon->action(QStringLiteral("home.file.export")))
+    // "Code" does NOT open a save dialog (File ▸ Export still does that). It
+    // switches the active pane to its Code view and picks the scope, which is
+    // what people actually reach for: read the generated struct, for this class
+    // or for the whole project.
+    if (QAction* a = m_ribbon->action(QStringLiteral("home.file.code"))) {
+        if (!m_codeViewMenu) {
+            m_codeViewMenu = new QMenu(this);
+            // Labels come from codeScopeName so the menu and the pane's scope
+            // combo can never drift apart.
+            for (CodeScope sc : {CodeScope::WithChildren, CodeScope::FullSdk}) {
+                m_codeViewMenu->addAction(QString::fromLatin1(codeScopeName(sc)), this,
+                                          [this, sc]() { showCodeView(sc); });
+            }
+        }
         connect(a, &QAction::triggered, this,
-                [this, popupUnder]() { popupUnder("home.file.export", m_exportMenu); });
+                [this, popupUnder]() { popupUnder("home.file.code", m_codeViewMenu); });
+    }
 
     // RTTI moved to Modify > Selection (it acts on the selected pointer, not
     // on the project). RibbonActions owns the id so it gets an enabled
@@ -6820,6 +6834,24 @@ void MainWindow::applyPaneZoom(SplitPane& p, int level) {
 }
 
 // ── Update the rendered view for a single pane ──
+
+// Show the generated code for the active tab in its active pane, at `scope`.
+// Drives the pane's own scope combo rather than writing the setting directly,
+// so the combo, the QSettings key and every other open pane stay in step (the
+// combo's currentIndexChanged owns all three).
+void MainWindow::showCodeView(CodeScope scope) {
+    if (!m_activeDocDock || !m_tabs.contains(m_activeDocDock)) return;
+    TabState& tab = m_tabs[m_activeDocDock];
+    const int idx = qBound(0, tab.activePaneIdx, int(tab.panes.size()) - 1);
+    if (idx < 0 || idx >= tab.panes.size()) return;
+    SplitPane& pane = tab.panes[idx];
+    if (pane.scopeCombo) pane.scopeCombo->setCurrentIndex(static_cast<int>(scope));
+    // Tab 1 is Code; the tab bar's currentChanged sets viewMode and renders.
+    if (pane.tabWidget && pane.tabWidget->currentIndex() != 1)
+        pane.tabWidget->setCurrentIndex(1);
+    else
+        updateRenderedView(tab, pane);
+}
 
 void MainWindow::updateRenderedView(TabState& tab, SplitPane& pane) {
     if (pane.viewMode != VM_Rendered && pane.viewMode != VM_Both) return;

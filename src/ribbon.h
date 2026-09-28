@@ -186,7 +186,7 @@ private:
         QString            tab;
     };
     struct Metrics {
-        int tabRowH = 20, rowH = 18, captionH = 12, padTop = 2, bodyH = 69;
+        int tabRowH = 25, rowH = 18, captionH = 12, captionGap = 4, padTop = 2, bodyH = 73;
         int   smallIcon = 16;          // small cell height (logical)
         int   largeIconDev = 32;       // large Codicon side in DEVICE px (ribbonLargeIconDev)
         qreal largeIcon = 25.6;        // … in logical px (largeIconDev / dpr)

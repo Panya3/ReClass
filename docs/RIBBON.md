@@ -73,7 +73,9 @@ Every button is addressable by id (`RibbonBar::action(id)`, `RibbonActions::acti
 - `sel.rtti` — no op of its own; `createRibbon()` forwards `triggered` to Tools ▸ RTTI Browser. Enabled = live && exactly one selected pointer-sized field
 - `type.hex64 … type.hex8`, `type.int64 … type.int8`, `type.uint64 … type.uint8`, `type.double type.float type.bool`, `type.vec2 type.vec3 type.vec4 type.mat4x4`, `type.pointer type.funcptr` (64/32-bit from `tree.pointerSize`), `type.utf8 type.utf16` — `retypeSelection(kind)`; `type.ptrclass` — `convertSelectionToTypedPointers`; `type.class` — **Break Class**; `type.array` — `makeArrayFromSelection`; `type.custom` — the inline type editor
 - Menu-backed (the same `QAction` objects as the menus): `home.file.open/save/close`, `home.class.newclass/newstruct/newenum`, `home.source.refresh/goto`, `home.panels.scanner/symbols/bookmarks/console/split`
-- Ribbon-only: `home.source.attach` pops the Data Source menu under the button; `home.file.export` pops the Export menu (both carry a `menu` ▾)
+- Ribbon-only: `home.source.attach` pops the Data Source menu under the button; `home.file.code` pops a two-item scope menu
+  (**This Class** / **All Classes**) and switches the ACTIVE pane to its Code view — it does not write a file, File ▸ Export still does
+  that. Its labels come from `codeScopeName()`, the same strings the pane's scope combo shows, so the two cannot drift. Both items carry a `menu` ▾.
 - **Quick access, no ribbon button**: `edit.undo` / `edit.redo` — owned by `RibbonActions` (they own the undo-stack predicates) and shown as two 28×32 buttons in the title strip. `tests/test_ribbon_ids.cpp` lists them as the documented exception to "every RibbonActions id has a button".
 
 `type.*` actions carry `data() = int(NodeKind)`, `add.*`/`insert.*` the byte count.

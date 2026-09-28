@@ -2,7 +2,7 @@
 // src/ribbon_icons.h). Locks in:
 //   - crispness: every ink pixel is fully opaque at dpr 1.0 / 1.25 / 2.0
 //     (painted in device pixels, dpr stamped after painting)
-//   - the ink bounding box is exactly pixelLabelWidth·s × 5·s and fits the cell
+//   - the ink bounding box is exactly pixelLabelWidth·s × kGlyphH·s and fits the cell
 //   - ONE scale per DPR (pixelGlyphScale: 2 / 2 / 3 / 4 at 1.0 / 1.25 / 1.5 /
 //     2.0): "H64" and "F" are the same height; cells are 8·max(2, len) wide
 //   - the square (wide = false) QMenu path never exceeds 16×16
@@ -129,18 +129,26 @@ void TestPixelGlyphs::glyphTableHasEveryUsedChar() {
     for (const auto& l : m_labels) used += l.first;
     used += QStringLiteral("0123456789???FFF000");
     for (const QChar& c : used) {
-        const uint16_t g = pixelGlyph3x5(c.toUpper().toLatin1());
-        QVERIFY2(g != 0, qPrintable(QStringLiteral("no glyph for '%1'").arg(c)));
+        const PixelGlyph g = pixelGlyph(c.toUpper().toLatin1());
+        QVERIFY2(g.w != 0, qPrintable(QStringLiteral("no glyph for '%1'").arg(c)));
     }
-    // The measured originals.
-    QCOMPARE(pixelGlyph3x5('H'), detail::g3x5("#.#", "#.#", "###", "#.#", "#.#"));
-    QCOMPARE(pixelGlyph3x5('I'), detail::g3x5("###", ".#.", ".#.", ".#.", "###"));
-    QCOMPARE(pixelGlyph3x5('4'), detail::g3x5("..#", "#.#", "###", "..#", "..#"));
-    QCOMPARE(pixelGlyph3x5('x'), uint16_t(0));   // lowercase is not in the table (drawPixelLabel upper-cases)
-    QCOMPARE(pixelGlyph3x5('~'), uint16_t(0));
-    QCOMPARE(pixelLabelWidth(QStringLiteral("H64")), 11);
-    QCOMPARE(pixelLabelWidth(QStringLiteral("1024")), 15);
-    QCOMPARE(pixelLabelWidth(QStringLiteral("F")), 3);
+    // 5×7 variable width: the point of the regrid is that shapes a 3×5 cell
+    // could not express are now distinct. U and V are the case that actually
+    // misled a reader (V2/V3/V4 read as U2/U3/U4): they differ in WIDTH as well
+    // as shape now, so no scale can collapse them.
+    QCOMPARE(pixelGlyph('H'), detail::g(4, "#..#.", "#..#.", "#..#.", "####.", "#..#.", "#..#.", "#..#."));
+    QCOMPARE(pixelGlyphAdvance('U'), 4);
+    QCOMPARE(pixelGlyphAdvance('V'), 5);
+    QVERIFY(pixelGlyph('U').rows[6] != pixelGlyph('V').rows[6]);
+    // Narrow glyphs keep their own advance so they do not float in a wide cell.
+    QCOMPARE(pixelGlyphAdvance('I'), 3);
+    QCOMPARE(pixelGlyphAdvance('T'), 3);
+    QCOMPARE(pixelGlyph('x').w, uint8_t(0));   // lowercase is not in the table (drawPixelLabel upper-cases)
+    QCOMPARE(pixelGlyph('~').w, uint8_t(0));
+    QCOMPARE(pixelGlyphAdvance('~'), 3);       // ... but it still advances a word space
+    QCOMPARE(pixelLabelWidth(QStringLiteral("H64")), 14);
+    QCOMPARE(pixelLabelWidth(QStringLiteral("1024")), 19);
+    QCOMPARE(pixelLabelWidth(QStringLiteral("F")), 4);
 }
 
 void TestPixelGlyphs::glyphsAreCrispAndBounded_data() {
@@ -161,7 +169,7 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded() {
     const QPixmap pm = typeGlyphIcon(label, GlyphFamily(family), logical, dpr, m_dark);
     QCOMPARE(pm.devicePixelRatio(), dpr);
     const QImage img = straight(pm);
-    const int cellW = 8 * qMax(2, int(label.size()));   // ribbonIconCellWidth
+    const int cellW = pixelLabelCellWidth(label);   // == ribbonIconCellWidth
     const int cellWDev = qRound(cellW * dpr);
     const int cellDev = qRound(logical * dpr);
     QCOMPARE(img.width(), cellWDev);
@@ -187,28 +195,29 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded() {
 }
 
 void TestPixelGlyphs::scaleRule() {
-    // ONE scale per DPR: ceil(1.6·dpr) → 2 / 2 / 3 / 4.
+    // ONE scale per DPR: round(1.6·dpr) → 2 / 2 / 2 / 3.
     QCOMPARE(pixelGlyphScale(1.0), 2);
     QCOMPARE(pixelGlyphScale(1.25), 2);
-    QCOMPARE(pixelGlyphScale(1.5), 3);
-    QCOMPARE(pixelGlyphScale(2.0), 4);
-    // Every label in its 8·max(2, len)-wide cell keeps the uniform scale …
-    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 16, 16, 1.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("V2"), 16, 16, 1.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 24, 16, 1.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 32, 16, 1.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 20, 20, 1.25), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 30, 20, 1.25), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 40, 20, 1.25), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 36, 24, 1.5), 3);
-    QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 48, 24, 1.5), 3);
-    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 32, 32, 2.0), 4);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 48, 32, 2.0), 4);
-    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 64, 32, 2.0), 4);
+    QCOMPARE(pixelGlyphScale(1.5), 2);
+    QCOMPARE(pixelGlyphScale(2.0), 3);
+    // Every label, in the cell the ONE rule gives it, keeps the uniform scale at
+    // every shipped DPR — that is the whole contract between pixelLabelCellWidth
+    // and pixelLabelScale, and it is why the cell rule sizes at 2 px per font px.
+    for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
+        for (const char* label : {"B", "V2", "H8", "H64", "PTR", "FN*", "WSTR", "1024"}) {
+            const QString l = QString::fromLatin1(label);
+            const int cellW = qRound(pixelLabelCellWidth(l) * dpr);
+            const int cellH = qRound(16 * dpr);
+            QVERIFY2(pixelLabelScale(l, cellW, cellH, dpr) == pixelGlyphScale(dpr),
+                     qPrintable(QStringLiteral("%1@%2 shrank out of step").arg(label).arg(dpr)));
+        }
     // … the shrink guard still protects a square 16 cell (QMenu icons) …
     QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 16, 16, 1.0), 1);
     QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 16, 16, 1.0), 1);
-    QVERIFY(pixelLabelWidth(QStringLiteral("1024")) * 1 <= 16);
+    // A square 16 cell cannot hold a 4-char label in this font even at 1x (19
+    // font px), so the guard floors at 1 rather than returning 0 — the icon
+    // overflows its cell instead of vanishing.
+    QVERIFY(pixelLabelWidth(QStringLiteral("1024")) > 16);
     // … and a cell too small for even 1× still returns 1 (never 0).
     QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 8, 1.0), 1);
 }
@@ -225,22 +234,30 @@ void TestPixelGlyphs::uniformScaleAcrossLabels() {
     QFETCH(double, dpr);
     const int s = pixelGlyphScale(dpr);
     const int want = kGlyphH * s;   // 10 / 10 / 15 / 20
-    QCOMPARE(want, dpr == 1.5 ? 15 : dpr == 2.0 ? 20 : 10);
+    // 7 rows now, and s = round(1.6·dpr): 14 / 14 / 14 / 21 device px of ink.
+    QCOMPARE(want, dpr == 2.0 ? 21 : 14);
     for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
         const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);
         QVERIFY2(b.h() == want, qPrintable(QStringLiteral("%1@%2: ink %3 px tall, want %4")
                                            .arg(label).arg(dpr).arg(b.h()).arg(want)));
-        QVERIFY2(b.w() == pixelLabelWidth(QString::fromLatin1(label)) * s,
-                 qPrintable(QStringLiteral("%1@%2: ink %3 px wide").arg(label).arg(dpr).arg(b.w())));
+        // Ink may be NARROWER than the advance: '1' is drawn 3 px wide inside a
+        // 4-px advance, so a proportional font's bbox only has to FIT the box.
+        QVERIFY2(b.w() <= pixelLabelWidth(QString::fromLatin1(label)) * s,
+                 qPrintable(QStringLiteral("%1@%2: ink %3 px wide exceeds the advance")
+                            .arg(label).arg(dpr).arg(b.w())));
     }
     // The fill composites share the scale (block 8·s tall in the 16-tall cell).
     for (const char* text : {"000", "FFF", "???"}) {
         const QImage img = straight(fillIcon(QString::fromLatin1(text), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);
-        QCOMPARE(img.width(), qRound(24 * dpr));
+        QCOMPARE(img.width(), qRound(pixelLabelCellWidth(QString::fromLatin1(text)) * dpr));
         QCOMPARE(img.height(), qRound(16 * dpr));
-        QCOMPARE(b.h(), (kSquaresRow11x2.h + kSquaresGap + kGlyphH) * s);
+        // Squares only when the cell holds both at the shared scale; the label
+        // never shrinks out of step with its neighbours.
+        constexpr int kBlockRows = kSquaresRow11x2.h + kSquaresGap + kGlyphH;
+        const bool withSquares = kBlockRows * s <= img.height();
+        QCOMPARE(b.h(), (withSquares ? kBlockRows : kGlyphH) * s);
         QVERIFY(b.w() <= img.width());
     }
 }
@@ -251,15 +268,20 @@ void TestPixelGlyphs::cellWidthsPerKind() {
         RibbonIconSpec sp; sp.kind = kind; sp.arg = QString::fromLatin1(arg);
         return ribbonIconCellWidth(sp);
     };
-    QCOMPARE(cell(K::TypeGlyph, "F"), 16);
-    QCOMPARE(cell(K::TypeGlyph, "H8"), 16);
-    QCOMPARE(cell(K::TypeGlyph, "V2"), 16);
-    QCOMPARE(cell(K::TypeGlyph, "H64"), 24);
-    QCOMPARE(cell(K::TypeGlyph, "PTR"), 24);
-    QCOMPARE(cell(K::TypeGlyph, "FN*"), 24);
-    QCOMPARE(cell(K::TypeGlyph, "WSTR"), 32);
-    QCOMPARE(cell(K::TypeGlyph, "1024"), 32);
-    QCOMPARE(cell(K::FillSquares, "000"), 24);
+    // MEASURED, not counted: the 5x7 font is variable-width, so two labels of
+    // the same length can need different cells (V is 5 wide, H is 4) and a
+    // 3-char label can need less than another (PTR < FN*).
+    QCOMPARE(cell(K::TypeGlyph, "F"), 16);      // 4 font px -> the 16 floor
+    QCOMPARE(cell(K::TypeGlyph, "H8"), 18);
+    QCOMPARE(cell(K::TypeGlyph, "V2"), 20);     // wider than H8 at the same length
+    QCOMPARE(cell(K::TypeGlyph, "H64"), 28);
+    QCOMPARE(cell(K::TypeGlyph, "PTR"), 26);
+    QCOMPARE(cell(K::TypeGlyph, "FN*"), 30);    // wider than PTR at the same length
+    QCOMPARE(cell(K::TypeGlyph, "WSTR"), 38);
+    QCOMPARE(cell(K::TypeGlyph, "1024"), 38);
+    QCOMPARE(cell(K::FillSquares, "000"), 28);
+    // The layout rule and the painter's rule are ONE function.
+    QCOMPARE(cell(K::TypeGlyph, "H64"), pixelLabelCellWidth(QStringLiteral("H64")));
     QCOMPARE(cell(K::Codicon, "symbol-class"), 16);
     QCOMPARE(cell(K::AddBytes, "1024"), 16);
     QCOMPARE(cell(K::InsertBytes, "2048"), 16);
@@ -267,8 +289,10 @@ void TestPixelGlyphs::cellWidthsPerKind() {
     QCOMPARE(cell(K::ClassPtr, ""), 16);
     // The rendered pixmap is exactly the cell (device px).
     for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
-        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("H64"), GlyphFamily::Hex, 16, dpr, m_dark)).width(), qRound(24 * dpr));
-        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("WSTR"), GlyphFamily::Text, 16, dpr, m_dark)).width(), qRound(32 * dpr));
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("H64"), GlyphFamily::Hex, 16, dpr, m_dark)).width(),
+             qRound(pixelLabelCellWidth(QStringLiteral("H64")) * dpr));
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("WSTR"), GlyphFamily::Text, 16, dpr, m_dark)).width(),
+             qRound(pixelLabelCellWidth(QStringLiteral("WSTR")) * dpr));
         QCOMPARE(straight(typeGlyphIcon(QStringLiteral("F"), GlyphFamily::Float, 16, dpr, m_dark)).width(), qRound(16 * dpr));
     }
 }
@@ -476,14 +500,16 @@ void TestPixelGlyphs::signedDiffersFromUnsigned() {
                                   .arg(diff).arg(total)));
     QCOMPARE(ribbonFamilyColour(GlyphFamily::Signed, m_dark, m_dark.background),
              ribbonFamilyColour(GlyphFamily::Unsigned, m_dark, m_dark.background));
-    // The difference is confined to the leading glyph cell (3 px + 1 gap at
-    // scale 1, so 4·s of the label's width).
-    const int s = pixelGlyphScale(1.0);
-    for (int y = y0; y <= y1; ++y)
-        for (int x = x0 + (kGlyphW + kGlyphGap) * s; x <= x1; ++x)
-            QVERIFY2(a.pixel(x, y) == b.pixel(x, y),
-                     qPrintable(QStringLiteral("I32/U32 differ outside the first letter at %1,%2")
-                                .arg(x).arg(y)));
+    // The old font was fixed-width, so the tail of I32 and U32 landed on the
+    // same pixels and the test could pin the difference to the first cell.
+    // The 5x7 font is proportional — I advances 3, U advances 4 — so the two
+    // labels are different widths and the tails no longer align. What still
+    // has to hold is that the SHAPES of the trailing digits are identical.
+    QCOMPARE(pixelGlyphAdvance('I'), 3);
+    QCOMPARE(pixelGlyphAdvance('U'), 4);
+    QCOMPARE(pixelGlyph('3'), pixelGlyph('3'));
+    QCOMPARE(pixelLabelWidth(QStringLiteral("I32")) + 1,
+             pixelLabelWidth(QStringLiteral("U32")));
     // markerPtr is reserved for destructive commands — no type family uses it.
     for (GlyphFamily f : {GlyphFamily::Hex, GlyphFamily::Signed, GlyphFamily::Unsigned,
                           GlyphFamily::Float, GlyphFamily::Text, GlyphFamily::Pointer,

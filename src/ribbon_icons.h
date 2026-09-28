@@ -109,15 +109,21 @@ inline QString ribbonBytesGlyphLabel(int n, bool withPlus) {
     return withPlus ? QLatin1Char('+') + num : num;
 }
 
-// Logical width of an icon's 16-tall cell: pixel labels get 8·max(2, len)
-// (F / H8 / V2 = 16, H64 / PTR / 000 = 24, WSTR = 32); everything else 16.
+// Logical width of an icon's 16-tall cell. Pixel labels are MEASURED, not
+// counted: the 5×7 font is variable-width, so `V2` (V is 5 wide) needs more
+// than `H8` even though both are two characters, and `PTR` needs less than
+// `FN*`. Two logical px per font px is the worst case ratio of the uniform
+// integer scale to the DPR (s/dpr = 2 at 100 %; 1.6 at 125 %, 1.33 at 150 %),
+// so sizing at 2× guarantees the label never has to shrink out of step with
+// its neighbours. The old 8·max(2, len) predated variable width and could not
+// hold a 7-row glyph at 100 %.
 // An UNLABELLED Add / Insert cell carries the byte count itself, so it widens
 // to 32 — that is where the count went when the 4-5-device-px corner numbers
 // (illegible at 100 %) were deleted.
 inline int ribbonIconCellWidth(const RibbonIconSpec& spec, bool labelled = true) {
     using K = RibbonIconSpec::Kind;
     if (spec.kind == K::TypeGlyph || spec.kind == K::FillSquares)
-        return 8 * qMax(2, int(spec.arg.size()));
+        return pixelLabelCellWidth(spec.arg);
     if (!labelled && (spec.kind == K::AddBytes || spec.kind == K::InsertBytes))
         return 32;
     return 16;
@@ -218,7 +224,7 @@ inline int ribbonBitmapScale(int cellDev, int side, int k) {
 inline QPixmap typeGlyphIcon(const QString& label, GlyphFamily family, int logicalSize,
                              qreal dpr, const Theme& theme, bool wide = true) {
     const QColor ink = ribbonFamilyColour(family, theme, theme.background, kRibbonPixelInkContrast);
-    const int cellW = wide ? 8 * qMax(2, int(label.size())) : logicalSize;
+    const int cellW = wide ? pixelLabelCellWidth(label) : logicalSize;
     const QString key = detail::ribbonIconKey(QStringLiteral("glyph"), label, cellW, logicalSize,
                                               dpr, ink, theme.background, wide);
     auto& cache = detail::ribbonIconCache();
@@ -368,7 +374,7 @@ inline QPixmap fillIcon(const QString& text, GlyphFamily family, int logicalSize
         : ribbonFamilyColour(family, theme, theme.background, kRibbonPixelInkContrast);
     const QColor squares = inkOverride.isValid()
         ? inkOverride : ribbonToneColour(theme.textDim, theme, theme.background);
-    const int cellW = wide ? 8 * qMax(2, int(text.size())) : logicalSize;
+    const int cellW = wide ? pixelLabelCellWidth(text) : logicalSize;
     const QString key = detail::ribbonIconKey(QStringLiteral("fill"), text, cellW, logicalSize, dpr,
                                               ink, theme.background, wide)
                       + QLatin1Char('|') + squares.name(QColor::HexArgb);
@@ -379,15 +385,26 @@ inline QPixmap fillIcon(const QString& text, GlyphFamily family, int logicalSize
     QImage img = detail::ribbonCanvas(cell);
     {
         QPainter p(&img);
-        constexpr int kBlockRows = kSquaresRow11x2.h + kSquaresGap + kGlyphH;   // 8
-        int s = pixelLabelScale(text, cell.width(), cell.height(), dpr);
-        while (s > 1 && (kSquaresRow11x2.w * s > cell.width() || kBlockRows * s > cell.height())) --s;
-        const int blockH = kBlockRows * s;
+        // The squares strip rides ABOVE the label only when the cell can hold
+        // both at the shared scale. With the 5x7 font it cannot at 100 % (2 + 1
+        // + 7 = 10 font px is 20 device in a 16-device cell), and shrinking the
+        // composite alone would leave 000 / FFF / ??? half the size of every
+        // neighbouring glyph — the exact inconsistency the one-scale rule
+        // exists to prevent. The label alone is the information; the squares
+        // are decoration, so the decoration is what gives way.
+        constexpr int kBlockRows = kSquaresRow11x2.h + kSquaresGap + kGlyphH;
+        const int s = pixelLabelScale(text, cell.width(), cell.height(), dpr);
+        const bool withSquares = kSquaresRow11x2.w * s <= cell.width()
+                              && kBlockRows * s <= cell.height();
+        const int blockH = (withSquares ? kBlockRows : kGlyphH) * s;
         const int y0 = (cell.height() - blockH) / 2;
-        const int x0 = (cell.width() - kSquaresRow11x2.w * s) / 2;
-        drawBitmap(p, x0, y0, kSquaresRow11x2, s, squares);
+        if (withSquares) {
+            const int x0 = (cell.width() - kSquaresRow11x2.w * s) / 2;
+            drawBitmap(p, x0, y0, kSquaresRow11x2, s, squares);
+        }
         const int lw = pixelLabelWidth(text) * s;
-        drawPixelLabel(p, (cell.width() - lw) / 2, y0 + (kSquaresRow11x2.h + kSquaresGap) * s, text, s, ink);
+        drawPixelLabel(p, (cell.width() - lw) / 2,
+                       y0 + (withSquares ? (kSquaresRow11x2.h + kSquaresGap) * s : 0), text, s, ink);
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);
