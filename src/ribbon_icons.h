@@ -17,8 +17,12 @@
 // Cells: 16 logical px tall; TypeGlyph / FillSquares cells are 8·max(2, len)
 // wide (F = 16, H64 = 24, WSTR = 32) so every label shares ONE pixel scale
 // (pixelBitmapScale). The `wide = false` path renders the same label into a
-// square 16×16 cell (shrunk to fit) for QAction / QMenu icons, so the 24/32-
-// wide ribbon cells are never downscaled into 16×16 action icons.
+// square 16×16 cell for QAction / QMenu icons, so the 24/32-wide ribbon cells
+// are never smooth-scaled into 16×16 action icons. That square is too narrow
+// for the strip's font — it really is shrunk to fit now, at its own size
+// (pixelFontSizeSquareDev, capped at the 3-character fit so the vocabulary
+// stays in step); before 2026-09-08 it was drawn at the strip size and
+// clipped instead, losing both edges of every 3-character label.
 //
 // Codicons are tinted with a SourceIn fill (tab_source_icon.h technique) which
 // works on baked-colour icons like symbol-class / debug-stop, unlike the
@@ -245,9 +249,14 @@ inline QPixmap typeGlyphIcon(const QString& label, GlyphFamily family, int logic
     QImage img = detail::ribbonCanvas(cell);
     {
         QPainter p(&img);
-        const int w = pixelLabelWidthDev(label, dpr);
-        const int h = pixelLabelHeightDev(dpr);
-        drawPixelLabel(p, (cell.width() - w) / 2, (cell.height() - h) / 2, label, dpr, ink);
+        // The square QAction / QMenu cell is far narrower than the strip's, so
+        // it has its own size; drawing the strip's glyphs in it cut both edges
+        // off every 3-character label. See pixelFontSizeSquareDev.
+        const int sz = wide ? pixelFontSizeDev(dpr)
+                            : pixelFontSizeSquareDev(label, cell.width(), dpr);
+        const int w = pixelLabelWidthDevAt(label, sz);
+        const int h = pixelLabelHeightDevAt(sz);
+        drawPixelLabelAt(p, (cell.width() - w) / 2, (cell.height() - h) / 2, label, sz, ink);
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);
@@ -410,7 +419,9 @@ inline QPixmap fillIcon(const QString& text, GlyphFamily family, int logicalSize
         // neighbouring glyph — the exact inconsistency the one-scale rule
         // exists to prevent. The label alone is the information; the squares
         // are decoration, so the decoration is what gives way.
-        const int glyphH = pixelLabelHeightDev(dpr);
+        const int sz = wide ? pixelFontSizeDev(dpr)
+                            : pixelFontSizeSquareDev(text, cell.width(), dpr);
+        const int glyphH = pixelLabelHeightDevAt(sz);
         const int s = detail::ribbonUnit(dpr);       // scale for the SQUARES bitmap
         const int kBlockRows = kSquaresRow11x2.h * s + kSquaresGap * s + glyphH;
         const bool withSquares = kSquaresRow11x2.w * s <= cell.width()
@@ -421,9 +432,9 @@ inline QPixmap fillIcon(const QString& text, GlyphFamily family, int logicalSize
             const int x0 = (cell.width() - kSquaresRow11x2.w * s) / 2;
             drawBitmap(p, x0, y0, kSquaresRow11x2, s, squares);
         }
-        const int lw = pixelLabelWidthDev(text, dpr);
-        drawPixelLabel(p, (cell.width() - lw) / 2,
-                       y0 + (withSquares ? (kSquaresRow11x2.h + kSquaresGap) * s : 0), text, dpr, ink);
+        const int lw = pixelLabelWidthDevAt(text, sz);
+        drawPixelLabelAt(p, (cell.width() - lw) / 2,
+                         y0 + (withSquares ? (kSquaresRow11x2.h + kSquaresGap) * s : 0), text, sz, ink);
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);

@@ -7,27 +7,29 @@ attach a source, open a panel); **Modify** is what you do to the *selection*
 first-run tab; a persisted `ribbonTab` still wins.
 
 ```
- Home   Modify                                                                                        ⌃
- ────── ━━━━━━──────────────────────────────────────────────────────────────────────────────────────────
-  +4  +1024 │ ⤵4  ⤵1024 │   ≡    ✕ Delete    000 ⟲ Big endian │ H64 I64 U64 H8 │ D  V2 M4 │ PTR STR ⌸ Custom…
-  +8  +2048 │ ⤵8  ⤵2048 │        ⧉ Duplicate FFF ⌸ Ptr → Class │ H32 I32 U32 I8 │ F  V3    │ FN* WSTR
-  +64       │ ⤵64       │ Extract ≡ Comment   ??? [] Array     │ H16 I16 U16 U8 │ B  V4    │
-            │           │  Class                              │                │          │
-     Add    │   Insert  │              Selection              │ 64: 32: 16: 8: Float: Ptr: Str: Other:
- ──────────────────────────────────────────────────────────────────────────────────────────────────────
+ Home   Modify                                                                                                 ⌃
+ ────── ━━━━━━───────────────────────────────────────────────────────────────────────────────────────────────────
+     Add   │   Insert  │ 64  32  16  8  │  Float   │Ptr  │ Str  │ Other     │            Selection
+  +4  +1K  │  ⤵4  ⤵1K  │ H64 H32 H16 H8 │ D  V2 M4 │ PTR │ STR  │ B         │   ≡    ✕ Delete    000 ⟲ Big endian
+  +8  +2K  │  ⤵8  ⤵2K  │ I64 I32 I16 I8 │ F  V3    │ FN* │ WSTR │ ⌸ Custom… │        ⧉ Duplicate FFF ⌸ Ptr → Class
+  +64      │  ⤵64      │ U64 U32 U16 U8 │    V4    │     │      │           │ Carve  ≡ Comment   ??? [] Array
+ ────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
 Flat: no panel boxes or caption bands — one 1-device-px divider per panel gap,
-a dim 9 pt caption under each panel (or per column *group* on Type), a hairline
-above and below the body. The active tab is a 2-device-row `textDim` underline on
-the strip's hairline. The `⌃` at the right end of the tab row collapses the
-body.
+a dim 9 pt caption **above** each panel (or per column *group* on Type), a
+hairline above and below the body. The caption heads its list rather than
+trailing it: "64" / "Selection" name what follows, and the colon was pointing
+the wrong way while the items sat above it (user, 2026-09-08: "`:` denotes the
+list is below … i think all the texts should be moved up"). The active tab is a
+2-device-row `textDim` underline on the strip's hairline. The `⌃` at the right
+end of the tab row collapses the body.
 
 ## Pieces
 
 | File | Role |
 |---|---|
-| `src/pixelglyphs.h` | 3×5 pixel font + fixed bitmaps, painted in whole **device** pixels (crisp at 100/125/150/200 %). |
+| `src/pixelglyphs.h` | Departure Mono (a real pixel face) + the fixed hand-drawn bitmaps, painted in whole **device** pixels and alpha-thresholded (crisp at 100/125/150/200 %). |
 | `src/ribbon_icons.h` | Glyph / composite / Codicon icon builders with theme-token family colours and a contrast guard; dpr-keyed cache. |
 | `src/ribbon_spec.h` | The data model **and** the tables (`defaultRibbonSpec()`, header-only): tabs → panels → items. Also `ribbonSpecForId()` — the single source of every command's label + tooltip, read by both the widget and `RibbonActions`. |
 | `src/ribbon.h/.cpp` | `rcx::RibbonBar` — one custom-painted widget: tab row + collapse chevron, flat panels with dim captions, 3-row small-button columns, large buttons, label compaction, `…` overflow menu, minimise. `Qt::NoFocus`. Also `rcx::ribbonStateFromSettings()`. |
@@ -35,7 +37,7 @@ body.
 | `src/ribbon_actions.h/.cpp` | `rcx::RibbonActions` — one `QAction` per Modify button wired to `RcxController` selection ops; enabled-state follows the active controller's signals. Labels/tooltips come from `ribbonSpecForId()`. |
 | `src/titlebar.cpp` | `TitleBarWidget::setQuickActions()` — the Undo / Redo pair in the title strip (there is no Edit panel on the ribbon). |
 | `src/main.cpp` `createRibbon()` | Hosts the ribbon in a chrome-less `QToolBar` (`RibbonHost`), binds Home-tab buttons to the existing menu `QAction`s, owns `applyRibbonState()`, theme hook. |
-| `tools/ribbon_render.cpp` | Harness: `ribbon_render <prefix> [theme] [labels 0\|1\|2]` renders both tabs at 760/1080/1350/1920 px (1080 = the 125 % user window) plus a collapsed shot. |
+| `tools/ribbon_render.cpp` | Harness: `ribbon_render <prefix> [theme] [labels 0\|1\|2]` renders both tabs at 760/1080/1350/1920 px (1080 = the 125 % user window) plus a collapsed shot, and prints `natural=` / `overflow=[]` / item rects — the width budget check for any change to a glyph cell. |
 | `tests/test_pixel_glyphs.cpp`, `tests/test_ribbon_layout.cpp`, `tests/test_ribbon_actions.cpp`, `tests/test_ribbon_mainwindow.cpp`, `tests/test_ribbon_ids.cpp` | Crispness/contrast, layout/overflow/tone/collapse, controller-op, QMainWindow-placement + settings migration + quick access, and id-parity regression tests. |
 
 ## Layout
@@ -59,7 +61,7 @@ Type `neverHide`):
 |---|---|
 | **Add** / **Insert** | 4 · 8 · 64 ‖ 1024 · 2048. The strip shows the count alone (`shortLabel`); the `QAction` keeps "Add 4". |
 | **Selection** (id `selected`) | **Carve** (LARGE, teal — the panel's entry point) ‖ Delete (red) · Duplicate · Comment ‖ `000` `FFF` `???` (icon-only) ‖ **Big endian** (checkable) · Ptr → Class · Array. One panel, ordered by what the button does: entry point · edit in place · fill · reshape. The separate **Structure** panel was merged in on 2026-09-06 — it split one question ("I selected some bytes, now what?") across two captions. **RTTI moved OUT** to Home ▸ Panels: it opens a browser window rather than changing the selection. |
-| **Type** | **SIZE-major**: columns are widths, rows are readings — `64:` `32:` `16:` `8:` each holding Hex over Int over UInt, then `Float:` (D F ‖ V2 V3 V4 ‖ M4), `Ptr:`, `Str:`, `Other:` (Bool, Custom…). Kind-major made row 1 read "H64 I64 U64 H8" — the row's meaning broke at the fourth column — and disagreed with the keyboard, where 1-4 pick a WIDTH and S/U/F reinterpret at the existing size. Cheaper too: `64:` fits its column free where `Byte:` inflated one by 13 px. |
+| **Type** | **SIZE-major**: columns are widths, rows are readings — `64` `32` `16` `8` each holding Hex over Int over UInt, then `Float` (D F ‖ V2 V3 V4 ‖ M4), `Ptr`, `Str`, `Other` (Bool, Custom…). Kind-major made row 1 read "H64 I64 U64 H8" — the row's meaning broke at the fourth column — and disagreed with the keyboard, where 1-4 pick a WIDTH and S/U/F reinterpret at the existing size. Cheaper too: `64` fits its column free where `Byte` inflated one by 13 px. |
 
 ## Action ids
 
@@ -88,11 +90,12 @@ All logical px at 10 pt JetBrains Mono (`fm.height()` 17); "device" = physical p
 |---|---|
 | Tab row | `fm.height()+8` = **25**; `background` (the ribbon's own header, *not* `menuBarColor` — that belongs to the title strip alone); one `border` hairline on its last device row. Tabs from `x = kGutter`, `advance + 2·16` wide, `kTabGap = 8` apart — deliberately airier than the strip gutter, they read as words rather than buttons. Text inactive `textDim` / hover `text` / active `text`; **active = 2 device rows of `textDim` on the tab's bottom edge — NEUTRAL, not the accent**. Three stacked tab rows all underlined in purple made the accent meaningless; these tabs switch which *toolbar* you see (navigation, not selection), so the word carries the state and the rule only anchors it. No fill, no box, in any state. |
 | Collapse chevron | 22 × tabRowH at `width() − 6 − 22`. `chevron-up.svg` expanded / `chevron-down.svg` minimized; rest `textDim`, hover `hover` fill + `text` — painted exactly like the `…` item. Hit-tested before the tabs; tooltip "Collapse/Expand the ribbon (Ctrl+F1)". |
-| Body | `background`; padTop 2 + 3 rows × `rowH = max(18, fm.height()+1)` + caption **12** + hairline 1 = **69** → **94** total (minimized: 26). |
-| Panels | width = max(columns, caption + 2), columns centred when the caption wins. `kPanelGap 14`; **one 1-device-px `border` divider at `A.right()+8`** (= 1 + kPanelGap/2; `rect.right()` is inclusive), 2 px clear of both hairlines; none before the first panel; one before the `…` item. `‖` family separators: rows only, `kSepGap 7`; `kColGap 2`. Family separators are painted a step SOFTER than panel dividers (border blended 35 % toward the ribbon ground, floored through the caption contrast ladder): Modify draws 3 dividers and up to 8 separators, and at one ink they were peer rules that hid the panel boundaries. Caption: 9 pt, `textDim` through the ladder, centred in the 12-px rect. A panel with `groupCaption` items draws one caption per column group instead, widening the group's last column when the caption needs it. A group spans from its first column's left edge to its **last column's right edge** (an `endsCaptionGroup` column terminates the run). |
+| Body | `background`, read TOP-DOWN: padTop 2 + caption **12** + captionGap 7 + 3 rows × `rowH = max(18, fm.height()+1)` + hairline 1 = **76** → **101** total (minimized: 26). The caption band moved from the bottom to the top on 2026-09-08; the SUM is the invariant — the doc tabs and everything under them are positioned off `tabRowH + bodyHeight`. |
+| Panels | width = max(columns, caption + 2), columns centred when the caption wins. `kPanelGap 14`; **one 1-device-px `border` divider at `A.right()+8`** (= 1 + kPanelGap/2; `rect.right()` is inclusive), 2 px clear of both hairlines; none before the first panel; one before the `…` item. `‖` family separators: rows only, `kSepGap 7`; `kColGap 2`. Family separators are painted a step SOFTER than panel dividers (border blended 35 % toward the ribbon ground, floored through the caption contrast ladder): Modify draws 3 dividers and up to 8 separators, and at one ink they were peer rules that hid the panel boundaries. Caption: 9 pt, `textDim` through the ladder, centred in the 12-px rect at the TOP of the body (`captionTop = tabRowH + padTop`, items start `captionH + captionGap` below it). A panel with `groupCaption` items draws one caption per column group instead, widening the group's last column when the caption needs it. A group spans from its first column's left edge to its **last column's right edge** (an `endsCaptionGroup` column terminates the run). |
 | Small item | `colW × 18`; icon cell 16 tall, **width per icon kind** (`ribbonIconCellWidth`: TypeGlyph / FillSquares = `8·max(2, len)` → 16 / 24 / 32, unlabelled Add/Insert = 32, else 16) at `(x+3, y+1)`; label from `x+3+cell+4` to `right−6`; width `3 + cell + 4 + text + 6`, icon-only `cell + 6`, `+10` for a `menu` ▾. |
 | Large item | `clamp(text + 8, 48, 80)` (`+10` for a ▾) wide, 54 tall; **icon centred in rows 1–2, label on row 3** — the same line as the third small button of the neighbouring column. Every Large column of a panel takes the panel's widest Large width. Label `ElideRight`. |
-| Pixel glyphs | **one scale per DPR**: `s = ceil(1.6·dpr)` → 2 / 2 / 3 / 4 at 100 / 125 / 150 / 200 %. QMenu / QAction icons use the square 16×16 path (`wide = false`). |
+| Pixel glyphs | Departure Mono at **one DEVICE size per DPR**, from a measured table (`pixelFontSizeDev`): **14** px at 100 / 125 %, **22** at 150 / 200 %. The rule is UNIFORM STEM WIDTH after the alpha threshold, not "a whole multiple of the 11 px design size" — 12 / 16 / 18 / 20 px mix 1-px and 2-px stems and look broken, while 13 / 14 / 15 / 22 do not. 14 is the step up from 11 the user asked for on 2026-09-08 (+25 % cap height, 8 → 10) and it costs the layout nothing: `pixelLabelCellWidth` already reserves the widest LOGICAL advance across every shipped DPI, and the 150 % tier (22 device ÷ 1.5) was already wider than 14 device ÷ 1.0. The fixed BITMAPS (plus, hook arrow, fill squares, ▾) keep their own scale, `s = round(1.6·dpr)` → 2 / 2 / 2 / 3. |
+| Square QMenu / QAction icons | `wide = false` redraws the same label inside a **16×16 logical** cell (QMenu clamps an action icon to `PM_SmallIconSize`, and a 24- / 32-wide ribbon pixmap handed to it would only be smooth-scaled into blur). The strip's size does not fit that cell — “H64” is 27 device px of advance against a 20 device px cell at 125 % — so the square path has **its own size**, `pixelFontSizeSquareDev`: the largest clean size at which a **3-character** reference fits, capped there so a 1-character label cannot balloon out of step with its neighbours, and stepped down further only for a label longer than the reference. Shipped: **8 / 8 / 11 / 14** device px for 3 characters and under, **6 / 8 / 8 / 11** for the one 4-character label (`WSTR`), at 100 / 125 / 150 / 200 %. Before 2026-09-08 this path drew the STRIP's font in the square cell and simply clipped it (`(20 − 27) / 2 = −3`), losing both edges of every 3-character label, while the header comment claimed it was shrunk to fit. |
 | Codicons | rendered **only on integer multiples of the 16-unit grid**: small `16·round(dpr)` device px centred in the cell when it fits, else the cell with AA; large `16·max(2, round(1.5·dpr))` → 32 device at 125 / 150 %, 48 at 200 %. Every referenced SVG must be a 16-unit viewBox (guarded by `test_pixel_glyphs`). `RibbonIconSpec::mirrorH` flips (redo = mirrored `discard`). |
 | States | paint order: opacity → fill → icon + label → underline. **Rest: `text`** for Plain icons and labels — the ribbon is the actionable surface, and dimming it at rest put the toolbar below the document in the hierarchy. Hover: `hover` fill only (the ink does not change). Pressed: `button` fill (`selected` when `button == background`). Checked: `indHoverSpan` + 2 device rows underline. Disabled: `setOpacity(0.40)` of the *same* ink before anything (never `textDim × 0.4`, which lands under 2 : 1). `RibbonItemSpec::destructive` (Delete): the icon is `markerPtr` in every state, the label turns red only under the pointer. |
 | Tones | `ribbonToneColour` is a **ladder**: the asked-for tone → `textDim` → `text`, first at ≥ 3 : 1 wins. (The old cliff jumped straight to `text`, and vs.json's `textMuted` misses the guard by 0.02 — captions rendered at full label brightness.) Purple appears only on the checked state — the active *tab* is neutral `textDim`, so the ribbon spends the accent budget once, not twice; red only on Delete. |
@@ -110,7 +113,7 @@ iconOnly / destructive / data`:
 | `QString shortLabel` | The text painted on the strip when the long label doesn't earn its width ("Add 4" → "4"). The `QAction` keeps `label`, so menus and tooltips stay unambiguous. |
 | `bool keepLabel` | Survives a panel-wide label drop (and a `glyphLabels` panel). |
 | `QString groupCaption` | Starts a caption group at this item's column, spanning until the next `groupCaption` **or an `endsCaptionGroup` column**. A panel with any group caption does not draw its own. The caption rect ends at the last column's right edge, not at the following gap. |
-| `bool endsCaptionGroup` | Closes the open caption group *before* this column without opening one, so a trailing family-less column (`Custom…`) is not swallowed by the last group. Without it `Str:` was painted over `Custom…`. |
+| `bool endsCaptionGroup` | Closes the open caption group *before* this column without opening one, so a trailing family-less column (`Custom…`) is not swallowed by the last group. Without it `Str` was painted over `Custom…`. |
 
 ## Adding a button
 

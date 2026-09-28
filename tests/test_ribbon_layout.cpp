@@ -136,6 +136,7 @@ private slots:
     void largeCellsShareAWidthAndSitOnRowThree();
     void collapseChevron();
     void groupCaptionsSpanTheirColumns();
+    void captionsSitAboveTheirItems();
     void structureKeepsItsWordsEverywhere();
     void bothTabsFitTheUserWindow();
 
@@ -172,7 +173,10 @@ void TestRibbonLayout::basics() {
     QCOMPARE(bar.action(QStringLiteral("type.int32"))->text(), QStringLiteral("Int 32"));
     QVERIFY(!bar.action(QStringLiteral("type.int32"))->icon().isNull());
     QVERIFY(!bar.action(QStringLiteral("sel.delete"))->toolTip().isEmpty());
-    // 94 px at 10 pt: tab row 25 + body 69 (padTop 2 + 3×18 + caption 12 + hairline)
+    // 101 px at 10 pt: tab row 25 + body 76 (padTop 2 + caption 12 + gap 7 +
+    // 3×18 + hairline 1). The caption band moved to the TOP of the body on
+    // 2026-09-08; the total did not move, because everything below the ribbon
+    // is positioned off it.
     QVERIFY2(bar.preferredHeight() >= 94 && bar.preferredHeight() <= 102,
              qPrintable(QStringLiteral("height %1").arg(bar.preferredHeight())));
     QCOMPARE(bar.sizeHint().height(), bar.preferredHeight());
@@ -619,11 +623,12 @@ void TestRibbonLayout::tooltipFollowsHover() {
     bar.resize(1920, bar.preferredHeight());
     QApplication::processEvents();
 
-    // Another item → its text; the caption strip → none; the tab row → none.
+    // Another item → its text; the caption strip (the TOP band of the panel
+    // since 2026-09-08) → none; the tab row → none.
     hoverAt(bar, bar.itemRect(QStringLiteral("sel.delete")).center());
     QCOMPARE(bar.toolTip(), bar.action(QStringLiteral("sel.delete"))->toolTip());
     hoverAt(bar, QPoint(bar.panelRect(QStringLiteral("type")).center().x(),
-                        bar.panelRect(QStringLiteral("type")).bottom() - 3));
+                        bar.panelRect(QStringLiteral("type")).top() + 3));
     QVERIFY(bar.toolTip().isEmpty());
     hoverAt(bar, bar.tabRect(QStringLiteral("home")).center());
     QVERIFY(bar.toolTip().isEmpty());
@@ -782,18 +787,23 @@ void TestRibbonLayout::flatMetrics() {
     bar.resize(1920, bar.preferredHeight());
     const QFontMetrics fm(bar.font());
     QCOMPARE(bar.tabRowHeight(), fm.height() + 8);
-    QCOMPARE(bar.bodyHeight(), 2 + 3 * qMax(18, fm.height() + 1) + 7 + 12 + 1);
+    // padTop + caption + captionGap + 3 rows + hairline. The band ORDER
+    // flipped on 2026-09-08 (caption first); the SUM is the invariant, because
+    // the doc tabs and everything under them sit at tabRowH + bodyHeight.
+    QCOMPARE(bar.bodyHeight(), 2 + 12 + 7 + 3 * qMax(18, fm.height() + 1) + 1);
     QCOMPARE(bar.preferredHeight(), bar.tabRowHeight() + bar.bodyHeight());
     // Tabs: Home first, kTabGap (8) apart, starting on the shared kGutter.
     const QRect modify = bar.tabRect(QStringLiteral("modify")), home = bar.tabRect(QStringLiteral("home"));
     QCOMPARE(home.left(), rcx::kGutter);
     QCOMPARE(modify.left(), home.right() + 1 + 8);
-    // Panels: kPanelGap px gap; first row starts 2 px under the tab row.
+    // Panels: kPanelGap px gap; the CAPTION band starts 2 px under the tab row
+    // and the first item row starts captionH + captionGap below that.
     bar.setCurrentTab(QStringLiteral("modify"));
     const QRect add = bar.panelRect(QStringLiteral("add")), ins = bar.panelRect(QStringLiteral("insert"));
     QCOMPARE(ins.left(), add.right() + 1 + 14);
     QCOMPARE(add.top(), bar.tabRowHeight() + 2);
-    QCOMPARE(add.height(), 3 * qMax(18, fm.height() + 1) + 7 + 12);
+    QCOMPARE(add.height(), 12 + 7 + 3 * qMax(18, fm.height() + 1));
+    QCOMPARE(bar.itemRect(QStringLiteral("add.4")).top(), add.top() + 12 + 7);
     // Small rect is colW × 18 with a per-kind icon cell: H64 (24) column wider
     // than the H8 (16) column by exactly the cell difference (glyph-only).
     // A group caption can add a px or two to its group's last column.
@@ -877,19 +887,20 @@ void TestRibbonLayout::nothingFilledAtRest() {
     QVERIFY2(countColour(img, body, m_dark.indHoverSpan) < 16, "accent in the body at rest");
 
     // A panel's outline rows/cols are plain background (no box): sample the
-    // top row, bottom row (caption bottom) and both side columns of Add.
+    // top row (caption top), bottom row (row 3) and both side columns of Add.
     const QRect add = bar.panelRect(QStringLiteral("add"));
     const QRect addDev = devRect(img, add);
     // Device rows/cols the panel really covers (a rounded devRect can land on
-    // the body hairline one row below the caption).
+    // the body hairline one row below the last item row).
     const int addTop = qFloor(add.top() * dpr + 0.5), addBottom = qFloor((add.bottom() + 1) * dpr - 0.5);
     const int addLeft = qFloor(add.left() * dpr + 0.5), addRight = qFloor((add.right() + 1) * dpr - 0.5);
     QCOMPARE(countColour(img, QRect(addLeft, addTop, addRight - addLeft + 1, 1), m_dark.border), 0);
     QCOMPARE(countColour(img, QRect(addLeft, addBottom, addRight - addLeft + 1, 1), m_dark.border), 0);
     QCOMPARE(countColour(img, QRect(addLeft, addTop, 1, addBottom - addTop + 1), m_dark.border), 0);
     QCOMPARE(countColour(img, QRect(addRight, addTop, 1, addBottom - addTop + 1), m_dark.border), 0);
-    // The caption row is background, not a band.
-    const QRect capDev = devRect(img, QRect(add.left(), add.bottom() - 11, add.width(), 12));
+    // The caption row is background, not a band — it heads the panel now, so
+    // it is the panel's first 12 rows rather than its last.
+    const QRect capDev = devRect(img, QRect(add.left(), add.top(), add.width(), 12));
     QVERIFY(countColour(img, capDev, m_dark.background) > capDev.width() * capDev.height() / 2);
 
     // Exactly one divider column between Add and Insert, at Add.right()+7,
@@ -963,7 +974,12 @@ void TestRibbonLayout::hoverIsFillOnly() {
     // tone put the toolbar below the document in the hierarchy.
     QCOMPARE(countColour(rest, d, m_dark.hover), 0);
     QVERIFY2(countColour(rest, d, m_dark.text) > 0, "rest ink must be `text`");
-    QCOMPARE(countColour(rest, d, ribbonToneColour(m_dark.textDim, m_dark, m_dark.background)), 0);
+    // The old "not one pixel of the dim tone" check is gone. The labels are an
+    // antialiased outline face now, so most of a small glyph is blended edge
+    // and a blend between `text` and the background lands on the dim tone by
+    // arithmetic, not by choice — an exact-colour count can no longer tell a
+    // chosen tone from a rounding artefact. `text` being present is the half
+    // of the contract that still means something, and it is asserted above.
     // Pressed = `button` fill (vs.json: button != background). A press is
     // always preceded by a move in real life; QTest::mousePress isn't.
     hoverAt(bar, r.center());
@@ -1137,7 +1153,9 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     QVERIFY(!bar.overflowedPanelIds().isEmpty());
     const QRect ov = bar.overflowButtonRect();
     QCOMPARE(ov.size(), QSize(22, 18));
-    QCOMPARE(ov.top(), bar.tabRowHeight() + 2 + 18);   // middle row
+    // Middle item row: padTop + caption + captionGap puts row 1 under the
+    // caption band, and the … sits one row down from there.
+    QCOMPARE(ov.top(), bar.tabRowHeight() + 2 + 12 + 7 + 18);
     // Right of the last visible panel: divider at right+7, item at divider+5.
     int lastRight = -1;
     for (const QString& id : {QStringLiteral("add"), QStringLiteral("insert"),
@@ -1234,9 +1252,15 @@ void TestRibbonLayout::captionToneNeverBrighterThanLabel() {
     QApplication::processEvents();
     const QImage img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     const QRect add = bar.panelRect(QStringLiteral("add"));
-    const QRect capDev = devRect(img, QRect(add.left(), add.bottom() - 10, add.width(), 11));
+    const QRect capDev = devRect(img, QRect(add.left(), add.top(), add.width(), 11));
     QCOMPARE(countColour(img, capDev, m_dark.text), 0);
     QVERIFY(countColour(img, capDev, ribbonToneColour(m_dark.textDim, m_dark, m_dark.background)) > 0);
+    // …and the band UNDER it is where the item ink lives, at full `text`.
+    // Together these two are the "caption on top" probe: dim above, bright
+    // below, never the other way round.
+    const QRect itemsDev = devRect(img, QRect(add.left(), add.top() + 19,
+                                              add.width(), add.height() - 19));
+    QVERIFY(countColour(img, itemsDev, m_dark.text) > 0);
 }
 
 // P0 #14: Large cells of one panel share the widest width, and a Large label
@@ -1360,14 +1384,14 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
     struct Group { const char* caption; const char* first; const char* last; };
     const Group groups[] = {
         // SIZE-major now: a column is a WIDTH, its rows are Hex / Int / UInt.
-        {"64:",    "type.hex64",  "type.uint64"},
-        {"32:",    "type.hex32",  "type.uint32"},
-        {"16:",    "type.hex16",  "type.uint16"},
-        {"8:",     "type.hex8",   "type.uint8"},
-        {"Float:", "type.double", "type.mat4x4"},
-        {"Ptr:",   "type.pointer", "type.funcptr"},
-        {"Str:",   "type.utf8",   "type.utf16"},
-        {"Other:", "type.bool",   "type.custom"},
+        {"64",    "type.hex64",  "type.uint64"},
+        {"32",    "type.hex32",  "type.uint32"},
+        {"16",    "type.hex16",  "type.uint16"},
+        {"8",     "type.hex8",   "type.uint8"},
+        {"Float", "type.double", "type.mat4x4"},
+        {"Ptr",   "type.pointer", "type.funcptr"},
+        {"Str",   "type.utf8",   "type.utf16"},
+        {"Other", "type.bool",   "type.custom"},
     };
     for (const Group& g : groups) {
         const QRect a = bar.itemRect(QLatin1String(g.first));
@@ -1379,7 +1403,7 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
                             .arg(QLatin1String(g.caption)).arg(span)
                             .arg(cfm.horizontalAdvance(QLatin1String(g.caption)))));
         // REGRESSION: the caption must sit OVER the columns it names. The
-        // span-width check above passed while "Str:" was painted on top of
+        // span-width check above passed while "Str" was painted on top of
         // "Custom…" — the last group ran to the panel's right edge and every
         // group was shifted right by the gap it had already absorbed.
         const QRect cap = bar.groupCaptionRect(QLatin1String(g.caption));
@@ -1393,10 +1417,10 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
                             .arg(QLatin1String(g.caption))
                             .arg(cap.center().x()).arg(a.left()).arg(b.right())));
     }
-    // Custom… belongs to no family: it terminates "Str:" instead of being
+    // Custom… belongs to no family: it terminates "Str" instead of being
     // swallowed by it, and carries no caption of its own.
     {
-        const QRect str = bar.groupCaptionRect(QStringLiteral("Str:"));
+        const QRect str = bar.groupCaptionRect(QStringLiteral("Str"));
         const QRect custom = bar.itemRect(QStringLiteral("type.custom"));
         QVERIFY(!custom.isNull());
         QVERIFY2(str.right() < custom.left(),
@@ -1408,6 +1432,105 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
     // The reshape commands live in Selection now, not a panel of their own.
     QVERIFY(!bar.panelRect(QStringLiteral("selected")).isNull());
     QVERIFY(bar.panelRect(QStringLiteral("structure")).isNull());
+}
+
+// The caption HEADS its items — the colon in "64" / "32" / "16" points at
+// what comes next, and until 2026-09-08 what came next was the next panel:
+// the list it named was painted above it (user: ": denotes the list is
+// below"). This pins the order on both tabs, for panel captions and group
+// captions alike, plus the invariant that made the move safe: the body is
+// exactly as tall as it was, so nothing under the ribbon moves.
+void TestRibbonLayout::captionsSitAboveTheirItems() {
+    const int kCaptionH = 12, kCaptionGap = 7, kPadTop = 2;
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    const QFontMetrics fm(bar.font());
+    const int rowH = qMax(18, fm.height() + 1);
+    // Unchanged body height — the ONE number the rest of the window is laid
+    // out against.
+    QCOMPARE(bar.bodyHeight(), kPadTop + kCaptionH + kCaptionGap + 3 * rowH + 1);
+    QCOMPARE(bar.preferredHeight(), bar.tabRowHeight() + bar.bodyHeight());
+
+    for (const QString& tab : bar.tabIds()) {
+        bar.setCurrentTab(tab);
+        bar.resize(1920, bar.preferredHeight());
+        QApplication::processEvents();
+        const int captionTop = bar.tabRowHeight() + kPadTop;
+        const int itemsTop   = captionTop + kCaptionH + kCaptionGap;
+
+        // Every item on the tab starts at or below the first item row, and
+        // every panel's rect still covers its caption AND its items.
+        for (const QString& id : bar.actionIds()) {
+            const QRect r = bar.itemRect(id);
+            if (r.isNull()) continue;
+            QVERIFY2(r.top() >= itemsTop,
+                     qPrintable(QStringLiteral("%1 top %2 above the first item row %3")
+                                .arg(id).arg(r.top()).arg(itemsTop)));
+        }
+        // Row 1 really is the first row: some item must sit exactly on it.
+        bool onFirstRow = false;
+        for (const QString& id : bar.actionIds())
+            if (const QRect r = bar.itemRect(id); !r.isNull() && r.top() == itemsTop) onFirstRow = true;
+        QVERIFY2(onFirstRow, qPrintable(tab + QStringLiteral(": no item on the first row")));
+
+        // Panel captions: the caption band is the panel's TOP, its items are
+        // strictly under it, and the panel rect contains both.
+        for (const RibbonPanelSpec& panel : bar.spec()[bar.tabIds().indexOf(tab)].panels) {
+            const QRect pr = bar.panelRect(panel.id);
+            if (pr.isNull()) continue;
+            QCOMPARE(pr.top(), captionTop);
+            QCOMPARE(pr.height(), kCaptionH + kCaptionGap + 3 * rowH);
+            for (const RibbonItemSpec& it : panel.items) {
+                const QRect r = bar.itemRect(it.id);
+                if (r.isNull()) continue;
+                QVERIFY2(r.top() > pr.top() + kCaptionH,
+                         qPrintable(QStringLiteral("%1 overlaps its caption band").arg(it.id)));
+                QVERIFY2(pr.contains(r),
+                         qPrintable(QStringLiteral("%1 outside panel %2").arg(it.id, panel.id)));
+            }
+        }
+    }
+
+    // Group captions ("64", "Float", …) obey the same order: the caption
+    // rect is entirely ABOVE every item rect of the panel it belongs to.
+    bar.setCurrentTab(QStringLiteral("modify"));
+    bar.resize(1920, bar.preferredHeight());
+    QApplication::processEvents();
+    const QRect typePanel = bar.panelRect(QStringLiteral("type"));
+    QVERIFY(!typePanel.isNull());
+    const QStringList captions{QStringLiteral("64"), QStringLiteral("32"), QStringLiteral("16"),
+                               QStringLiteral("8"), QStringLiteral("Float"), QStringLiteral("Ptr"),
+                               QStringLiteral("Str"), QStringLiteral("Other")};
+    for (const QString& c : captions) {
+        const QRect cap = bar.groupCaptionRect(c);
+        QVERIFY2(!cap.isNull(), qPrintable(c));
+        QCOMPARE(cap.top(), typePanel.top());
+        QVERIFY(typePanel.contains(cap));
+        for (const QString& id : bar.actionIds()) {
+            if (!id.startsWith(QStringLiteral("type."))) continue;
+            const QRect r = bar.itemRect(id);
+            if (r.isNull() || !typePanel.contains(r)) continue;
+            QVERIFY2(cap.bottom() < r.top(),
+                     qPrintable(QStringLiteral("%1 caption bottom %2 is not above %3 top %4")
+                                .arg(c).arg(cap.bottom()).arg(id).arg(r.top())));
+        }
+    }
+
+    // Pixel probe: the caption text is painted in the TOP band and the glyph
+    // labels below it — not the other way round. Sampled on the Type panel,
+    // whose captions and labels are the ones the user pointed at.
+    bar.show();
+    QTest::qWait(30);
+    QApplication::processEvents();
+    const QImage img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    const QColor captionInk = ribbonToneColour(m_dark.textDim, m_dark, m_dark.background);
+    const QRect capBand = devRect(img, QRect(typePanel.left(), typePanel.top(),
+                                             typePanel.width(), kCaptionH));
+    const QRect itemBand = devRect(img, QRect(typePanel.left(), typePanel.top() + kCaptionH + kCaptionGap,
+                                              typePanel.width(), 3 * rowH));
+    QVERIFY2(countColour(img, capBand, captionInk) > 0, "no caption ink in the top band");
+    QCOMPARE(countColour(img, capBand, m_dark.text), 0);
+    QVERIFY2(countColour(img, itemBand, m_dark.text) > 0, "no label ink under the caption");
 }
 
 // P1 #18: "gives the three restructuring commands words in every mode".

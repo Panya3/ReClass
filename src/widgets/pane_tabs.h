@@ -1,9 +1,18 @@
 #pragma once
 
 #include "themes/theme.h"
+#include "themes/thememanager.h"
 #include "paintutil.h"
 
+#include <QPaintEvent>
+#include <QResizeEvent>
+#include <QShowEvent>
+#include <QPainter>
+#include <QSplitter>
 #include <QString>
+#include <QTabBar>
+#include <QTabWidget>
+#include <QVBoxLayout>
 
 namespace rcx {
 
@@ -61,5 +70,72 @@ inline QString paneTabStyle(const Theme& t, const QString& family) {
              t.indHoverSpan.name(), family)
         .arg(kGutter);   // the strip's first ink lines up with every other strip
 }
+
+// ── The pane's outline ──
+//
+// The box used to be painted by the CONTENT: main.cpp's EditorContainer drew a
+// 4-edge box around itself. That made the outline track "was this view wrapped
+// in a container" rather than "this is a pane", and it showed three ways:
+// Structure and Code were boxed (both are wrapped), Debug was bare (its
+// QsciScintilla IS the tab page), Both drew TWO boxes (one container per
+// splitter side), and the view-tab strip — outside every container — hung below
+// the box as an unbordered band, pure white on a light theme.
+//
+// So a container around the whole pane draws it instead: one outline, the view
+// tabs inside it, identical in all four view modes. The tab widget is held with
+// a 1-logical-px margin so the edges are never covered by it; painting them on
+// the QTabWidget itself does not work, because its page and tab bar are
+// children that cover the parent completely.
+//
+// EditorContainer keeps only its BOTTOM edge, which is the seam between the
+// document and the tab strip. Any other edge it drew would land on this box's
+// device rows and double.
+//
+// No Q_OBJECT: this declares no signals or slots, and both the functor+context
+// connect and findChildren work without moc (the rule BreadcrumbBar and
+// EnumPickerPopup already follow).
+class PaneBox : public QWidget {
+public:
+    explicit PaneBox(QWidget* inner, QWidget* parent = nullptr) : QWidget(parent) {
+        auto* lay = new QVBoxLayout(this);
+        lay->setContentsMargins(1, 1, 1, 1);   // room for the box
+        lay->setSpacing(0);
+        lay->addWidget(inner);
+        m_inner = inner;
+        applyBoxTheme(ThemeManager::instance().current());
+        connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this,
+                [this](const Theme& t) { applyBoxTheme(t); });
+    }
+
+    QColor boxColor() const { return m_box; }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (!m_box.isValid()) return;
+        QPainter p(this);
+        const QRectF r(rect());
+        rcx::fillTopDeviceRowOfRect(p, r, m_box);
+        rcx::fillBottomDeviceRowOfRect(p, r, m_box);
+        rcx::fillLeftDeviceColOfRect(p, r, m_box);
+        rcx::fillRightDeviceColOfRect(p, r, m_box);
+    }
+
+private:
+    void applyBoxTheme(const Theme& t) {
+        m_box = containerBorderColor(t);
+        // Both mode puts the two views in a splitter inside this box, so its
+        // handle is an interior seam and has to match. Done here so no
+        // theme-apply site has to know the pane owns a splitter.
+        const QString handle = QStringLiteral("QSplitter::handle { background: %1; }")
+                                   .arg(m_box.name());
+        if (m_inner)
+            for (QSplitter* sp : m_inner->findChildren<QSplitter*>())
+                sp->setStyleSheet(handle);
+        update();
+    }
+
+    QWidget* m_inner = nullptr;
+    QColor   m_box;
+};
 
 } // namespace rcx

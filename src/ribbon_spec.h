@@ -334,30 +334,30 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         // made row 1 read "H64 I64 U64 H8" — the row's meaning broke at the
         // fourth column — and it disagreed with the keyboard, where 1-4 pick a
         // WIDTH and S/U/F reinterpret at the existing size. This layout is that
-        // grammar made visible. It is also cheaper: "64:" fits its column free,
+        // grammar made visible. It is also cheaper: "64" fits its column free,
         // where "UInt:" inflated one by 3 px and "Byte:" by 13.
         type.items = {
-            glyph("type.hex64", "Hex 64", "Change to hex64 — 8 raw bytes (key 4)", "H64", GF::Hex, NodeKind::Hex64, false, false, "64:"),
+            glyph("type.hex64", "Hex 64", "Change to hex64 — 8 raw bytes (key 4)", "H64", GF::Hex, NodeKind::Hex64, false, false, "64"),
             glyph("type.int64", "Int 64", "Change to int64_t — signed 8-byte integer (S on an 8-byte field)", "I64", GF::Signed, NodeKind::Int64),
             glyph("type.uint64", "UInt 64", "Change to uint64_t — unsigned 8-byte integer (U on an 8-byte field)", "U64", GF::Unsigned, NodeKind::UInt64),
 
-            glyph("type.hex32", "Hex 32", "Change to hex32 — 4 raw bytes (key 3)", "H32", GF::Hex, NodeKind::Hex32, true, false, "32:"),
+            glyph("type.hex32", "Hex 32", "Change to hex32 — 4 raw bytes (key 3)", "H32", GF::Hex, NodeKind::Hex32, true, false, "32"),
             glyph("type.int32", "Int 32", "Change to int32_t — signed 4-byte integer (S on a 4-byte field)", "I32", GF::Signed, NodeKind::Int32),
             glyph("type.uint32", "UInt 32", "Change to uint32_t — unsigned 4-byte integer (U on a 4-byte field)", "U32", GF::Unsigned, NodeKind::UInt32),
 
-            glyph("type.hex16", "Hex 16", "Change to hex16 — 2 raw bytes (key 2)", "H16", GF::Hex, NodeKind::Hex16, true, false, "16:"),
+            glyph("type.hex16", "Hex 16", "Change to hex16 — 2 raw bytes (key 2)", "H16", GF::Hex, NodeKind::Hex16, true, false, "16"),
             glyph("type.int16", "Int 16", "Change to int16_t — signed 2-byte integer (S on a 2-byte field)", "I16", GF::Signed, NodeKind::Int16),
             glyph("type.uint16", "UInt 16", "Change to uint16_t — unsigned 2-byte integer (U on a 2-byte field)", "U16", GF::Unsigned, NodeKind::UInt16),
 
-            glyph("type.hex8", "Hex 8", "Change to hex8 — 1 raw byte (key 1)", "H8", GF::Hex, NodeKind::Hex8, true, false, "8:"),
+            glyph("type.hex8", "Hex 8", "Change to hex8 — 1 raw byte (key 1)", "H8", GF::Hex, NodeKind::Hex8, true, false, "8"),
             glyph("type.int8", "Int 8", "Change to int8_t — signed byte (S on a 1-byte field)", "I8", GF::Signed, NodeKind::Int8),
             glyph("type.uint8", "UInt 8", "Change to uint8_t — unsigned byte (U on a 1-byte field)", "U8", GF::Unsigned, NodeKind::UInt8),
 
             // One `‖` opens the float group; the columns inside it are plain
             // `|` breaks. Four hairlines through one 4x3 grid contradicted the
-            // grid, and the rule after D/F/B made "Float:" read as the caption
+            // grid, and the rule after D/F/B made "Float" read as the caption
             // for V2/V3/V4 rather than for the whole group.
-            glyph("type.double", "Double", "Change to double — 8-byte float (F on an 8-byte field)", "D", GF::Float, NodeKind::Double, true, true, "Float:"),
+            glyph("type.double", "Double", "Change to double — 8-byte float (F on an 8-byte field)", "D", GF::Float, NodeKind::Double, true, true, "Float"),
             glyph("type.float", "Float", "Change to float — 4-byte float (F on a 4-byte field)", "F", GF::Float, NodeKind::Float),
 
             glyph("type.vec2", "Vec 2", "Change to vec2 — 2 floats, 8 bytes", "V2", GF::Float, NodeKind::Vec2, true),
@@ -366,23 +366,23 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
 
             glyph("type.mat4x4", "Mat 4x4", "Change to mat4x4 — 16 floats, 64 bytes", "M4", GF::Float, NodeKind::Mat4x4, true),
 
-            glyph("type.pointer", "Pointer", "Change to ptr64 — 8-byte pointer (P key)", "PTR", GF::Pointer, NodeKind::Pointer64, true, true, "Ptr:"),
+            glyph("type.pointer", "Pointer", "Change to ptr64 — 8-byte pointer (P key)", "PTR", GF::Pointer, NodeKind::Pointer64, true, true, "Ptr"),
             glyph("type.funcptr", "Func Ptr", "Change to fnptr64 — 8-byte function pointer", "FN*", GF::Pointer, NodeKind::FuncPtr64),
 
-            glyph("type.utf8", "Str", "Change to str — ASCII / UTF-8 text", "STR", GF::Text, NodeKind::UTF8, true, true, "Str:"),
+            glyph("type.utf8", "Str", "Change to str — ASCII / UTF-8 text", "STR", GF::Text, NodeKind::UTF8, true, true, "Str"),
             glyph("type.utf16", "WStr", "Change to wstr — UTF-16 text", "WSTR", GF::Text, NodeKind::UTF16),
 
-            // Bool is a 1-byte flag, not a float. Under "Float:" the caption
+            // Bool is a 1-byte flag, not a float. Under "Float" the caption
             // stated something false about the button beneath it.
-            glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool, true, true, "Other:"),
+            glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool, true, true, "Other"),
         };
         {
             RibbonItemSpec custom = codicon("type.custom", "Custom…",
                                             "Any type by name: opens the inline type editor",
                                             "symbol-misc", GF::Plain, SZ::Small);
             custom.keepLabel = true;   // a word, not a glyph — it survives the drop
-            // Shares the "Other:" column with Bool now, so it no longer has to
-            // close "Str:" with a separator of its own.
+            // Shares the "Other" column with Bool now, so it no longer has to
+            // close "Str" with a separator of its own.
             type.items.append(custom);
         }
         tab.panels.append(type);

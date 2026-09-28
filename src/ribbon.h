@@ -10,16 +10,18 @@
 // addAction()s its actions to a widget — the editor owns the plain keys;
 // shortcuts only show up in tooltips.
 //
-// Layout (10 pt, fm.height 17): tab row fm.height()+3 = 20, body 69
-// (padTop 2 + 3 rows × 18 + caption 12 + hairline 1) → 89 total.
+// Layout (10 pt, fm.height 17): tab row fm.height()+8 = 25, body 76
+// (padTop 2 + caption 12 + gap 7 + 3 rows × 18 + hairline 1) → 101 total.
 //   Flat: no panel boxes, no caption bands — one 1-device-px `border`
 //   divider column per panel gap (kPanelGap 13, divider at A.right()+7),
-//   a 9 pt caption (textDim through the tone LADDER) under each panel, and
-//   hairlines above and below the body. The tab row is `background` too: it
+//   a 9 pt caption (textDim through the tone LADDER) ABOVE each panel, and
+//   hairlines above and below the body. The caption heads its items rather
+//   than trailing them: "64" / "Selection" name the list, and the colon
+//   points at what comes next. The tab row is `background` too: it
 //   is the ribbon's own header, not a second menu strip. Panel = columns of
 //   Small items (3 per column, new column on columnBreakBefore /
 //   separatorBefore / when full) or full-height Large items; a panel whose
-//   items carry `groupCaption`s draws those under their column spans instead
+//   items carry `groupCaption`s draws those over their column spans instead
 //   of one panel caption.
 //   Item tones: rest = `text` (icons and labels — the ribbon is the actionable
 //   surface), hover = `hover` fill, pressed = `button`, checked =
@@ -118,7 +120,7 @@ public:
     bool    itemLabelShown(const QString& id) const;
     QRect   tabRect(const QString& tabId) const;
     QRect   panelRect(const QString& panelId) const;
-    // The rect a per-column group caption ("Hex:", "Str:") is drawn in, on the
+    // The rect a per-column group caption ("Hex", "Str") is drawn in, on the
     // current tab. Null when no laid-out panel carries that caption.
     QRect   groupCaptionRect(const QString& caption) const;
     QStringList overflowedPanelIds() const;
@@ -166,10 +168,10 @@ private:
     };
     struct LaidPanel {
         QString id;
-        QRect   rect;            // items + caption (no box is painted)
+        QRect   rect;            // caption + items (no box is painted)
         QRect   captionRect;
         QVector<int> separatorXs;   // `||` hairlines inside the panel
-        // Per-column-group captions (Type: "Hex:" "Int:" …). Non-empty means
+        // Per-column-group captions (Type: "Hex" "Int:" …). Non-empty means
         // the panel's own caption is NOT drawn.
         QVector<QPair<QRect, QString>> groupCaptions;
         bool    labelsDropped = false;

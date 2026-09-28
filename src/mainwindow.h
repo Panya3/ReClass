@@ -268,6 +268,7 @@ private:
 
     struct SplitPane {
         QTabWidget*    tabWidget = nullptr;
+        QWidget*     paneBox     = nullptr;   // rcx::PaneBox: draws the pane's outline
         RcxEditor*     editor    = nullptr;
         QsciScintilla* rendered  = nullptr;
         QsciScintilla* debugView = nullptr;

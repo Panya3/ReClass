@@ -3231,26 +3231,16 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         explicit EditorContainer() : QWidget() {}
     protected:
         void paintEvent(QPaintEvent*) override {
-            // Border color is stored as a dynamic Qt property so the
-            // theme-apply path can refresh it without needing the
-            // class to be visible at file scope.
-            QColor borderColor = property("borderColor").value<QColor>();
-            if (!borderColor.isValid()) return;
+            // ONLY the bottom edge: the seam between the document and the view
+            // tabs under it. The outline around the whole pane belongs to
+            // rcx::PaneBox now (widgets/pane_tabs.h) — this class used to draw
+            // all four edges, which is why Structure and Code were boxed while
+            // Debug was not and Both drew two boxes. Drawing them here again
+            // would land on the pane box's own device rows and double.
+            const QColor seam = property("borderColor").value<QColor>();
+            if (!seam.isValid()) return;
             QPainter p(this);
-            // Flush 1px box on all four edges, each a device-exact single
-            // pixel via the shared paintutil helpers (same selection the doc
-            // tabs' side borders use, so the seams line up to the device px at
-            // any DPR — no double line, no vanish at fractional scaling). The
-            // top is FLUSH (not pushed down): that's what lets the first/last
-            // tab's side borders run straight into the editor's left/right
-            // borders as one continuous outline; the dock tabs fill their full
-            // rect (CE_TabBarTabShape) + setDrawBase(false), so nothing else
-            // draws a line at the seam.
-            const QRectF r(rect());
-            rcx::fillTopDeviceRowOfRect(p, r, borderColor);
-            rcx::fillBottomDeviceRowOfRect(p, r, borderColor);
-            rcx::fillLeftDeviceColOfRect(p, r, borderColor);
-            rcx::fillRightDeviceColOfRect(p, r, borderColor);
+            rcx::fillBottomDeviceRowOfRect(p, QRectF(rect()), seam);
         }
     };
     {
@@ -3695,7 +3685,11 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     }
 
     // Add to splitter
-    tab.splitter->addWidget(pane.tabWidget);
+    // The PANE draws the outline now, not the content: one box around the
+    // editor AND its view tabs, the same in all four view modes (see
+    // rcx::PaneBox in widgets/pane_tabs.h for why the content stopped).
+    pane.paneBox = new rcx::PaneBox(pane.tabWidget);
+    tab.splitter->addWidget(pane.paneBox);
 
     // Connect per-pane page switching (driven by the pane view tabs)
     QTabWidget* tw = pane.tabWidget;
@@ -5503,7 +5497,14 @@ void MainWindow::unsplitView() {
     if (!tab || tab->panes.size() <= 1) return;
     auto pane = tab->panes.takeLast();
     tab->ctrl->removeSplitEditor(pane.editor);
-    pane.tabWidget->deleteLater();
+    // The splitter's child is the PANE BOX now, not the tab widget (see
+    // createSplitPane), so the panebox is what has to leave the splitter.
+    // deleteLater()ing the tab widget alone removed the child only while the
+    // tab widget was the splitter's direct child; now it is the pane box's
+    // child, so the splitter would keep an empty, outlined box behind. The
+    // pane box owns the tab widget, so one delete takes both.
+    if (pane.paneBox) pane.paneBox->deleteLater();
+    else              pane.tabWidget->deleteLater();
     tab->activePaneIdx = qBound(0, tab->activePaneIdx, tab->panes.size() - 1);
     if (m_ribbonActions) m_ribbonActions->setActiveController(tab->ctrl);
 }

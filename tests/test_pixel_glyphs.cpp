@@ -1,11 +1,13 @@
 // Headless tests for the ribbon's pixel-glyph icons (src/pixelglyphs.h +
 // src/ribbon_icons.h). Locks in:
-//   - crispness: every ink pixel is fully opaque at dpr 1.0 / 1.25 / 2.0
+//   - the ink reaches full strength at dpr 1.0 / 1.25 / 2.0 (the labels are
+//     an antialiased outline face since 2026-09-08, so edges blend by design)
 //     (painted in device pixels, dpr stamped after painting)
 //   - the ink bounding box is exactly pixelLabelWidth·s × kGlyphH·s and fits the cell
 //   - ONE scale per DPR (pixelGlyphScale: 2 / 2 / 3 / 4 at 1.0 / 1.25 / 1.5 /
 //     2.0): "H64" and "F" are the same height; cells are 8·max(2, len) wide
-//   - the square (wide = false) QMenu path never exceeds 16×16
+//   - the square (wide = false) QMenu path FITS 16×16 — its own uniform size
+//     (pixelFontSizeSquareDev), ink identical to the unclipped label
 //   - every ribbon Codicon has a 16-unit viewBox (24-unit icons mis-weight)
 //   - Codicons render at integer multiples of the 16 grid (16 / 32 / 48)
 //   - the ink colour is exactly the requested family colour
@@ -134,10 +136,8 @@ void TestPixelGlyphs::glyphTableHasEveryUsedChar() {
         QVERIFY2(raw.supportsCharacter(c.toUpper()),
                  qPrintable(QStringLiteral("font has no glyph for '%1'").arg(c)));
 
-    // Departure Mono is MONOSPACED and pixel-perfect only at multiples of its
-    // 11 px design size — both are load-bearing. Monospace is what makes the
-    // size-major type matrix line up into columns, and an off-multiple size
-    // would blur the strokes it exists to keep sharp.
+    // Departure Mono is MONOSPACED — load-bearing, because it is what makes
+    // the size-major type matrix line up into columns.
     const QFontMetrics fm(pixelLabelFont(1.25));
     QCOMPARE(fm.horizontalAdvance(QStringLiteral("H")),
              fm.horizontalAdvance(QStringLiteral("W")));
@@ -181,42 +181,51 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded() {
     QCOMPARE(img.width(), cellWDev);
     QCOMPARE(img.height(), cellDev);
 
-    // Crisp: no partial alpha anywhere.
+    // NOT "every pixel is alpha 0 or 255" any more. That pinned the pixel
+    // font's hard alpha threshold, and the labels are the app's outline mono
+    // face as of 2026-09-08: a pixel face has one good size, so "slightly
+    // larger" was impossible with it (11 px stems are 1 device px, every size
+    // above draws 2). What still has to hold is that the glyph is SOLID at its
+    // core — antialiasing may only soften edges, never hollow the ink out.
+    int solid = 0, partial = 0;
     for (int y = 0; y < img.height(); ++y)
         for (int x = 0; x < img.width(); ++x) {
             const int a = qAlpha(img.pixel(x, y));
-            QVERIFY2(a == 0 || a == 255, qPrintable(QStringLiteral("%1@%2: alpha %3 at (%4,%5)")
-                .arg(label).arg(dpr).arg(a).arg(x).arg(y)));
+            if (a == 255) ++solid; else if (a > 0) ++partial;
         }
+    QVERIFY2(solid > 0, qPrintable(QStringLiteral("%1@%2: no solid ink").arg(label).arg(dpr)));
+    // No ratio between solid and partial: at 11 logical px most of a glyph IS
+    // its edges, and the icon is composited from a transparent canvas, so a
+    // high partial count is what correct antialiasing looks like here. The
+    // contract is that the ink reaches full strength somewhere, not that it
+    // avoids blending.
+    Q_UNUSED(partial);
 
     const Bbox b = inkBbox(img);
     QVERIFY2(b.ink > 0, "glyph rendered nothing");
     // The ink fits the advance the layout reserved, and fits the cell.
-    QVERIFY2(b.w() <= pixelLabelWidthDev(label, dpr),
+    QVERIFY2(b.w() <= pixelLabelWidthDev(label, dpr) + 2,
              qPrintable(QStringLiteral("%1@%2: ink %3 wider than its advance")
                         .arg(label).arg(dpr).arg(b.w())));
     QVERIFY(b.minX >= 0 && b.maxX < cellWDev && b.minY >= 0 && b.maxY < cellDev);
 }
 
 void TestPixelGlyphs::scaleRule() {
-    // Departure Mono renders at whole multiples of its 11 px design size, in
-    // DEVICE px: 11 up to 150 %, 22 at 200 %. Anything else and the 1-px
-    // strokes blur, which is the entire reason for using this font.
-    // 12 logical px, clamped so it can never overflow the 16-logical cell.
-    // ALWAYS a whole multiple of the 11 px design size. Off-grid sizes put the
-    // outlines between pixels and the threshold then deforms the letters —
-    // tried at 15 px, and it looked worse than the bitmap font it replaced.
-    QCOMPARE(pixelFontSizeDev(1.0), 11);
-    QCOMPARE(pixelFontSizeDev(1.25), 11);
-    QCOMPARE(pixelFontSizeDev(1.5), 22);
-    QCOMPARE(pixelFontSizeDev(2.0), 22);
+    // The labels are an outline face now, so the size is a free choice in
+    // LOGICAL px scaled by the DPI, not a table of the few device sizes a
+    // pixel face stayed sharp at. kRibbonLabelLogicalPx sits just under the
+    // 9 pt panel captions above the strip.
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
-        QCOMPARE(pixelFontSizeDev(dpr) % kPixelFontDesign, 0);
+        QCOMPARE(pixelFontSizeDev(dpr), qRound(kRibbonLabelLogicalPx * dpr));
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
         QVERIFY2(pixelLabelHeightDev(dpr) <= qRound(16.0 * dpr),
                  qPrintable(QStringLiteral("cap %1 overflows the %2 px cell at dpr %3")
                             .arg(pixelLabelHeightDev(dpr)).arg(qRound(16.0 * dpr)).arg(dpr)));
-    QCOMPARE(pixelLabelFont(1.25).styleStrategy(), QFont::NoAntialias);
+    // The face is ANTIALIASED on purpose now: NoAntialias was what a pixel
+    // font needed to stay on its grid, and the grid is what limited it to a
+    // single usable size. It is fixed-pitch, which is what the column layout
+    // actually depends on.
+    QVERIFY(pixelLabelFont(1.25).fixedPitch());
 
     // The cell contract: every shipped label fits the cell the ONE rule gives
     // it, at every shipped DPI. Worst case is dpr 1.0, where a device px IS a
@@ -242,22 +251,24 @@ void TestPixelGlyphs::uniformScaleAcrossLabels_data() {
 // (and every other label) are now exactly 5·s tall in the same panel.
 void TestPixelGlyphs::uniformScaleAcrossLabels() {
     QFETCH(double, dpr);
-    // Departure Mono at 11 device px (22 at 200 %): every label in a panel is
-    // the same cap height, which is the property this test exists to pin.
+    // ONE font size per DPR: every label in a panel is the same cap height,
+    // which is the property this test exists to pin.
     const int want = pixelLabelHeightDev(dpr);
-    QCOMPARE(pixelFontSizeDev(dpr), 11 * qMax(1, qRound(dpr)));
+    QCOMPARE(pixelFontSizeDev(dpr), qRound(kRibbonLabelLogicalPx * dpr));
     for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
         const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);
         // Every label in a panel shares ONE font size, so their ink boxes are
         // the same height give or take a glyph that does not reach the cap
         // line. That uniformity is the property under test.
-        QVERIFY2(b.h() <= want && b.h() >= want - 2,
+        // +1: an antialiased outline face puts a blended row just past the
+        // metric cap box (an accent or a rounded bowl overshoots by design).
+        QVERIFY2(b.h() <= want + 2 && b.h() >= want - 2,
                  qPrintable(QStringLiteral("%1@%2: ink %3 px tall, cap box %4")
                             .arg(label).arg(dpr).arg(b.h()).arg(want)));
         // Ink may be NARROWER than the advance — a monospaced '1' does not fill
         // its cell — so the bbox only has to FIT the advance.
-        QVERIFY2(b.w() <= pixelLabelWidthDev(QString::fromLatin1(label), dpr),
+        QVERIFY2(b.w() <= pixelLabelWidthDev(QString::fromLatin1(label), dpr) + 2,
                  qPrintable(QStringLiteral("%1@%2: ink %3 px wide exceeds the advance")
                             .arg(label).arg(dpr).arg(b.w())));
     }
@@ -324,30 +335,115 @@ void TestPixelGlyphs::cellWidthsPerKind() {
 }
 
 // refreshOwnActionIcons / QMenu use the square path: a 24- or 32-wide ribbon
-// cell must never be downscaled into a 16×16 QIcon — the label shrinks
-// (1×) inside a 16×16 canvas instead. Distinct cache entry from the wide one.
+// cell must never be smooth-scaled into a 16×16 QIcon, so the label is redrawn
+// at its own size inside a 16×16 canvas. "Fits" is the whole point and was the
+// part that was never true — until 2026-09-08 the square path drew the STRIP's
+// font in the square cell and clipped it ((20 − 27) / 2 = −3 at 125 %), so this
+// test now compares the ink against the same label drawn with no cell at all.
 void TestPixelGlyphs::squarePathFitsSixteen() {
-    RibbonIconSpec h64; h64.kind = RibbonIconSpec::Kind::TypeGlyph; h64.arg = QStringLiteral("H64"); h64.family = GlyphFamily::Hex;
-    RibbonIconSpec fill; fill.kind = RibbonIconSpec::Kind::FillSquares; fill.arg = QStringLiteral("000"); fill.family = GlyphFamily::Hex;
-    RibbonIconSpec wstr; wstr.kind = RibbonIconSpec::Kind::TypeGlyph; wstr.arg = QStringLiteral("WSTR"); wstr.family = GlyphFamily::Text;
-    for (double dpr : {1.0, 1.25, 2.0}) {
-        for (const RibbonIconSpec* sp : {&h64, &fill, &wstr}) {
+    // The size is CAPPED at the 3-character fit, so a short label cannot
+    // balloon: "F" and "H64" are the same size in the same menu. Only a label
+    // longer than the reference steps down, and only "WSTR" is.
+    // Pins the PROPERTIES, not a table of sizes: the fitted size is a search
+    // over a font's metrics, so hard numbers only described the pixel face the
+    // strip used before 2026-09-08 and would have to be re-typed for any other.
+    for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
+        const int cellDev = qRound(16 * dpr);
+        const int modal   = pixelFontSizeSquareDev(QStringLiteral("H64"), cellDev, dpr);
+        const int one     = pixelFontSizeSquareDev(QStringLiteral("F"), cellDev, dpr);
+        const int longest = pixelFontSizeSquareDev(QStringLiteral("WSTR"), cellDev, dpr);
+        // Capped at the 3-character fit: a short label cannot balloon, so "F"
+        // and "H64" are the same size in the same menu.
+        QCOMPARE(one, modal);
+        // Only a label longer than the reference steps down, and never up.
+        QVERIFY2(longest <= modal, qPrintable(QStringLiteral(
+            "dpr %1: WSTR fitted %2 > H64 %3").arg(dpr).arg(longest).arg(modal)));
+        // Whatever it picked has to actually fit the square cell.
+        for (const QString& l : {QStringLiteral("H64"), QStringLiteral("F"), QStringLiteral("WSTR")})
+            QVERIFY2(pixelLabelWidthDevAt(l, pixelFontSizeSquareDev(l, cellDev, dpr)) <= cellDev,
+                     qPrintable(QStringLiteral("dpr %1: %2 overflows the %3 px cell").arg(dpr).arg(l).arg(cellDev)));
+    }
+
+    // The REAL vocabulary — every glyph the menus can show, not a hand-picked
+    // three. A label longer than the reference is allowed (it steps down a
+    // notch), but nothing may be so long that even the floor size overflows
+    // the smallest cell: that is the branch pixelFontSizeSquareDev documents
+    // as unreachable, and this is what keeps it unreachable.
+    QVector<RibbonIconSpec> vocab;
+    for (const RibbonTabSpec& tab : defaultRibbonSpec())
+        for (const RibbonPanelSpec& panel : tab.panels)
+            for (const RibbonItemSpec& it : panel.items) {
+                if (it.icon.kind != RibbonIconSpec::Kind::TypeGlyph
+                 && it.icon.kind != RibbonIconSpec::Kind::FillSquares) continue;
+                QVERIFY2(pixelLabelWidthDevAt(it.icon.arg, 6) <= 16,
+                         qPrintable(QStringLiteral("%1 is %2 device px wide even at the 6 px "
+                                                   "floor — it cannot fit the 16 px square cell")
+                                    .arg(it.icon.arg)
+                                    .arg(pixelLabelWidthDevAt(it.icon.arg, 6))));
+                vocab.append(it.icon);
+            }
+    QVERIFY(vocab.size() >= 20);
+
+    // Same label, same size, drawn with room to spare: the ink box a square
+    // icon must reproduce EXACTLY if it is not clipping.
+    auto unclipped = [](const QString& label, int sizeDev) {
+        QImage big(256, 128, QImage::Format_ARGB32_Premultiplied);
+        big.fill(Qt::transparent);
+        { QPainter p(&big); drawPixelLabelAt(p, 40, 40, label, sizeDev, QColor(Qt::white)); }
+        return inkBbox(big);
+    };
+
+    for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
+        const int cellDev = qRound(16 * dpr);
+        for (const RibbonIconSpec& spec : vocab) {
+            const RibbonIconSpec* sp = &spec;
+            const int sz = pixelFontSizeSquareDev(sp->arg, cellDev, dpr);
             RibbonIconOptions sq; sq.wide = false;
             const QPixmap square = ribbonIcon(*sp, RibbonIconSize::Small, dpr, m_dark, sq);
             const QPixmap wide = ribbonIcon(*sp, RibbonIconSize::Small, dpr, m_dark);
             const QImage si = straight(square), wi = straight(wide);
-            QCOMPARE(si.width(), qRound(16 * dpr));
-            QCOMPARE(si.height(), qRound(16 * dpr));
+            QCOMPARE(si.width(), cellDev);
+            QCOMPARE(si.height(), cellDev);
             QCOMPARE(wi.width(), qRound(ribbonIconCellWidth(*sp) * dpr));
             QVERIFY(square.cacheKey() != wide.cacheKey());
+
+            // The fit contract: advance and cap box both inside the cell, so
+            // the centred label cannot land at a negative x.
+            QVERIFY2(pixelLabelWidthDevAt(sp->arg, sz) <= cellDev,
+                     qPrintable(QStringLiteral("%1@%2: advance %3 overflows the %4 px square")
+                                .arg(sp->arg).arg(dpr)
+                                .arg(pixelLabelWidthDevAt(sp->arg, sz)).arg(cellDev)));
+            QVERIFY(pixelLabelHeightDevAt(sz) <= cellDev);
+
             const Bbox b = inkBbox(si);
             QVERIFY2(b.ink > 0, qPrintable(sp->arg + QStringLiteral(" square path is blank")));
-            QVERIFY(b.maxX < si.width() && b.maxY < si.height());
+            QVERIFY(b.minX >= 0 && b.maxX < si.width() && b.minY >= 0 && b.maxY < si.height());
+
+            // Every pixel of the glyph is present. The fill composite carries a
+            // squares strip too, so its ink box is as wide as the wider of the
+            // two — the label alone cannot be narrower than its unclipped self.
+            const Bbox ref = unclipped(sp->arg, sz);
+            if (sp->kind == RibbonIconSpec::Kind::TypeGlyph) {
+                QVERIFY2(qAbs(b.w() - ref.w()) <= 1 && qAbs(b.h() - ref.h()) <= 1,
+                         qPrintable(QStringLiteral("%1@%2: square ink %3x%4, unclipped %5x%6")
+                                    .arg(sp->arg).arg(dpr).arg(b.w()).arg(b.h())
+                                    .arg(ref.w()).arg(ref.h())));
+            } else {
+                QVERIFY2(b.w() >= ref.w(),
+                         qPrintable(QStringLiteral("%1@%2: composite ink %3 narrower than its "
+                                                   "label's %4 — the label is clipped")
+                                    .arg(sp->arg).arg(dpr).arg(b.w()).arg(ref.w())));
+            }
+
+            // The face is antialiased now, so edges blend by design. What must
+            // not happen is a DOWNSCALE, which leaves a grey ghost with no
+            // full-strength pixel anywhere: assert the ink reaches full alpha.
+            int solidPx = 0;
             for (int y = 0; y < si.height(); ++y)
-                for (int x = 0; x < si.width(); ++x) {
-                    const int a = qAlpha(si.pixel(x, y));
-                    QVERIFY2(a == 0 || a == 255, "square path must stay crisp (no downscale)");
-                }
+                for (int x = 0; x < si.width(); ++x)
+                    if (qAlpha(si.pixel(x, y)) == 255) ++solidPx;
+            QVERIFY2(solidPx > 0, qPrintable(QStringLiteral("%1@%2: no full-strength ink")
+                                             .arg(sp->arg).arg(dpr)));
         }
     }
 }
@@ -489,14 +585,17 @@ void TestPixelGlyphs::inkColourIsExact() {
     for (const auto& l : m_labels) {
         const QColor want = ribbonFamilyColour(l.second, m_dark, m_dark.background);
         const QImage img = straight(typeGlyphIcon(l.first, l.second, 16, 1.0, m_dark));
+        // Only FULL-strength pixels: the face is antialiased since 2026-09-08,
+        // so a mean over every touched pixel is dragged toward the ground by
+        // the blended edges and no longer measures the chosen ink at all.
         long r = 0, g = 0, b = 0; int n = 0;
         for (int y = 0; y < img.height(); ++y)
             for (int x = 0; x < img.width(); ++x) {
                 const QRgb px = img.pixel(x, y);
-                if (qAlpha(px) == 0) continue;
+                if (qAlpha(px) != 255) continue;
                 r += qRed(px); g += qGreen(px); b += qBlue(px); ++n;
             }
-        QVERIFY(n > 0);
+        QVERIFY2(n > 0, qPrintable(QStringLiteral("%1: no full-strength ink").arg(l.first)));
         const QColor got(int(r / n), int(g / n), int(b / n));
         QVERIFY2(qAbs(got.red() - want.red()) <= 1 && qAbs(got.green() - want.green()) <= 1
                  && qAbs(got.blue() - want.blue()) <= 1,
@@ -566,12 +665,13 @@ void TestPixelGlyphs::compositesFitAndAreCrisp() {
                     QCOMPARE(img.height(), cell);
                     const Bbox b = inkBbox(img);
                     QVERIFY2(b.ink > 0, qPrintable(tag + QStringLiteral(" empty")));
-                    // Whole device pixels only — no anti-aliasing anywhere.
+                    // The outline face blends its edges; the ink must still
+                    // reach full strength somewhere.
+                    int solidPx = 0;
                     for (int y = 0; y < img.height(); ++y)
-                        for (int x = 0; x < img.width(); ++x) {
-                            const int a = qAlpha(img.pixel(x, y));
-                            QVERIFY2(a == 0 || a == 255, qPrintable(tag + QStringLiteral(" alpha %1").arg(a)));
-                        }
+                        for (int x = 0; x < img.width(); ++x)
+                            if (qAlpha(img.pixel(x, y)) == 255) ++solidPx;
+                    QVERIFY2(solidPx > 0, qPrintable(tag + QStringLiteral(" no full-strength ink")));
                     // Ink stays inside the cell with a margin on the short axis.
                     QVERIFY2(b.minX >= 0 && b.maxX < img.width()
                              && b.minY > 0 && b.maxY < img.height() - 1, qPrintable(tag + " overflows"));
@@ -606,11 +706,11 @@ void TestPixelGlyphs::compositesFitAndAreCrisp() {
             QVERIFY(b.ink > 0);
             QVERIFY(b.w() <= img.width() && b.h() <= img.height());
             QCOMPARE(img.height(), cell);
+            int solidPx = 0;
             for (int y = 0; y < img.height(); ++y)
-                for (int x = 0; x < img.width(); ++x) {
-                    const int a = qAlpha(img.pixel(x, y));
-                    QVERIFY(a == 0 || a == 255);
-                }
+                for (int x = 0; x < img.width(); ++x)
+                    if (qAlpha(img.pixel(x, y)) == 255) ++solidPx;
+            QVERIFY(solidPx > 0);
         }
         // Delete ✕ is markerPtr.
         {

@@ -11,7 +11,9 @@
         <!-- Departure Mono by Helena Zhang, SIL OFL 1.1 (no Reserved Font
              Name). The licence text ships beside it in src/fonts/ and must
              stay with any redistribution. Used ONLY for the ribbon type
-             glyphs, at exact multiples of its 11 px design size. -->
+             glyphs, at the measured device sizes in pixelglyphs.h — the rule
+             is uniform stem width after the alpha threshold, NOT whole
+             multiples of the 11 px design size. -->
         <file alias="DepartureMono.otf">fonts/DepartureMono-Regular.otf</file>
     </qresource>
     <qresource prefix="/vsicons">

@@ -294,14 +294,17 @@ RibbonBar::Metrics RibbonBar::metrics() const {
     m.tabRowH  = fm.height() + 8;              // 25 at 10 pt (4 px of air above/below)
     m.rowH     = qMax(18, fm.height() + 1);    // 18
     m.captionH = 12;                           // 9 pt caption; glyphs overhang the rect
-    // 7, not 4: the clear space under row 3 must EXCEED the 7.8 px between
-    // item rows, or the caption band reads as a fourth row of buttons.
+    // The body reads TOP-DOWN: padTop, caption band, captionGap, 3 item rows,
+    // the closing hairline. captionGap is 7, not 4, because the clear space
+    // between the caption and the item row next to it must EXCEED the 7.8 px
+    // between item rows — otherwise the caption band reads as a fourth row of
+    // buttons rather than a heading over them.
     m.captionGap = 7;
     m.padTop   = 2;
-    // padTop + 3 rows + captionGap + caption + body bottom hairline -> 73; 98 with
-    // the tab row. The gap is why the captions no longer sit right on the third
-    // row of buttons (user, 2026-09-06: "needs a little more room above").
-    m.bodyH = m.padTop + 3 * m.rowH + m.captionGap + m.captionH + 1;
+    // padTop + caption + captionGap + 3 rows + body bottom hairline -> 76; 101
+    // with the tab row. The band ORDER changed on 2026-09-08 (caption first),
+    // the arithmetic did not: nothing below the ribbon may move.
+    m.bodyH = m.padTop + m.captionH + m.captionGap + 3 * m.rowH + 1;
     const qreal dpr = devicePixelRatioF() > 0 ? devicePixelRatioF() : 1.0;
     m.smallIcon    = 16;
     m.largeIconDev = ribbonLargeIconDev(dpr);
@@ -359,9 +362,13 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
     const Metrics m = metrics();
     const QFontMetrics fm(font());
     const QFontMetrics cfm(captionFont());
-    const int itemsTop = m.tabRowH + m.padTop;
-    const int itemsH   = 3 * m.rowH;
-    const int captionTop = itemsTop + itemsH + m.captionGap;
+    // Caption band FIRST, items under it. The captions read as headings —
+    // "64" / "32" / "Selection" name the list, and a colon points at what
+    // follows it, so a caption painted under its own column said the opposite
+    // of what it meant (user, 2026-09-08: ": denotes the list is below").
+    const int captionTop = m.tabRowH + m.padTop;
+    const int itemsTop   = captionTop + m.captionH + m.captionGap;
+    const int itemsH     = 3 * m.rowH;
 
     int x = kLeftMargin;
     int column = 0;
@@ -494,7 +501,7 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
             ++column;
         }
         closeGroup();
-        lp.rect = QRect(panelX, itemsTop, panelW, itemsH + m.captionGap + m.captionH);
+        lp.rect = QRect(panelX, captionTop, panelW, m.captionH + m.captionGap + itemsH);
         lp.captionRect = QRect(panelX, captionTop, panelW, m.captionH);
         // One divider per gap (none before the first panel).
         if (!L.panels.isEmpty()) L.dividerXs << L.panels.last().rect.right() + kDividerInset;
@@ -961,7 +968,8 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
     const Theme& t = m_theme;
     const int bodyTop = m.tabRowH;
     const int bodyBottom = bodyTop + m.bodyH;          // exclusive
-    const int itemsTop = bodyTop + m.padTop;
+    // Same band order as computeLayout: caption on top, items under it.
+    const int itemsTop = bodyTop + m.padTop + m.captionH + m.captionGap;
     const int itemsH = 3 * m.rowH;
     const qreal dpr = devicePixelRatioF();
 
@@ -1123,7 +1131,7 @@ void RibbonBar::paintItem(QPainter& p, const LaidItem& li, const Metrics& m) {
             p.drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter, ribbonStripLabel(*spec));
         } else {
             // Centred in its own cell normally — but LEFT-aligned when the
-            // column is widened by a labelled neighbour. "Other:" holds the
+            // column is widened by a labelled neighbour. "Other" holds the
             // Bool glyph over "Custom…"; centred, the 22-px "B" floated in the
             // middle of an 84-px column above a left-aligned word, and its
             // hover fill was an 84-px band for a 22-px mark.
