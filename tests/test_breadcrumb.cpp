@@ -1510,13 +1510,13 @@ private slots:
     void testSourceChipClickOpensPopupUnderTheBar() {
         // Click the chip → sourcePopupRequested with the anchor on the bar's
         // bottom edge → the controller's SourceChooserPopup opens there and
-        // the chip reads pressed until the popup hides, by any route.
+        // the chip stays t.hover until the popup hides, by any route.
         //
         // A Qt::Popup cannot keep OS focus on the hidden test desktop: the
         // first event pump after show() takes it away again and the platform
         // closes the popup (the artifact behind test_source_chooser's
-        // exposure failures). So the pressed probe grabs BEFORE the pump and
-        // the un-pressed probe after it — the platform's close and an
+        // exposure failures). So the menu-open probe grabs BEFORE the pump
+        // and the released probe after it — the platform's close and an
         // explicit hide() both leave through hideEvent → dismissed().
         QApplication::processEvents();
         AddressBar* bar = m_editor->addressBar();

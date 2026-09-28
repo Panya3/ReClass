@@ -1,7 +1,9 @@
 #pragma once
 
+#include "paintutil.h"
 #include "themes/thememanager.h"
 #include "widgets/fuzzy_match.h"
+#include "widgets/popup_chrome.h"
 
 #include <QFrame>
 #include <QVBoxLayout>
@@ -15,6 +17,7 @@
 #include <QKeyEvent>
 #include <QApplication>
 #include <QScreen>
+#include <QScrollBar>
 #include <QSettings>
 #include <QFontMetrics>
 
@@ -25,7 +28,10 @@ namespace rcx {
 // src/typeselectorpopup.cpp (search field, custom-painted rows with a
 // 2 px accent stripe + colored pip, fuzzy filter, footer crumb) so an
 // enum click feels like the same family of UI as opening the type
-// chooser.
+// chooser. Its chrome is the popup family rule (the comment above
+// SourceChooserPopup::paintEvent, src/sourcechooserpopup.cpp): ONE
+// surface inside ONE device-exact frame, the field with its own seam, the
+// footer's seam a device row of the popup's, the local 6-px scrollbar.
 // Intentionally no Q_OBJECT — we'd otherwise need to add this header to
 // every test target's source list for AUTOMOC. A std::function callback
 // gets the same job done with zero moc footprint.
@@ -38,16 +44,19 @@ public:
     using ChosenFn = std::function<void(int64_t)>;
 
     explicit EnumPickerPopup(QWidget* parent = nullptr)
-        : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint)
+        : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint)
     {
-
         auto* outer = new QVBoxLayout(this);
-        outer->setContentsMargins(6, 5, 6, 5);
-        outer->setSpacing(3);
+        // 1 logical px on every side: the frame's device row / column lives
+        // inside the first logical px (paintEvent), so the field, the list
+        // and its scrollbar end AT the frame instead of on it, and the rows
+        // and every seam span this interior width.
+        outer->setContentsMargins(1, 1, 1, 1);
+        outer->setSpacing(0);
 
-        // ── Title row: "enum Name" + Esc hint ──
+        // ── Title row: "enum Name" + Esc hint, at the house gutter ──
         auto* topRow = new QHBoxLayout;
-        topRow->setContentsMargins(0, 0, 0, 0);
+        topRow->setContentsMargins(kGutter, 6, 6, 2);
         topRow->setSpacing(6);
         m_title = new QLabel(this);
         m_title->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
@@ -57,9 +66,11 @@ public:
         topRow->addWidget(m_escLabel);
         outer->addLayout(topRow);
 
-        // ── Filter (visible only when >10 members) ──
-        m_filter = new QLineEdit(this);
+        // ── Filter (visible only when >10 members): the popup surface plus
+        // its own device-exact seam (PopupFilterField) ──
+        m_filter = new PopupFilterField(this);
         m_filter->setPlaceholderText(QStringLiteral("Filter members..."));
+        m_filter->setFrame(false);
         m_filter->installEventFilter(this);
         connect(m_filter, &QLineEdit::textChanged, this,
                 [this] { applyFilter(); });
@@ -67,10 +78,11 @@ public:
 
         // ── List ──
         m_model = new Model(this);
-        m_view = new QListView(this);
+        m_view = new ListView(this);
         m_view->setModel(m_model);
         m_view->setUniformItemSizes(true);
         m_view->setFrameShape(QFrame::NoFrame);
+        m_view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_view->setSelectionMode(QAbstractItemView::SingleSelection);
         m_view->setMouseTracking(true);
         m_delegate = new Delegate(m_model, this);
@@ -82,10 +94,11 @@ public:
                 [this](const QModelIndex& idx) { acceptRow(idx); });
         outer->addWidget(m_view, 1);
 
-        // ── Footer crumb ──
+        // ── Footer crumb: the same surface; the popup paints its seam ──
         m_footer = new QLabel(this);
         m_footer->setFixedHeight(20);
         m_footer->setTextFormat(Qt::RichText);
+        m_footer->setContentsMargins(kGutter, 0, 6, 0);
         m_footer->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
         outer->addWidget(m_footer);
 
@@ -118,15 +131,12 @@ public:
                 break;
             }
         }
-        QFontMetrics fm(font());
-        const int rows = qMin(m_model->rowCount(), 14);
-        const int rowH = m_delegate->rowHeight();
-        const int listH = qMax(rowH * rows, rowH);
-        const int titleH = m_title->sizeHint().height();
-        const int filterH = m_filter->isVisible() ? m_filter->sizeHint().height() + 3 : 0;
-        const int footerH = m_footer->height() + 3;
-        const int margins = 5 + 5 + 3;
-        const int totalH = titleH + filterH + listH + footerH + margins;
+        // Height from the real hints: the rows through ListView::sizeHint
+        // (at most 14 of them), the chrome through the layout — not a
+        // hand-summed table of paddings that drifts from the widgets.
+        layout()->invalidate();
+        layout()->activate();
+        const int totalH = layout()->sizeHint().height();
         const int totalW = qMax(280, computePreferredWidth());
 
         // Clamp to screen so we don't render off-edge.
@@ -148,12 +158,18 @@ public:
     void setOnChosen(ChosenFn fn) { m_onChosen = std::move(fn); }
 
 protected:
-    void paintEvent(QPaintEvent* e) override {
-        QFrame::paintEvent(e);
+    // The popup family rule: ONE surface, ONE device-exact theme.border
+    // frame (fillDeviceFrameOfRect), the footer's seam one device row of
+    // containerBorderColor across the interior. Was a 1-logical QPen in
+    // borderFocused — two device rows at some phases of 125 %, and the
+    // focus colour on a frame that has no focus.
+    void paintEvent(QPaintEvent*) override {
+        const auto& t = ThemeManager::instance().current();
         QPainter p(this);
-        p.setPen(QPen(ThemeManager::instance().current().borderFocused, 1));
-        p.setBrush(Qt::NoBrush);
-        p.drawRect(rect().adjusted(0, 0, -1, -1));
+        p.setRenderHint(QPainter::Antialiasing, false);
+        p.fillRect(rect(), t.background);
+        fillTopDeviceRowOfRect(p, QRectF(m_footer->geometry()), containerBorderColor(t));
+        fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
     }
 
     bool eventFilter(QObject* obj, QEvent* ev) override {
@@ -200,6 +216,19 @@ protected:
     }
 
 private:
+    // ── The list ── sizeHint is the real content height, at most 14 rows,
+    // so show() sizes the popup from layout()->sizeHint().
+    class ListView : public QListView {
+    public:
+        using QListView::QListView;
+        QSize sizeHint() const override {
+            const int rows = model() ? qMin(model()->rowCount(), 14) : 0;
+            const int rowH = static_cast<Delegate*>(itemDelegate())->rowHeight();
+            return QSize(QListView::sizeHint().width(),
+                         qMax(rowH, rowH * rows) + 2 * frameWidth());
+        }
+    };
+
     // ── Custom model ── (no Q_OBJECT; subclass uses only inherited signals)
     class Model : public QAbstractListModel {
     public:
@@ -388,6 +417,9 @@ private:
             sortedMp[i] = std::move(mp[order[i]]);
         }
         m_model->setRows(std::move(sortedVis), std::move(sortedMp));
+        // The list's sizeHint follows its rows; the layout caches it until
+        // the widget says otherwise, and show() sizes from the layout.
+        m_view->updateGeometry();
         updateFooter();
     }
 
@@ -432,20 +464,21 @@ private:
         m_footer->setFont(small);
         m_escLabel->setFont(small);
 
-        setAutoFillBackground(true);
+        // The ground is painted (paintEvent); the palette still names it
+        // for children that ask.
         QPalette pp = palette();
         pp.setColor(QPalette::Window, t.background);
+        pp.setColor(QPalette::WindowText, t.text);
         setPalette(pp);
 
         m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; }").arg(t.text.name()));
         m_escLabel->setStyleSheet(QStringLiteral("QLabel { color: %1; padding: 0 4px; }")
                                   .arg(t.textFaint.name()));
-        m_filter->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: 1px solid %4;"
-            " border-radius: 2px; padding: 2px 6px; }"
-            "QLineEdit:focus { border: 1px solid %5; }")
-            .arg(t.background.name(), t.textDim.name(), t.hover.name(),
-                 t.border.name(), t.borderFocused.name()));
+        // The field: the popup surface plus its own device-exact seam — no
+        // box, no radius (it was the one rounded QSS box in the family).
+        m_filter->applyTheme(t, t.background, kGutter - 2);
+        m_filter->setFixedHeight(qMax(PopupFilterField::kMinHeight,
+                                      QFontMetrics(mono).height() + 8));
         QPalette vp = m_view->palette();
         vp.setColor(QPalette::Base, t.background);
         vp.setColor(QPalette::Text, t.text);
@@ -456,15 +489,18 @@ private:
             "QListView { background: %1; border: none; }"
             "QAbstractScrollArea::corner { background: %1; border: none; }")
             .arg(t.background.name()));
-        m_footer->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; background: %2; border-top: 1px solid %3;"
-            " padding: 0 6px; }")
-            .arg(t.textFaint.name(), t.backgroundAlt.name(), t.border.name()));
+        // The scrollbar: the popup's local 6-px rule, not the app-wide rod.
+        m_view->verticalScrollBar()->setStyleSheet(popupScrollBarQss(t, t.background));
+        // The footer is the same surface (it was a backgroundAlt band under
+        // a 1-logical border-top); its seam is the popup's (paintEvent).
+        m_footer->setStyleSheet(QStringLiteral("QLabel { color: %1; }")
+                                .arg(t.textFaint.name()));
+        update();
     }
 
     QLabel* m_title = nullptr;
     QLabel* m_escLabel = nullptr;
-    QLineEdit* m_filter = nullptr;
+    PopupFilterField* m_filter = nullptr;
     QListView* m_view = nullptr;
     QLabel* m_footer = nullptr;
     Model* m_model = nullptr;

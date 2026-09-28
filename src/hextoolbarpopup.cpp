@@ -1,6 +1,8 @@
 #include "hextoolbarpopup.h"
 #include "themes/thememanager.h"
 #include "fontutil.h"
+#include "paintutil.h"
+#include "widgets/popup_chrome.h"
 #include <QPainter>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -29,7 +31,10 @@ HexToolbarPopup::HexToolbarPopup(QWidget* parent)
     setMouseTracking(true);
     setFocusPolicy(Qt::StrongFocus);
 
-    m_offsetEdit = new QLineEdit(this);
+    // The fill-to-offset field: the popup surface plus its own device-exact
+    // seam (PopupFilterField, themed per paint below), never a QSS box.
+    m_offsetEdit = new PopupFilterField(this);
+    m_offsetEdit->setFrame(false);
     m_offsetEdit->setPlaceholderText(QStringLiteral("0x"));
     m_offsetEdit->setFixedWidth(60);
     m_offsetEdit->setFixedHeight(18);
@@ -214,12 +219,12 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
     if (size() != needed)
         const_cast<HexToolbarPopup*>(this)->setFixedSize(needed);
 
-    // Background + border
-    p.fillRect(rect(), t.backgroundAlt);
-    p.fillRect(0, 0, width(), 1, t.border);
-    p.fillRect(0, height() - 1, width(), 1, t.border);
-    p.fillRect(0, 0, 1, height(), t.border);
-    p.fillRect(width() - 1, 0, 1, height(), t.border);
+    // The popup family rule (the comment above SourceChooserPopup::paintEvent,
+    // src/sourcechooserpopup.cpp): ONE surface — theme.background, not the
+    // tooltip's backgroundAlt — inside ONE device-exact theme.border frame.
+    // Four 1-logical strips snapped to one or two device rows at 125 %.
+    p.fillRect(rect(), t.background);
+    fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
 
     int x = pad, y = pad;
     m_hits.clear();
@@ -262,7 +267,7 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         QRect pinR(width() - pad - pinSz, y, pinSz, pinSz);
         QPoint mp = mapFromGlobal(QCursor::pos());
         bool pinHov = pinR.contains(mp);
-        p.fillRect(pinR, pinHov ? t.hover : t.backgroundAlt);
+        p.fillRect(pinR, pinHov ? t.hover : t.background);
 
         QIcon pinIcon(m_pinned ? QStringLiteral(":/vsicons/pinned.svg")
                                : QStringLiteral(":/vsicons/pin.svg"));
@@ -271,7 +276,9 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
     }
 
     y += lineH + 2;
-    p.fillRect(pad, y, width() - 2 * pad, 1, t.border);
+    // The seam under the size row: one device row of containerBorderColor
+    // across the interior width, the family's interior seam.
+    fillTopDeviceRowOfRect(p, QRectF(1, y, width() - 2, 1), containerBorderColor(t));
     y += 3;
 
     // ── Preview ──
@@ -407,14 +414,10 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         int lw = fm.horizontalAdvance(label);
         p.drawText(pad, y, lw, lineH, Qt::AlignVCenter | Qt::AlignLeft, label);
 
-        // Position the line edit
+        // Position the line edit; its theme is re-asserted here because the
+        // popup has no applyTheme of its own (a no-op when nothing changed).
         m_offsetEdit->move(pad + lw + 4, y + (lineH - m_offsetEdit->height()) / 2);
-        const auto& theme = t;
-        m_offsetEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: 1px solid %3; padding: 0 2px; }"
-            "QLineEdit:focus { border-color: %4; }")
-            .arg(theme.background.name(), theme.text.name(),
-                 theme.border.name(), theme.borderFocused.name()));
+        static_cast<PopupFilterField*>(m_offsetEdit)->applyTheme(t, t.background);
         m_offsetEdit->show();
 
         // Go button

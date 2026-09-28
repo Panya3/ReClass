@@ -16,7 +16,11 @@
 // border and the scrollbar over the right one); the body is one surface
 // (the filter was a backgroundAlt strip); the accent is spent on the one
 // word "active"; the scrollbar lives inside the frame and appears only when
-// the list truly cannot fit below the anchor.
+// the list truly cannot fit below the anchor; the section hairlines and the
+// Clear All divider run under the scroll track to the right frame; a
+// disabled Clear All never lights t.hover; setSources() while up re-fits the
+// height in place; a flipped popup ends above the bar, not on its bottom
+// edge.
 #include <QtTest/QTest>
 #include <QSignalSpy>
 #include <QApplication>
@@ -489,6 +493,154 @@ private slots:
         QCOMPARE(countColour(img, barCols, t.textFaint), 0);
         QVERIFY2(countColour(img, barCols, t.background) < barCols.width() * barCols.height(),
                  "no scrollbar handle rendered beside the list");
+    }
+
+    void testSeamsCrossTheScrollTrack() {
+        // The section hairlines and the Clear All divider run from the left
+        // frame column to the right one — under the 6-px scroll track too.
+        // The delegate's rows end at the viewport, so while the list
+        // scrolled those seams stopped 8 device px short of the right frame
+        // and the track sat on them as a bare strip; the scrollbar now
+        // continues them (SeamScrollBar, widgets/popup_chrome.h).
+        const QRect screen = QApplication::primaryScreen()->availableGeometry();
+        const Theme t = loadTheme(QStringLiteral("tw"));
+        SourceChooserPopup popup;
+        popup.applyTheme(t);
+        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+        popup.setSources(liveEntries(24));
+        open(popup, screen.center());
+        auto* list = popup.findChild<QListView*>();
+        QVERIFY(list);
+        QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
+        const QColor seam = containerBorderColor(t);
+        const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            // At the top: the Connected header (row 0) and its hairline.
+            list->scrollToTop();
+            QApplication::processEvents();
+            QImage img = renderAt(popup, dpr);
+            const Edges e = edgesOf(popup.rect(), dpr);
+            const int w = e.right - e.left - 1;   // the interior columns
+            const QRect hdr = list->visualRect(list->model()->index(0, 0)).translated(vp);
+            QVERIFY(hdr.isValid());
+            const Edges h = edgesOf(hdr, dpr);
+            QCOMPARE(countColour(img, QRect(e.left + 1, h.bottom, w, 1), seam), w);
+            // At the bottom: the Clear All divider, the top row of the 4-px
+            // gap above its card.
+            list->scrollToBottom();
+            QApplication::processEvents();
+            img = renderAt(popup, dpr);
+            const int last = list->model()->rowCount() - 1;
+            const QRect clr = list->visualRect(list->model()->index(last, 0))
+                                  .translated(vp).adjusted(0, 4, 0, 0);
+            QVERIFY(clr.isValid());
+            const Edges c = edgesOf(clr, dpr);
+            QCOMPARE(countColour(img, QRect(e.left + 1, c.top, w, 1), seam), w);
+        }
+    }
+
+    void testDisabledClearAllDoesNotLightHover() {
+        // A disabled Clear All (nothing to clear) under the mouse stays on
+        // the surface: the hover ground is gated on enabled, like the bar's
+        // disabled cells. An enabled row under the same mouse move DOES
+        // light t.hover, so the probe is not vacuous.
+        const Theme t = loadTheme(QStringLiteral("tw"));
+        QVERIFY(t.hover != t.background);
+        SourceChooserPopup popup;
+        popup.applyTheme(t);
+        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+        QVector<SourceEntry> entries;
+        entries.append(header(QStringLiteral("Add Source")));
+        entries.append(provider(QStringLiteral("Open File"), QStringLiteral("File"), QStringLiteral("built-in")));
+        entries.append(clearAll(false));
+        popup.setSources(entries);
+        open(popup, QPoint(100, 100));
+        auto* list = popup.findChild<QListView*>();
+        QVERIFY(list);
+        const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
+        auto rowRect = [&](int row) {
+            return list->visualRect(list->model()->index(row, 0)).translated(vp);
+        };
+        auto hoverRow = [&](int row) {
+            const QPoint c = list->visualRect(list->model()->index(row, 0)).center();
+            QMouseEvent mv(QEvent::MouseMove, c, list->viewport()->mapToGlobal(c),
+                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(list->viewport(), &mv);
+            QApplication::processEvents();
+        };
+        hoverRow(1);
+        QImage img = renderAt(popup, 1.0);
+        const QRect live = rowRect(1);
+        QVERIFY2(countColour(img, live, t.hover) > live.width() * live.height() / 2,
+                 "an enabled row under the mouse should be t.hover");
+        hoverRow(2);
+        img = renderAt(popup, 1.0);
+        // Below its divider gap, the disabled card is the surface only.
+        const QRect body = rowRect(2).adjusted(0, 6, 0, 0);
+        QCOMPARE(countColour(img, body, t.hover), 0);
+        QVERIFY(countColour(img, body, t.background) > body.width() * body.height() / 2);
+    }
+
+    void testSetSourcesWhileUpRefitsInPlace() {
+        // A per-row x delete rebuilds the list while the popup is up. The
+        // popup used to keep the height the old list needed, and the list's
+        // stretch turned the difference into bare ground between the last
+        // row and the footer; now it re-fits to the new rows with its top
+        // edge where it was. No event pump between popup() and the probes:
+        // the hidden desktop's platform would close the popup at the first
+        // one, and the re-fit is gated on it being up.
+        const QRect screen = QApplication::primaryScreen()->availableGeometry();
+        SourceChooserPopup popup;
+        popup.applyTheme(loadTheme(QStringLiteral("tw")));
+        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+        popup.setSources(liveEntries(4));
+        const QPoint anchor(screen.left() + 40, screen.top() + 20);
+        popup.popup(anchor);
+        QVERIFY(popup.isVisible());
+        const int tall = popup.height();
+        QCOMPARE(tall, popup.layout()->sizeHint().height());
+        popup.setSources(liveEntries(1));
+        QCOMPARE(popup.pos(), anchor);
+        QVERIFY2(popup.height() < tall,
+                 qPrintable(QStringLiteral("three rows fewer should shrink the popup: %1 (was %2), "
+                                           "layout hint %3, list hint %4, visible %5")
+                                .arg(popup.height()).arg(tall)
+                                .arg(popup.layout()->sizeHint().height())
+                                .arg(popup.findChild<QListView*>()->sizeHint().height())
+                                .arg(popup.isVisible())));
+        QCOMPARE(popup.height(), popup.layout()->sizeHint().height());
+        auto* list = popup.findChild<QListView*>();
+        QVERIFY(list);
+        const int last = list->model()->rowCount() - 1;
+        const QRect lastRow = list->visualRect(list->model()->index(last, 0));
+        QCOMPARE(lastRow.bottom() + 1, list->viewport()->height());   // no bare ground under it
+        popup.hide();
+    }
+
+    void testFlipsAboveTheBarNotOverIt() {
+        // Near the bottom of the screen the popup flips above the anchor.
+        // The anchor is the bar's BOTTOM edge, so a popup that ended there
+        // covered the bar and the chip that opened it; given the bar's top
+        // edge (anchorTop) the flipped popup ends one device row above the
+        // bar. Without it (no bar) it ends on the anchor, as before.
+        const QRect screen = QApplication::primaryScreen()->availableGeometry();
+        SourceChooserPopup popup;
+        popup.applyTheme(loadTheme(QStringLiteral("tw")));
+        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+        popup.setSources(liveEntries());
+        constexpr int kBarH = 28;
+        const QPoint anchor(screen.left() + 40, screen.bottom() - 40);
+        const int barTop = anchor.y() - kBarH;
+        popup.popup(anchor, barTop);
+        QTest::qWait(30);
+        QApplication::processEvents();
+        QVERIFY2(popup.y() < anchor.y(), "the popup should flip above the anchor");
+        QCOMPARE(popup.y() + popup.height(), barTop);
+        QVERIFY(popup.y() >= screen.top());
+        popup.popup(anchor);
+        QTest::qWait(30);
+        QApplication::processEvents();
+        QCOMPARE(popup.y() + popup.height(), anchor.y());
     }
 };
 

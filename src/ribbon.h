@@ -237,7 +237,7 @@ private:
 
     QString m_hoverId;       // item id, "tab:<id>", "overflow" or "collapse"
     QString m_pressedId;
-    bool    m_overflowOpen = false;   // … stays pressed while its menu is up
+    bool    m_overflowOpen = false;   // … stays `hover` while its menu is up
     // Started when a tab press restores the minimized body: the DblClick that
     // completes that same click pair must not collapse it again.
     QElapsedTimer m_restoreTimer;

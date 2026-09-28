@@ -7,7 +7,9 @@
 #include <QStringList>
 #include <cstdint>
 #include "core.h"
+#include "themes/theme.h"
 
+class QAction;
 class QLineEdit;
 class QListView;
 class QStringListModel;
@@ -19,7 +21,6 @@ class QWidget;
 
 namespace rcx {
 
-struct Theme;
 class DialogButton;
 
 // ── Popup mode ──
@@ -128,6 +129,12 @@ public:
     /// Test accessor: the current filtered/sectioned row model (read-only).
     const QVector<TypeEntry>& filteredTypes() const { return m_filteredTypes; }
 
+    /// The theme applyTheme() received: the chrome, the field's seam, the
+    /// scrollbar and the delegate's rows all paint from this one copy, so
+    /// a previewed theme (or a harness's) never shows chrome in one theme
+    /// and rows in another.
+    const Theme& theme() const { return m_theme; }
+
     /// Test/harness hook: force the simple/full view and re-render, the same
     /// way the bottom "Show all types" row does — so render harnesses can grab
     /// the full (modifier-visible) layout deterministically.
@@ -158,7 +165,8 @@ private:
     QToolButton*      m_escLabel     = nullptr;
     DialogButton*     m_createBtn    = nullptr;
     DialogButton*     m_saveBtn      = nullptr;
-    QLineEdit*        m_filterEdit   = nullptr;
+    QLineEdit*        m_filterEdit   = nullptr;   // a PopupFilterField (widgets/popup_chrome.h)
+    QAction*          m_filterClear  = nullptr;   // its trailing x — shown only with text
     QListView*        m_listView     = nullptr;
     QStringListModel* m_model        = nullptr;
 
@@ -220,6 +228,7 @@ private:
     // dismissed means "closed without choosing". Reset on each popup().
     bool               m_accepted = false;
     QFont              m_font;
+    Theme              m_theme;               // see theme()
     int                m_cachedMaxNameLen = 0; // longest displayName length (chars)
 
     // Sort toolbar state

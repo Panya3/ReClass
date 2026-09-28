@@ -7619,14 +7619,18 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
     connect(popup, &SourceChooserPopup::clearRequested,
             this, [this]() { clearSources(); });
 
-    popup->popup(globalPos);
+    // The bar's top edge goes along with the anchor (its bottom edge under
+    // the chip): a popup that has to flip above the bar then ends one device
+    // row above it instead of covering the bar and the chip. QPointer: the
+    // bar goes with its pane, and the popup can outlive both.
+    QPointer<AddressBar> bar = editor->addressBar();
+    popup->popup(globalPos, bar ? bar->mapToGlobal(QPoint(0, 0)).y() : -1);
 
-    // The bar's chip reads pressed while the popup is up; its hide — a
+    // The bar's chip stays t.hover while the popup is up; its hide — a
     // pick, Esc, a click elsewhere — emits dismissed(), which clears it.
     // ensureSourcePopup's disconnect(this) drops this with the rest before
-    // the next open re-makes it. QPointer: the bar goes with its pane, and
-    // the popup can outlive both.
-    if (QPointer<AddressBar> bar = editor->addressBar()) {
+    // the next open re-makes it.
+    if (bar) {
         bar->setSourceMenuOpen(true);
         connect(popup, &SourceChooserPopup::dismissed, this,
                 [bar]() { if (bar) bar->setSourceMenuOpen(false); });

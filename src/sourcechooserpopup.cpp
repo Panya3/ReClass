@@ -2,6 +2,7 @@
 #include "fontutil.h"
 #include "paintutil.h"
 #include "svgicon.h"
+#include "widgets/popup_chrome.h"
 #include "widgets/section_header.h"
 #include <QAction>
 #include <QVBoxLayout>
@@ -90,50 +91,26 @@ static QRect deleteBtnRect(const QRect& itemRect) {
 // its tail. Shared by the delegate's sizeHint and its paint.
 static constexpr int kClearGap = 9;
 
+// The divider's rect: one device row at the top of the gap the Clear All
+// row reserves. One place, because two things paint it — the delegate
+// across the viewport and the scrollbar across its track.
+static QRect clearDividerRect(const QRect& itemRect) { return itemRect.adjusted(0, 4, 0, 0); }
+
 // A disabled row (Clear All with nothing to clear) is the whole card at
 // 40 % — the bar's rule for a disabled cell, never textDim x 0.4.
 static constexpr qreal kDisabledOpacity = 0.40;
 
-// The filter field's floor height — PanelSearchField::kFieldHeight — and
-// the house 12-px glyph for its clear action.
-static constexpr int kFieldMinH   = 26;
+// The house 12-px glyph for the filter's clear action.
 static constexpr int kClearIconPx = 12;
-
-// An opaque blend of two theme tokens (k = 0 → a, 1 → b): the same colour
-// an rgba() over the ground would composite to, but nameable by a pixel
-// scan and never a second alpha layer.
-static QColor mixColor(const QColor& a, const QColor& b, qreal k) {
-    return QColor::fromRgbF(a.redF()   + (b.redF()   - a.redF())   * k,
-                            a.greenF() + (b.greenF() - a.greenF()) * k,
-                            a.blueF()  + (b.blueF()  - a.blueF())  * k);
-}
 
 // ── The filter box ──
 // The house field grammar (rcx::PanelSearchField, src/widgets/
-// panel_search_field.h) on the popup's own ground: no box at rest, square
-// corners, textDim ink, and ONE device-exact hairline underneath that turns
-// borderFocused while the field has focus. Not the shared widget itself:
-// that one wears chromeFont() and reads ThemeManager::current(); this field
-// is set in the popup's editor face and paints from the theme the popup was
-// handed, so chrome and rows can never disagree. The seam is painted here
-// and not by the popup because the field's QSS ground covers its whole rect
-// — a row the parent painted first would be gone.
-class SourceFilterField : public QLineEdit {
-public:
-    using QLineEdit::QLineEdit;
-    const Theme* theme = nullptr;
-protected:
-    void paintEvent(QPaintEvent* e) override {
-        QLineEdit::paintEvent(e);
-        if (!theme) return;
-        QPainter p(this);
-        fillBottomDeviceRowOfRect(p, QRectF(rect()),
-                                  hasFocus() ? theme->borderFocused
-                                             : containerBorderColor(*theme));
-    }
-    void focusInEvent(QFocusEvent* e) override  { QLineEdit::focusInEvent(e);  update(); }
-    void focusOutEvent(QFocusEvent* e) override { QLineEdit::focusOutEvent(e); update(); }
-};
+// panel_search_field.h) on the popup's own ground — rcx::PopupFilterField
+// (widgets/popup_chrome.h), shared with the type chooser and the enum
+// picker. Not the panel widget itself: that one wears chromeFont() and
+// reads ThemeManager::current(); this field is set in the popup's editor
+// face and paints from the theme the popup was handed, so chrome and rows
+// can never disagree.
 
 // ── The list ──
 // sizeHint is the real content height — every row through the delegate —
@@ -231,21 +208,24 @@ public:
         }
 
         // ── Ground: the surface, t.hover under the mouse, t.selected for
-        // the keyboard's current row — nothing else. A stale row used to
+        // the keyboard's current row — nothing else, and neither on a
+        // disabled row (Clear All with nothing to clear): a row that cannot
+        // be clicked must not light up as if it could. A stale row used to
         // get a hand-mixed pink (bg + (12,-4,-4)) that was no theme token
         // and painted over the frame column; it says "(exited)" in
         // markerPtr and dims its icon instead. No side bar for the active
         // source either: purple is budgeted, and a bar at the row's x=0 sat
         // ON the popup's border.
-        const bool selected = opt.state & QStyle::State_Selected;
-        const bool hovered  = opt.state & QStyle::State_MouseOver;
+        const bool selected = (opt.state & QStyle::State_Selected) && e.enabled;
+        const bool hovered  = (opt.state & QStyle::State_MouseOver) && e.enabled;
         p->fillRect(r, selected ? t.selected : hovered ? t.hover : surface);
 
         // The Clear All divider: one device row of the seam colour at the
-        // top of the gap the row reserves, across the interior width.
+        // top of the gap the row reserves, across the viewport; the
+        // scrollbar continues it across its track (SeamScrollBar).
         QRect body = r;
         if (e.entryKind == SourceEntry::ClearAction) {
-            fillTopDeviceRowOfRect(*p, QRectF(r.adjusted(0, 4, 0, 0)), containerBorderColor(t));
+            fillTopDeviceRowOfRect(*p, QRectF(clearDividerRect(r)), containerBorderColor(t));
             body = r.adjusted(0, kClearGap, 0, 0);
         }
 
@@ -437,13 +417,13 @@ SourceChooserPopup::SourceChooserPopup(QWidget* parent)
         layout->addLayout(row);
     }
 
-    // Filter field — the popup surface plus its own seam (SourceFilterField).
+    // Filter field — the popup surface plus its own seam (PopupFilterField).
     // The clear action is the house 12-px tinted close glyph, shown only
     // while there is text (PanelSearchField's), not Qt's stock button.
-    auto* filter = new SourceFilterField;
+    auto* filter = new PopupFilterField;
     filter->setPlaceholderText(QStringLiteral("Filter sources..."));
     filter->setFrame(false);
-    filter->setFixedHeight(kFieldMinH);
+    filter->setFixedHeight(PopupFilterField::kMinHeight);
     m_clearAction = filter->addAction(QIcon(), QLineEdit::TrailingPosition);
     m_clearAction->setVisible(false);
     m_clearAction->setToolTip(QStringLiteral("Clear"));
@@ -464,6 +444,30 @@ SourceChooserPopup::SourceChooserPopup(QWidget* parent)
     m_listView->setMouseTracking(true);
     m_listView->setFrameShape(QFrame::NoFrame);
     m_listView->setUniformItemSizes(false);
+
+    // The scrollbar carries the section hairlines and the Clear All divider
+    // across its track: the delegate's rows end at the viewport, and while
+    // the list scrolled those seams stopped 8 device px short of the right
+    // frame under the bare track.
+    auto* seamBar = new SeamScrollBar(Qt::Vertical);
+    seamBar->seams = [this]() {
+        QVector<SeamScrollBar::Seam> out;
+        const QColor seam = containerBorderColor(m_theme);
+        const QRect visible = m_listView->viewport()->rect();
+        for (int r = 0; r < m_filteredEntries.size(); ++r) {
+            const auto& e = m_filteredEntries[r];
+            if (e.entryKind != SourceEntry::SectionHeader
+                && e.entryKind != SourceEntry::ClearAction) continue;
+            const QRect vr = m_listView->visualRect(m_model->index(r));
+            if (!vr.isValid() || !vr.intersects(visible)) continue;
+            if (e.entryKind == SourceEntry::SectionHeader)
+                out.append({QRectF(vr), /*bottomEdge*/ true, seam});
+            else
+                out.append({QRectF(clearDividerRect(vr)), /*bottomEdge*/ false, seam});
+        }
+        return out;
+    };
+    m_listView->setVerticalScrollBar(seamBar);
 
     auto* delegate = new SourceChooserDelegate(this);
     m_listView->setItemDelegate(delegate);
@@ -494,7 +498,7 @@ void SourceChooserPopup::setFont(const QFont& font) {
     // band rule) with PanelSearchField's 26 as the floor: the popup is set
     // in the editor face one point down, taller than the chrome face the
     // shared field is built for.
-    m_filterEdit->setFixedHeight(qMax(kFieldMinH, QFontMetrics(font).height() + 8));
+    m_filterEdit->setFixedHeight(qMax(PopupFilterField::kMinHeight, QFontMetrics(font).height() + 8));
     m_listView->setFont(font);
 
     QFont bold = font;
@@ -528,22 +532,14 @@ void SourceChooserPopup::applyTheme(const Theme& theme) {
     m_titleLabel->setStyleSheet(
         QStringLiteral("color: %1;").arg(t.text.name()));
 
-    // The field: panelFieldInteriorQss's shape over the popup ground instead
-    // of editor paper — no box, no radius, textDim ink, the theme's
-    // selection band. The lead pad lands the first glyph on kGutter
-    // (QLineEdit adds its own 2-px horizontal margin inside the padding).
-    // The seam under it is the field's own (SourceFilterField), never a
-    // QSS border and never a second surface: the old backgroundAlt band
-    // under a 1-logical-px separator was a cream strip on a grey body.
-    auto* filter = static_cast<SourceFilterField*>(m_filterEdit);
-    filter->theme = &m_theme;
-    filter->setStyleSheet(QStringLiteral(
-        "QLineEdit { background: %1; color: %2; border: none; border-radius: 0px;"
-        " padding: 0px 6px 0px %3px; selection-background-color: %4; }"
-        "QLineEdit QToolButton { padding: 0px 6px; }"
-        "QLineEdit QToolButton:hover { background: %5; }")
-        .arg(surface.name(), t.textDim.name()).arg(kGutter - 2)
-        .arg(t.selection.name(), t.hover.name()));
+    // The field: the house field's shape over the popup ground instead of
+    // editor paper (popupFieldQss) — no box, no radius, textDim ink, the
+    // theme's selection band. The lead pad lands the first glyph on kGutter.
+    // The seam under it is the field's own (PopupFilterField), never a QSS
+    // border and never a second surface: the old backgroundAlt band under
+    // a 1-logical-px separator was a cream strip on a grey body.
+    auto* filter = static_cast<PopupFilterField*>(m_filterEdit);
+    filter->applyTheme(m_theme, surface, kGutter - 2);
     m_clearAction->setIcon(themedVsIcon(QStringLiteral(":/vsicons/close.svg"),
                                         t.textDim, kClearIconPx, devicePixelRatioF()));
     // QLineEdit creates the action's button lazily; size it once it exists
@@ -556,20 +552,12 @@ void SourceChooserPopup::applyTheme(const Theme& theme) {
         "QListView::item { border: none; background: transparent; }")
         .arg(surface.name()));
 
-    // The scrollbar, locally. The app-wide rule (MainWindow::applyGlobalTheme,
-    // src/main.cpp) is an 8-px solid textFaint bar on palette(window), which
-    // beside these rows read as a heavy rod down the whole track — and,
-    // before the 1-px layout inset, sat on the right border. Here the track
-    // is the surface by name, the handle textFaint at 45 % over it (an
-    // opaque blend, so a scan can name it), textDim under the mouse, 6 px.
-    const QColor handle = mixColor(surface, t.textFaint, 0.45);
-    m_listView->verticalScrollBar()->setStyleSheet(QStringLiteral(
-        "QScrollBar:vertical { background: %1; width: 6px; margin: 0; border: none; }"
-        "QScrollBar::handle:vertical { background: %2; min-height: 20px; border: none; }"
-        "QScrollBar::handle:vertical:hover { background: %3; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
-        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }")
-        .arg(surface.name(), handle.name(), t.textDim.name()));
+    // The scrollbar, locally (popupScrollBarQss): the app-wide rule
+    // (MainWindow::applyGlobalTheme, src/main.cpp) is an 8-px solid
+    // textFaint bar on palette(window), which beside these rows read as a
+    // heavy rod down the whole track — and, before the 1-px layout inset,
+    // sat on the right border.
+    m_listView->verticalScrollBar()->setStyleSheet(popupScrollBarQss(t, surface));
 
     m_footerLabel->setStyleSheet(
         QStringLiteral("color: %1;").arg(t.textMuted.name()));
@@ -598,6 +586,12 @@ void SourceChooserPopup::setSources(const QVector<SourceEntry>& entries) {
 
     m_filterEdit->clear();
     applyFilter(QString());
+
+    // Rebuilt while up — a per-row x delete — the popup kept the height the
+    // old list needed, and the list's stretch turned the difference into
+    // bare ground between the last row and the footer. Re-fit to the new
+    // rows; the top edge stays where the user is looking.
+    if (isVisible()) fitToScreen(/*keepTop*/ true);
 }
 
 void SourceChooserPopup::setLivenessResults(const QVector<bool>& alive) {
@@ -648,6 +642,11 @@ void SourceChooserPopup::applyFilter(const QString& text) {
     for (const auto& e : m_filteredEntries)
         displayStrings.append(e.displayName);
     m_model->setStringList(displayStrings);
+    // The list's sizeHint just changed with its rows, and the layout's
+    // QWidgetItem caches a widget's hint until the widget says otherwise —
+    // without this the re-fit setSources() runs measured the OLD list.
+    m_listView->updateGeometry();
+    m_listView->verticalScrollBar()->update();   // the seams it continues moved
 
     // Footer
     int total = 0;
@@ -678,39 +677,18 @@ void SourceChooserPopup::applyFilter(const QString& text) {
     }
 }
 
-void SourceChooserPopup::popup(const QPoint& globalPos) {
+void SourceChooserPopup::popup(const QPoint& globalPos, int anchorTop) {
+    m_anchor    = globalPos;
+    m_anchorTop = anchorTop;
     const QFontMetrics fm(m_font);
     const int charW = fm.horizontalAdvance(QChar('M'));
     const int popupW = qBound(360, (m_cachedMaxNameLen + 24) * charW, 560);
-
-    // Height from the real hints — the rows through SourceListView::sizeHint
-    // (the delegate's heights), the chrome through the layout — capped by
-    // the SCREEN under the anchor, not a constant: the old 520-px cap with
-    // hand-copied row constants left the default list 3 px taller than its
-    // viewport in the app's font, so a scrollbar with a 90 % handle appeared
-    // for nothing. When the room below is too small and there is more
-    // above, the popup flips over the anchor (EnumPickerPopup's rule).
-    layout()->invalidate();
-    layout()->activate();
-    const int wanted = layout()->sizeHint().height();
     const QRect screen = QApplication::screenAt(globalPos)
         ? QApplication::screenAt(globalPos)->availableGeometry()
         : QRect(0, 0, 1920, 1080);
-    constexpr int kScreenPad = 8;
-    constexpr int kMinH = 140;
-    const int below = screen.bottom() - globalPos.y() - kScreenPad;
-    const int above = globalPos.y() - screen.top() - kScreenPad;
-    int popupH = qMin(wanted, below);
-    int y = globalPos.y();
-    if (popupH < wanted && above > below) {
-        popupH = qMin(wanted, above);
-        y = globalPos.y() - popupH;
-    }
-    popupH = qMax(kMinH, popupH);
-    setFixedSize(popupW, popupH);
-
-    const int x = qBound(screen.left(), globalPos.x(), screen.right() - popupW);
-    move(x, y);
+    setFixedWidth(popupW);
+    move(qBound(screen.left(), globalPos.x(), screen.right() - popupW), globalPos.y());
+    fitToScreen(/*keepTop*/ false);
 
     show();
     raise();
@@ -724,27 +702,74 @@ void SourceChooserPopup::warmUp() {
     hide();
 }
 
+// Height from the real hints — the rows through SourceListView::sizeHint
+// (the delegate's heights), the chrome through the layout — capped by the
+// SCREEN under the anchor, not a constant: the old 520-px cap with
+// hand-copied row constants left the default list 3 px taller than its
+// viewport in the app's font, so a scrollbar with a 90 % handle appeared
+// for nothing. When the room below is too small and there is more above,
+// the popup flips over the bar (EnumPickerPopup's rule) — ending one device
+// row above the bar's TOP edge when the caller named it (m_anchorTop), not
+// on the anchor, which is the bar's bottom edge: a popup ending there
+// covered the bar and the chip that opened it.
+void SourceChooserPopup::fitToScreen(bool keepTop) {
+    layout()->invalidate();
+    layout()->activate();
+    const int wanted = layout()->sizeHint().height();
+    const QRect screen = QApplication::screenAt(m_anchor)
+        ? QApplication::screenAt(m_anchor)->availableGeometry()
+        : QRect(0, 0, 1920, 1080);
+    constexpr int kScreenPad = 8;
+    constexpr int kMinH = 140;
+    int y = pos().y();
+    int popupH;
+    if (keepTop) {
+        // A re-fit while up: only the bottom edge moves.
+        popupH = qMin(wanted, screen.bottom() - y - kScreenPad);
+    } else {
+        const int barTop = m_anchorTop >= 0 ? m_anchorTop : m_anchor.y();
+        const int below = screen.bottom() - m_anchor.y() - kScreenPad;
+        const int above = barTop - screen.top() - kScreenPad;
+        popupH = qMin(wanted, below);
+        y = m_anchor.y();
+        if (popupH < wanted && above > below) {
+            popupH = qMin(wanted, above);
+            y = barTop - popupH;
+        }
+    }
+    popupH = qMax(kMinH, popupH);
+    setFixedSize(width(), popupH);
+    move(pos().x(), y);
+}
+
 // ── The popup family rule ──
 // A popup is ONE surface — theme.background, the ground MenuBarStyle's
 // PE_FrameMenu (src/main.cpp) already gives the bar's own QMenu dropdowns —
 // inside ONE device-exact 1-px theme.border frame the popup paints itself
-// with paintutil's four edge fills, with its layout inset 1 logical px so no
-// child (field, list viewport, scrollbar, delegate fill, accent) ever
-// touches the frame. Square corners, Qt::NoDropShadowWindowHint (the
-// platform's DWM shadow was the one shadow in the app), and a text field
-// inside it is the same surface plus a device-exact bottom hairline
-// (containerBorderColor at rest, borderFocused while focused) — never a
-// second surface, never a QSS box. Seams inside the popup (the field, the
-// section rows, the Clear All divider, the footer) are containerBorderColor;
-// only the frame is full theme.border.
+// with paintutil's four edge fills (fillDeviceFrameOfRect), with its layout
+// inset 1 logical px so no child (field, list viewport, scrollbar, delegate
+// fill, accent) ever touches the frame. Square corners,
+// Qt::NoDropShadowWindowHint (the platform's DWM shadow was the one shadow
+// in the app), and a text field inside it is the same surface plus a
+// device-exact bottom hairline (containerBorderColor at rest, borderFocused
+// while focused; PopupFilterField) — never a second surface, never a QSS
+// box. Seams inside the popup (the field, the section rows, the Clear All
+// divider, the footer) are single device rows of containerBorderColor
+// spanning the interior width — under the scroll track too (SeamScrollBar);
+// only the frame is full theme.border. Scrollbars are the popup's local
+// 6-px rule (popupScrollBarQss), icons are themedVsIcon at a real tone drawn
+// with drawPixmapSnapped, and the accent (indHoverSpan) is budgeted to one
+// "current" marker per popup at most.
 //
-// Why device fills and not the 1-logical-px fillRect strips this popup,
-// TypeSelectorPopup and PE_FrameMenu paint: 1 logical px is 1.25 device px
-// at 125 %, which snaps to ONE or TWO device rows depending on where the
-// window lands, so the frame read a different weight on each edge and left
-// stray corner pixels. EnumPickerPopup (a 1-logical QPen), HexToolbarPopup
-// and HoverPopupHost (QFrame::Box) still carry their own variants; this is
-// the reference they migrate to.
+// Why device fills and not 1-logical-px fillRect strips: 1 logical px is
+// 1.25 device px at 125 %, which snaps to ONE or TWO device rows depending
+// on where the window lands, so the frame read a different weight on each
+// edge and left stray corner pixels. The shared pieces live in
+// widgets/popup_chrome.h; TypeSelectorPopup, EnumPickerPopup and
+// HexToolbarPopup follow this rule. The one exception is the editor's
+// HoverPopupHost: a hover popup is transient like RcxTooltip, so it keeps
+// the TOOLTIP surface (backgroundAlt) — but its frame is this same
+// device-exact one, not a QFrame::Box.
 void SourceChooserPopup::paintEvent(QPaintEvent*) {
     const Theme& t = m_theme;
     QPainter p(this);
@@ -753,18 +778,14 @@ void SourceChooserPopup::paintEvent(QPaintEvent*) {
     // The seam over the footer: the list's viewport ends where the footer
     // starts, and a QLabel paints no ground, so the row shows through.
     fillTopDeviceRowOfRect(p, QRectF(m_footerLabel->geometry()), containerBorderColor(t));
-    const QRectF r(rect());
-    fillTopDeviceRowOfRect(p, r, t.border);
-    fillBottomDeviceRowOfRect(p, r, t.border);
-    fillLeftDeviceColOfRect(p, r, t.border);
-    fillRightDeviceColOfRect(p, r, t.border);
+    fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
 }
 
 void SourceChooserPopup::hideEvent(QHideEvent* event) {
     QFrame::hideEvent(event);
     // Every way out — a pick, Esc, a click elsewhere — lands here, so this
     // is the one place that can say "the popup is gone". The address bar's
-    // source chip reads pressed from popup() until it hears this.
+    // source chip stays t.hover from popup() until it hears this.
     emit dismissed();
 }
 

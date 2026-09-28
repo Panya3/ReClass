@@ -697,7 +697,7 @@ QMenu* RibbonBar::overflowMenu() {
 void RibbonBar::showOverflowMenu() {
     QMenu* menu = overflowMenu();
     const QRect r = overflowButtonRect();
-    // The ... item stays pressed while its menu is up.
+    // The ... item stays `hover` while its menu is up (paintBody).
     m_overflowOpen = true;
     connect(menu, &QMenu::aboutToHide, this, [this] { m_overflowOpen = false; update(); });
     update();
@@ -1009,13 +1009,17 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
 
     if (!m_layout.hiddenPanels.isEmpty()) {
         // The ... item: a small button like any other (rest textDim, hover
-        // `hover` fill + text, pressed `button` while the menu is open).
+        // `hover` fill + text). While its menu is up it stays `hover` — the
+        // address bar's rule for a cell with a dropdown hung under it: the
+        // menu reads as the hover it grew from, and on tw.json pressedFill
+        // is t.selected, which boxed the item in pale blue for the life of
+        // the menu. The menu opens on press (mousePressEvent), so there is
+        // no mouse-down flash here to keep.
         const QRect r = m_layout.overflowRect;
-        const bool hovered = (m_hoverId == QStringLiteral("overflow"));
-        const bool pressed = m_overflowOpen;
-        if (pressed) p.fillRect(r, pressedFill(t));
-        else if (hovered) p.fillRect(r, t.hover);
-        const QColor tone = (hovered || pressed) ? t.text : ribbonToneColour(t.textDim, t, t.background);
+        const bool hovered  = (m_hoverId == QStringLiteral("overflow"));
+        const bool menuOpen = m_overflowOpen;
+        if (menuOpen || hovered) p.fillRect(r, t.hover);
+        const QColor tone = (hovered || menuOpen) ? t.text : ribbonToneColour(t.textDim, t, t.background);
         const QPixmap pm = tintedSvgIcon(QStringLiteral(":/vsicons/ellipsis.svg"), tone, m.smallIcon, dpr);
         drawPixmapSnapped(p, QPointF(r.left() + (r.width() - m.smallIcon) / 2,
                                      r.top() + (r.height() - m.smallIcon) / 2), pm);

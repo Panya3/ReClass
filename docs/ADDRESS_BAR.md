@@ -48,7 +48,7 @@ Every cell is addressed by a string id — the namespace `itemRect(id)`,
 | `hist` | `chevron-down.svg` 12 px | 14 | the history menu, Explorer's list: Back entries nearest first, then the place you are at — checked, disabled, worded as `currentNavLabel()` (`Trail.path  @ 0x…`, exactly what the next `recordNav` would store) — then Forward entries nearest first. No separator: the checked row is the divider |
 | `up` | `arrow-up.svg` | 22 | the parent crumb (`collapseToFocus` on the deepest hop) |
 | — | field divider: one device column, `containerBorderColor`, inset 4 px | 6 + 1 + 6 | everything right of it is "the field" |
-| `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source". Icon-only in a narrow pane (step 7a): the name lives in the tooltip, `sourceDisplayText()` is empty | 4 + 16 + 4 + text + 2 (icon-only: 4 + 16 + 2) | the source chooser, anchored under the chip; the chip reads pressed while it is up |
+| `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source". Icon-only in a narrow pane (step 7a): the name lives in the tooltip, `sourceDisplayText()` is empty | 4 + 16 + 4 + text + 2 (icon-only: 4 + 16 + 2) | the source chooser, anchored under the chip; the chip stays `t.hover` while it is up |
 | `src.chev` | `chevron-down` `textFaint` | 14 | same as `src` (one hover group, one keyboard stop) |
 | `root.chev` | `chevron-right`, flips to `chevron-down` on hover; dropped in a narrow pane (step 7b — line 0's chevron still opens the chooser) | 14 | menu of the root classes → `setViewRootId` |
 | `base` | the formula if set else `0x…`, plus a `textMuted` `→ 0x…` suffix (what the formula resolves to; only beside a formula); in a narrow pane (step 7c) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + suffix + 6 | the base edit — always on the FULL formula |
@@ -356,11 +356,37 @@ px, track = the surface, handle `textFaint` at 45 % over it) so the app-wide
 real row hints capped by the screen under the anchor (flipping above when
 there is more room there), so a scrollbar appears only when the list truly
 cannot fit. The anchor is the bar's bottom edge under the chip: the popup's
-top frame row is the device row after the bar's seam row at any scale.
+top frame row is the device row after the bar's seam row at any scale. When
+the room below is too small the popup flips above the bar and ends one
+device row above the bar's TOP edge — `popup(anchor, anchorTop)`, the
+controller passing `bar->mapToGlobal(QPoint(0, 0)).y()` — never on the
+anchor, which would cover the bar and the chip. A per-row × delete rebuilds
+the list while the popup is up; `setSources()` then re-fits the height in
+place (top edge anchored) so no bare ground opens above the footer. The
+section hairlines and the Clear All divider run under the scroll track to
+the right frame (`SeamScrollBar`), and a disabled Clear All never lights
+`t.hover`.
+
+**The family today.** The rule's followers are `TypeSelectorPopup`,
+`EnumPickerPopup` and `HexToolbarPopup`, all built from the shared pieces
+in `src/widgets/popup_chrome.h` — `PopupFilterField` (the field with its
+seam), `popupScrollBarQss` (the local 6-px scrollbar), `SeamScrollBar` (a
+scrollbar that carries a list's section hairlines and dividers across its
+track) — and `paintutil.h`'s `fillDeviceFrameOfRect`; the ribbon's `…`
+overflow item follows the bar's menu-open rule (`t.hover`, never
+`pressedFill`) while its menu is up. The one exception is the editor's
+`HoverPopupHost`: a hover popup is transient like `RcxTooltip`, so it keeps
+the tooltip surface (`backgroundAlt`) — but its frame and its title seam
+are the same device-exact rows, not a `QFrame::Box`. The bar's own `QMenu`s
+get the surface and the frame from `MenuBarStyle::PE_FrameMenu`.
 
 Pinned by `test_source_chooser` (the frame on exactly one device row /
 column per side, the surface strips, the accent budget, the sizing and the
-scroll case, at dpr 1.0 and 1.25 under tw and vs) and `test_breadcrumb`
+scroll case, at dpr 1.0 and 1.25 under tw and vs; the seams under the
+track, the disabled Clear All, the in-place re-fit and the flip above the
+bar), `test_type_selector` (the same frame / surface / field probes for the
+type chooser under tw and vs, the enum picker and the hex toolbar),
+`test_ribbon_layout` (`overflowMenuOpenIsHover`) and `test_breadcrumb`
 (`testMenuOpenCellIsHoverNotSelected`,
 `testSourceChooserHangsOnTheSeamAtBothScales`). Harness:
 `sourcechooser_render <prefix> [tw vs ...] [many]` (EXCLUDE_FROM_ALL; run on

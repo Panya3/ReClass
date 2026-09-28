@@ -94,6 +94,29 @@ inline void fillTopDeviceRowsOfRect(QPainter& p, const QRectF& r, int n, const Q
     p.fillRect(dt.inverted().mapRect(devRows), c);
 }
 
+// ── The popup frame ──
+// ONE device-exact row / column of `c` on each edge of `r`, in one call:
+// the popup family rule (the comment above SourceChooserPopup::paintEvent,
+// src/sourcechooserpopup.cpp) asks every popup for exactly this frame, and
+// four sites had each grown their own — a 1-logical QPen, a QFrame::Box,
+// four 1-logical fillRect strips — which snapped to one or two device rows
+// depending on where the window landed.
+inline void fillDeviceFrameOfRect(QPainter& p, const QRectF& r, const QColor& c) {
+    fillTopDeviceRowOfRect(p, r, c);
+    fillBottomDeviceRowOfRect(p, r, c);
+    fillLeftDeviceColOfRect(p, r, c);
+    fillRightDeviceColOfRect(p, r, c);
+}
+
+// An opaque blend of two theme tokens (k = 0 -> a, 1 -> b): the same colour
+// an rgba() over the ground would composite to, but nameable by a pixel
+// scan and never a second alpha layer.
+inline QColor mixColor(const QColor& a, const QColor& b, qreal k) {
+    return QColor::fromRgbF(a.redF()   + (b.redF()   - a.redF())   * k,
+                            a.greenF() + (b.greenF() - a.greenF()) * k,
+                            a.blueF()  + (b.blueF()  - a.blueF())  * k);
+}
+
 // ── Painted-control primitives (ribbon, address bar) ──
 // Shared by every custom-painted strip so an icon or a pressed cell looks the
 // same wherever it appears; they started life in ribbon.cpp's anonymous

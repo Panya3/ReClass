@@ -15,9 +15,22 @@
 #include <QScreen>
 #include <QSet>
 #include <QFontInfo>
+#include <QDir>
+#include <QFile>
+#include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPainter>
+#include <QScrollBar>
+#include <QtMath>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
 #include "typeselectorpopup.h"
+#include "hextoolbarpopup.h"
+#include "paintutil.h"
+#include "widgets/enum_picker_popup.h"
+#include "widgets/popup_chrome.h"
+#include "themes/theme.h"
 #include "themes/thememanager.h"
 #include "widgets/category_chip.h"
 #include "fontutil.h"
@@ -57,6 +70,148 @@ static void buildTwoRootTree(NodeTree& tree) {
 static QByteArray makeBuffer() {
     return QByteArray(0x200, '\0');
 }
+
+// ── Popup family chrome probes ──
+// The popup family rule (the comment above SourceChooserPopup::paintEvent,
+// src/sourcechooserpopup.cpp) pinned in pixels for the three popups this
+// target links, the way test_source_chooser pins the reference: rendered
+// through QWidget::render onto a scaled QImage, so paintutil's edge fills
+// pick device rows exactly as they do on a 125 % screen.
+namespace {
+
+// A shipped theme by JSON basename — the built-in file next to the exe
+// (build/themes/), the same one the app loads.
+Theme shippedTheme(const QString& baseName) {
+    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/themes/") + baseName
+            + QStringLiteral(".json"));
+    if (!f.open(QIODevice::ReadOnly)) return Theme();
+    return Theme::fromJson(QJsonDocument::fromJson(f.readAll()).object());
+}
+
+bool sameColour(QRgb px, const QColor& c, int tol = 2) {
+    return qAbs(qRed(px) - c.red()) <= tol && qAbs(qGreen(px) - c.green()) <= tol
+        && qAbs(qBlue(px) - c.blue()) <= tol;
+}
+
+int countColour(const QImage& img, const QRect& r, const QColor& c, int tol = 2) {
+    int n = 0;
+    for (int y = qMax(0, r.top()); y <= r.bottom() && y < img.height(); ++y)
+        for (int x = qMax(0, r.left()); x <= r.right() && x < img.width(); ++x)
+            if (sameColour(img.pixel(x, y), c, tol)) ++n;
+    return n;
+}
+
+QImage renderAt(QWidget& w, qreal dpr) {
+    QImage img(qRound(w.width() * dpr), qRound(w.height() * dpr), QImage::Format_ARGB32);
+    img.setDevicePixelRatio(dpr);
+    img.fill(Qt::black);
+    QPainter p(&img);
+    w.render(&p);
+    return img;
+}
+
+// The device rows / columns the edge fills pick for a logical rect at
+// `dpr`: qFloor(edge +- 0.5), paintutil's rule.
+struct Edges { int top, bottom, left, right; };
+Edges edgesOf(const QRect& logical, qreal dpr) {
+    const QRectF dev(logical.left() * dpr, logical.top() * dpr,
+                     logical.width() * dpr, logical.height() * dpr);
+    return { qFloor(dev.top() + 0.5), qFloor(dev.bottom() - 0.5),
+             qFloor(dev.left() + 0.5), qFloor(dev.right() - 0.5) };
+}
+
+// The frame: theme.border on exactly the outermost device row / column of
+// each side, unbroken, and none on the row / column just inside.
+bool frameIsOneDeviceRow(const QImage& img, const QRect& popupRect, const Theme& t, qreal dpr,
+                         QString* why) {
+    const Edges e = edgesOf(popupRect, dpr);
+    const int w = e.right - e.left + 1, h = e.bottom - e.top + 1;
+    auto check = [&](const QRect& r, int want, const char* what) {
+        const int got = countColour(img, r, t.border);
+        if (got == want) return true;
+        // Name the first offending pixel: where, and what colour sits there.
+        QString where;
+        for (int y = r.top(); y <= r.bottom() && where.isEmpty(); ++y)
+            for (int x = r.left(); x <= r.right() && where.isEmpty(); ++x)
+                if (sameColour(img.pixel(x, y), t.border) != (want > 0))
+                    where = QStringLiteral(" first at (%1,%2)=%3").arg(x).arg(y).arg(QColor(img.pixel(x, y)).name());
+        *why = QStringLiteral("%1: %2 of %3 border px at dpr %4%5").arg(QLatin1String(what)).arg(got).arg(want).arg(dpr).arg(where);
+        return false;
+    };
+    return e.top == 0 && e.left == 0 && e.bottom == img.height() - 1 && e.right == img.width() - 1
+        && check(QRect(e.left, e.top, w, 1), w, "top row")
+        && check(QRect(e.left, e.bottom, w, 1), w, "bottom row")
+        && check(QRect(e.left, e.top, 1, h), h, "left column")
+        && check(QRect(e.right, e.top, 1, h), h, "right column")
+        && check(QRect(e.left + 1, e.top + 1, w - 2, 1), 0, "row inside the top")
+        && check(QRect(e.left + 1, e.bottom - 1, w - 2, 1), 0, "row inside the bottom")
+        && check(QRect(e.left + 1, e.top + 1, 1, h - 2), 0, "column inside the left")
+        && check(QRect(e.right - 1, e.top + 1, 1, h - 2), 0, "column inside the right");
+}
+
+// One surface: `cols` device columns just inside a side border, full
+// height, are the ground or a seam row (containerBorderColor / the field's
+// borderFocused) and nothing else — no backgroundAlt strip, no second
+// surface, no accent bar.
+bool edgeStripIsGround(const QImage& img, const QRect& popupRect, const Theme& t, qreal dpr,
+                       int cols, bool leftSide, QString* why, const QColor& alsoFine = QColor()) {
+    const Edges e = edgesOf(popupRect, dpr);
+    const QRect strip = leftSide ? QRect(e.left + 1, e.top + 1, cols, e.bottom - e.top - 1)
+                                 : QRect(e.right - cols, e.top + 1, cols, e.bottom - e.top - 1);
+    const int ground  = countColour(img, strip, t.background);
+    const int seams   = countColour(img, strip, containerBorderColor(t));
+    const int focused = countColour(img, strip, t.borderFocused);
+    const int extra   = alsoFine.isValid() ? countColour(img, strip, alsoFine) : 0;
+    const int all     = strip.width() * strip.height();
+    if (ground + seams + focused + extra != all) {
+        // Name the stray: the first pixel that is none of the above.
+        QString where;
+        for (int y = strip.top(); y <= strip.bottom() && where.isEmpty(); ++y)
+            for (int x = strip.left(); x <= strip.right() && where.isEmpty(); ++x) {
+                const QRgb px = img.pixel(x, y);
+                if (!sameColour(px, t.background) && !sameColour(px, containerBorderColor(t))
+                    && !sameColour(px, t.borderFocused) && !(alsoFine.isValid() && sameColour(px, alsoFine)))
+                    where = QStringLiteral(" first stray at (%1,%2)=%3").arg(x).arg(y).arg(QColor(px).name());
+            }
+        *why = QStringLiteral("edge strip at x=%1 (dpr %2): %3 ground + %4 seam + %5 focus + %6 other of %7%8")
+                   .arg(strip.left()).arg(dpr).arg(ground).arg(seams).arg(focused).arg(extra).arg(all).arg(where);
+        return false;
+    }
+    if (countColour(img, strip, t.backgroundAlt, 0) != 0 && t.backgroundAlt != t.background) {
+        *why = QStringLiteral("backgroundAlt inside the edge strip at x=%1").arg(strip.left());
+        return false;
+    }
+    return true;
+}
+
+// The field: its bottom device row is the seam (containerBorderColor at
+// rest, borderFocused while focused) across the whole field, the row above
+// carries neither, and the band above the seam is the surface.
+bool fieldHasOneSeam(const QImage& img, const QRect& fieldRect, const Theme& t, qreal dpr,
+                     QString* why) {
+    const Edges f = edgesOf(fieldRect, dpr);
+    const int fw = f.right - f.left + 1;
+    const QRect seamRow(f.left, f.bottom, fw, 1);
+    const int rest    = countColour(img, seamRow, containerBorderColor(t));
+    const int focused = countColour(img, seamRow, t.borderFocused);
+    if (rest != fw && focused != fw) {
+        *why = QStringLiteral("field seam: %1 rest / %2 focused of %3 (dpr %4)").arg(rest).arg(focused).arg(fw).arg(dpr);
+        return false;
+    }
+    const QRect above(f.left, f.bottom - 1, fw, 1);
+    if (countColour(img, above, containerBorderColor(t)) || countColour(img, above, t.borderFocused)) {
+        *why = QStringLiteral("a second seam row above the field's (dpr %1)").arg(dpr);
+        return false;
+    }
+    const QRect band(f.left, f.top, fw, f.bottom - f.top);
+    if (countColour(img, band, t.background) <= band.width() * band.height() / 2) {
+        *why = QStringLiteral("the field is not the surface (dpr %1)").arg(dpr);
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
 
 // Define to skip GUI integration tests that flash windows (editor/controller tests).
 // Keeps only TypeSelectorPopup-focused tests + benchmarks.
@@ -1290,6 +1445,145 @@ private slots:
     }
     // ── Test: popup updates colors when theme changes ──
 
+    // ── The popup family rule, in pixels ──
+
+    void testTypeSelectorFollowsThePopupFamilyRule() {
+        // ONE surface (theme.background — the body was backgroundAlt with
+        // the filter strip and the detail pane as a second surface on it)
+        // inside ONE device-exact theme.border frame, the filter the same
+        // surface with a single seam row, under tw and vs at dpr 1.0 and
+        // 1.25. applyTheme's theme drives the chrome AND the rows (the
+        // delegate paints from popup.theme()), so tw here means tw
+        // everywhere regardless of what ThemeManager holds.
+        for (const QString& name : {QStringLiteral("tw"), QStringLiteral("vs")}) {
+            const Theme t = shippedTheme(name);
+            QVERIFY2(t.background.isValid(), qPrintable(name + QStringLiteral(".json not found next to the exe")));
+            for (const qreal dpr : { 1.0, 1.25 }) {
+                TypeSelectorPopup popup;
+                popup.applyTheme(t);
+                popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+                popup.setMode(TypePopupMode::FieldType);
+                QVector<TypeEntry> types;
+                for (NodeKind k : {NodeKind::Hex64, NodeKind::Int32, NodeKind::Float, NodeKind::Pointer64}) {
+                    TypeEntry e;
+                    e.entryKind = TypeEntry::Primitive;
+                    e.primitiveKind = k;
+                    e.displayName = QString::fromLatin1(kindMeta(k)->typeName);
+                    e.sizeBytes = sizeForKind(k);
+                    types.append(e);
+                }
+                TypeEntry c;
+                c.entryKind = TypeEntry::Composite;
+                c.structId = 7;
+                c.displayName = QStringLiteral("PlayerEntity");
+                c.classKeyword = QStringLiteral("struct");
+                c.kindGroup = QStringLiteral("Ctr");
+                types.append(c);
+                popup.setTypes(types, nullptr);
+                popup.popup(QPoint(100, 100));
+                QTest::qWait(30);
+                QApplication::processEvents();
+                const QImage img = renderAt(popup, dpr);
+                // Every probe, then one verdict — and the image on disk when
+                // any of them fails, so a red run can be looked at.
+                QStringList failed;
+                QString why;
+                if (!frameIsOneDeviceRow(img, popup.rect(), t, dpr, &why)) failed << why;
+                // The current row's t.selected fill runs to the frame by
+                // design (it is inside the 1-px inset); nothing else may.
+                if (!edgeStripIsGround(img, popup.rect(), t, dpr, 4, true, &why, t.selected)) failed << why;
+                if (!edgeStripIsGround(img, popup.rect(), t, dpr, 4, false, &why, t.selected)) failed << why;
+                if (!failed.isEmpty())
+                    img.save(QDir::tempPath() + QStringLiteral("/typeselector_family_%1_%2.png").arg(name).arg(dpr));
+                QVERIFY2(failed.isEmpty(), qPrintable(name + QStringLiteral(": ") + failed.join(QStringLiteral(" | "))));
+                const QRect all(0, 0, img.width(), img.height());
+                QVERIFY2(countColour(img, all, t.background) > all.width() * all.height() / 2,
+                         "theme.background is not the dominant surface");
+                auto* field = popup.findChild<QLineEdit*>();
+                QVERIFY(field);
+                const QRect fieldRect(field->mapTo(&popup, QPoint(0, 0)), field->size());
+                QVERIFY2(fieldHasOneSeam(img, fieldRect, t, dpr, &why), qPrintable(name + QStringLiteral(": ") + why));
+                // The scrollbar wears the popup's local rule, never the
+                // app-wide 8-px rod: 6 px, track = the surface.
+                QCOMPARE(popup.findChild<QListView*>()->verticalScrollBar()->styleSheet(),
+                         popupScrollBarQss(t, t.background));
+                popup.hide();
+            }
+        }
+    }
+
+    void testEnumPickerFollowsThePopupFamilyRule() {
+        // The enum picker paints from ThemeManager's current theme, so the
+        // probe runs under whatever that is: one surface, the device-exact
+        // frame (was a 1-logical QPen in borderFocused), the filter's seam,
+        // the footer on the same surface (was a backgroundAlt band under a
+        // 1-logical border-top). The rows' left accent stripe is the enum's
+        // own colour by design, so only the right strip is probed.
+        const Theme& t = ThemeManager::instance().current();
+        QVector<EnumPickerPopup::Member> members;
+        for (int i = 0; i < 12; ++i)
+            members.append({QStringLiteral("MEMBER_%1").arg(i), int64_t(i)});
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            EnumPickerPopup popup;
+            popup.show(QStringLiteral("Kind"), members, 3, QColor(0xc5, 0x86, 0xc0), QPoint(100, 100));
+            QTest::qWait(30);
+            QApplication::processEvents();
+            const QImage img = renderAt(popup, dpr);
+            QString why;
+            QVERIFY2(frameIsOneDeviceRow(img, popup.rect(), t, dpr, &why), qPrintable(why));
+            // The current value's row is selected (t.selected across the row,
+            // to the frame) by design; everything else in the strip is ground.
+            QVERIFY2(edgeStripIsGround(img, popup.rect(), t, dpr, 4, false, &why, t.selected), qPrintable(why));
+            auto* field = popup.findChild<QLineEdit*>();
+            QVERIFY(field);
+            QVERIFY2(!field->isHidden(), "twelve members should show the filter");
+            const QRect fieldRect(field->mapTo(&popup, QPoint(0, 0)), field->size());
+            QVERIFY2(fieldHasOneSeam(img, fieldRect, t, dpr, &why), qPrintable(why));
+            // The footer: the surface under one seam row on its top edge.
+            QLabel* footer = nullptr;
+            for (QLabel* l : popup.findChildren<QLabel*>())
+                if (l->text().contains(QStringLiteral("navigate"))) footer = l;
+            QVERIFY(footer);
+            const QRect footerRect(footer->mapTo(&popup, QPoint(0, 0)), footer->size());
+            const Edges f = edgesOf(footerRect, dpr);
+            const Edges e = edgesOf(popup.rect(), dpr);
+            const int w = e.right - e.left - 1;
+            QCOMPARE(countColour(img, QRect(e.left + 1, f.top, w, 1), containerBorderColor(t)), w);
+            if (t.backgroundAlt != t.background)
+                QCOMPARE(countColour(img, QRect(f.left, f.top + 1, f.right - f.left + 1, f.bottom - f.top),
+                                     t.backgroundAlt, 0), 0);
+            popup.hide();
+        }
+    }
+
+    void testHexToolbarFollowsThePopupFamilyRule() {
+        // The hex toolbar: one surface (theme.background — it was the
+        // tooltip's backgroundAlt) inside the device-exact frame (four
+        // 1-logical strips before). Its size buttons start 4 px in, so the
+        // strips probed are 3 device columns.
+        const Theme& t = ThemeManager::instance().current();
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            HexToolbarPopup popup;
+            popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+            HexPopupContext ctx;
+            ctx.currentKind = NodeKind::Hex64;
+            ctx.data = QByteArray(8, 'A');
+            popup.setContext(ctx);
+            popup.popup(QPoint(100, 100));
+            QTest::qWait(30);
+            QApplication::processEvents();
+            const QImage img = renderAt(popup, dpr);
+            QString why;
+            QVERIFY2(frameIsOneDeviceRow(img, popup.rect(), t, dpr, &why), qPrintable(why));
+            QVERIFY2(edgeStripIsGround(img, popup.rect(), t, dpr, 3, true, &why), qPrintable(why));
+            QVERIFY2(edgeStripIsGround(img, popup.rect(), t, dpr, 3, false, &why), qPrintable(why));
+            const QRect all(0, 0, img.width(), img.height());
+            QVERIFY2(countColour(img, all, t.background) > all.width() * all.height() / 2,
+                     "theme.background is not the dominant surface");
+            popup.hide();
+        }
+    }
+
     void testPopupUpdatesOnThemeChange() {
         auto& tm = ThemeManager::instance();
         int origIdx = tm.currentIndex();
@@ -1347,9 +1641,10 @@ private slots:
         tm.setCurrent(otherIdx);
         QApplication::processEvents();
 
-        // After theme change + signal, popup palette should match new theme
+        // After theme change + signal, popup palette should match new theme:
+        // the popup is ONE surface, theme.background (the family rule).
         QCOMPARE(popup.palette().color(QPalette::Window),
-                 tm.current().backgroundAlt);
+                 tm.current().background);
 
         // Restore
         tm.setCurrent(origIdx);

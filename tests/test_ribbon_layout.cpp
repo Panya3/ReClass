@@ -131,6 +131,7 @@ private slots:
     void disabledDimsUnderline();
     void activeTabUnderline();
     void overflowIsMiddleRowItem();
+    void overflowMenuOpenIsHover();
     void captionToneNeverBrighterThanLabel();
     void largeCellsShareAWidthAndSitOnRowThree();
     void collapseChevron();
@@ -1162,6 +1163,48 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     const QImage hov = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     QVERIFY(countColour(hov, d, m_dark.hover) > d.width() * d.height() / 3);
     QCOMPARE(countColour(hov, QRect(d.left(), d.top(), d.width(), 1), m_dark.border), 0);
+}
+
+// The … item while its menu is up: t.hover, never pressedFill — the address
+// bar's rule for a cell with a dropdown hung under it. On tw.json pressedFill
+// is t.selected, which boxed the item in pale blue for the life of the menu.
+// The menu opens on press, so the press itself is the probe; the grab comes
+// BEFORE any event pump (the hidden test desktop's platform closes a popup
+// at the first one).
+void TestRibbonLayout::overflowMenuOpenIsHover() {
+    for (const QString& name : {QStringLiteral("tw"), QStringLiteral("vs")}) {
+        const Theme t = loadTheme(name);
+        QVERIFY2(t.background.isValid(), qPrintable(name));
+        RibbonBar bar;
+        bar.applyTheme(t);
+        bar.setLabelMode(RibbonBar::LabelMode::All);
+        bar.setCurrentTab(QStringLiteral("modify"));
+        bar.resize(760, bar.preferredHeight());
+        bar.show();
+        QTest::qWait(30);
+        QApplication::processEvents();
+        const QRect ov = bar.overflowButtonRect();
+        QVERIFY(!ov.isNull());
+        QMouseEvent press(QEvent::MouseButtonPress, ov.center(), bar.mapToGlobal(ov.center()),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&bar, &press);
+        QMenu* menu = nullptr;
+        for (QMenu* m : bar.findChildren<QMenu*>())
+            if (m->isVisible()) menu = m;
+        QVERIFY2(menu, "the overflow menu should be up after the press");
+        QImage img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        const QRect d = devRect(img, ov);
+        QVERIFY2(countColour(img, d, t.hover) > d.width() * d.height() / 3,
+                 qPrintable(name + QStringLiteral(": the menu-open item is not t.hover")));
+        if (pressedFill(t) != t.hover)
+            QCOMPARE(countColour(img, d, pressedFill(t)), 0);
+        // aboutToHide releases the item; with the mouse elsewhere it is bare.
+        menu->hide();
+        hoverAt(bar, QPoint(0, 0));
+        QApplication::processEvents();
+        img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        QCOMPARE(countColour(img, d, t.hover), 0);
+    }
 }
 
 // P0 #1: the caption is the SECONDARY tier and can never out-shout the label

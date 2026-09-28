@@ -5,7 +5,17 @@
 // be eyeballed deterministically. Runs on the default windows platform (the
 // offscreen plugin isn't installed; the popup is a transient real window).
 //
-// Usage: typeselector_render <out.png>
+// Usage: typeselector_render <out.png> [mode] [light | <theme>]
+//   mode   filter=<text> | expand | perf | selecthdr | toggleclasses | bottom
+//          | ptr | arr (see below)
+//   theme  "light" picks the first light built-in; any other word is a
+//          built-in theme's "name" or JSON basename (tw, vs, ...). Either
+//          goes through setCurrent (the popup's delegate reads the manager)
+//          and is restored on exit.
+//
+// Stdout: the popup's logical size, the dpr and the grab's device size, then
+// the filter, list, viewport and scrollbar rects in popup coordinates, so a
+// pixel scan can crop the frame, the field seam and the track exactly.
 #include <QApplication>
 #include <QFont>
 #include <QListView>
@@ -14,6 +24,10 @@
 #include <QAbstractItemModel>
 #include <QElapsedTimer>
 #include <QSettings>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QScrollBar>
 #include <cstdio>
 #include "typeselectorpopup.h"
 #include "core.h"
@@ -52,6 +66,26 @@ int main(int argc, char** argv) {
                 break;
             }
         }
+    } else if (!themeArg.isEmpty()) {
+        // A built-in by "name", or by the JSON basename next to the exe
+        // ("tw" is "Light", "vs" is "VS2022 Dark") — sourcechooser_render's
+        // lookup, so the two harnesses take the same theme words.
+        const auto themes = ThemeManager::instance().themes();
+        int idx = -1;
+        for (int i = 0; i < themes.size() && idx < 0; ++i)
+            if (themes[i].name.compare(themeArg, Qt::CaseInsensitive) == 0) idx = i;
+        if (idx < 0) {
+            QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/themes/")
+                    + themeArg.toLower() + QStringLiteral(".json"));
+            if (f.open(QIODevice::ReadOnly)) {
+                const QString name = QJsonDocument::fromJson(f.readAll()).object()
+                                         .value(QStringLiteral("name")).toString();
+                for (int i = 0; i < themes.size() && idx < 0; ++i)
+                    if (!name.isEmpty() && themes[i].name == name) idx = i;
+            }
+        }
+        if (idx < 0) { std::fprintf(stderr, "theme not found: %s\n", qPrintable(themeArg)); return 2; }
+        ThemeManager::instance().setCurrent(idx);
     }
 
     TypeSelectorPopup popup;
@@ -236,6 +270,24 @@ int main(int argc, char** argv) {
 
     const QString out = (argc > 1) ? QString::fromLocal8Bit(argv[1])
                                    : QStringLiteral("typeselector_render.png");
-    popup.grab().save(out);
+    const QPixmap grab = popup.grab();
+    grab.save(out);
+
+    auto rectStr = [](const QRect& r) {
+        return QStringLiteral("x=%1 y=%2 w=%3 h=%4").arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height());
+    };
+    auto inPopup = [&popup](const QWidget* w) { return QRect(w->mapTo(&popup, QPoint(0, 0)), w->size()); };
+    std::printf("theme: %s\n", qPrintable(ThemeManager::instance().current().name));
+    std::printf("%s  popup=%dx%d  dpr=%g  device=%dx%d\n", qPrintable(out), popup.width(), popup.height(),
+                grab.devicePixelRatio(), grab.width(), grab.height());
+    if (auto* fe = popup.findChild<QLineEdit*>())
+        std::printf("  filter %s\n", qPrintable(rectStr(inPopup(fe))));
+    if (auto* lv = popup.findChild<QListView*>()) {
+        std::printf("  list %s\n", qPrintable(rectStr(inPopup(lv))));
+        std::printf("  viewport %s\n", qPrintable(rectStr(inPopup(lv->viewport()))));
+        QScrollBar* sb = lv->verticalScrollBar();
+        std::printf("  vscroll visible=%d range=%d..%d %s\n", sb->isVisible() ? 1 : 0,
+                    sb->minimum(), sb->maximum(), qPrintable(rectStr(inPopup(sb))));
+    }
     return 0;
 }

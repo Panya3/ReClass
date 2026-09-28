@@ -25,8 +25,13 @@
 #include "widgets/category_chip.h"
 #include "widgets/fuzzy_match.h"
 #include "widgets/dialog_button.h"
+#include "widgets/popup_chrome.h"
 #include "rcxtooltip.h"
 #include "fontutil.h"
+#include "paintutil.h"
+#include "svgicon.h"
+#include <QAction>
+#include <QScrollBar>
 #include <QSettings>
 
 namespace rcx {
@@ -198,7 +203,10 @@ public:
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
                const QModelIndex& index) const override {
         painter->save();
-        const auto& t = ThemeManager::instance().current();
+        // The popup's theme, not ThemeManager's: chrome and rows must never
+        // disagree (a previewed theme, or a harness's, showed rows in the
+        // app's theme under a frame in another).
+        const Theme& t = m_popup->theme();
         const int row = index.row();
 
         // ── Loading skeleton ──
@@ -242,9 +250,11 @@ public:
         if (isSection) {
             const bool collap = entry && entry->sectionCollapsible;
             // Separator rule above every header except the very first row, so
-            // sections are clearly divided.
+            // sections are clearly divided: one device row of the seam colour
+            // (the family's interior seam) across the viewport, continued
+            // across the scroll track by the popup's SeamScrollBar.
             if (row > 0)
-                painter->fillRect(r.x(), y, r.width(), 1, t.border);
+                fillTopDeviceRowOfRect(*painter, QRectF(r), containerBorderColor(t));
             // Collapsible headers are interactive — selection / hover feedback.
             if (collap) {
                 if (option.state & QStyle::State_Selected)
@@ -517,13 +527,14 @@ private:
 // ── TypeSelectorPopup ──
 
 TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
-    : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint)
+    : QFrame(parent, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint)
 {
     setAttribute(Qt::WA_DeleteOnClose, false);
 
-    const auto& theme = ThemeManager::instance().current();
+    m_theme = ThemeManager::instance().current();
+    const Theme& theme = m_theme;
     QPalette pal;
-    pal.setColor(QPalette::Window,          theme.backgroundAlt);
+    pal.setColor(QPalette::Window,          theme.background);
     pal.setColor(QPalette::WindowText,      theme.text);
     pal.setColor(QPalette::Base,            theme.background);
     pal.setColor(QPalette::AlternateBase,   theme.surface);
@@ -539,22 +550,37 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     setLineWidth(0);
 
     auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(6, 5, 6, 5);
-    layout->setSpacing(3);
+    // 1 logical px on every side (the popup family rule — the comment above
+    // SourceChooserPopup::paintEvent): the frame's device row / column
+    // lives inside the first logical px (paintEvent), so the field, the
+    // list, its scrollbar and every delegate fill end AT the frame instead
+    // of on it, and every seam spans this interior width. The rows that
+    // carry controls inset themselves to the house gutter.
+    layout->setContentsMargins(1, 1, 1, 1);
+    layout->setSpacing(0);
 
     // ── Top: Filter + close ──
     {
         auto* row = new QHBoxLayout;
-        row->setContentsMargins(0, 0, 0, 0);
+        row->setContentsMargins(0, 4, 4, 0);
+        row->setSpacing(4);
 
-        m_filterEdit = new QLineEdit;
-        m_filterEdit->setPlaceholderText(
+        // The field is the popup surface plus its own device-exact seam
+        // (PopupFilterField); its clear action is the house 12-px tinted
+        // close glyph, shown only with text, not Qt's stock button.
+        auto* filter = new PopupFilterField;
+        filter->setPlaceholderText(
             QStringLiteral("Filter types..  (try int*, Ball[10])"));
-        m_filterEdit->setClearButtonEnabled(true);
+        filter->setFrame(false);
+        filter->setFixedHeight(PopupFilterField::kMinHeight);
+        m_filterClear = filter->addAction(QIcon(), QLineEdit::TrailingPosition);
+        m_filterClear->setVisible(false);
+        m_filterClear->setToolTip(QStringLiteral("Clear"));
+        connect(m_filterClear, &QAction::triggered, filter, &QLineEdit::clear);
+        connect(filter, &QLineEdit::textChanged, m_filterClear,
+                [this](const QString& s) { m_filterClear->setVisible(!s.isEmpty()); });
+        m_filterEdit = filter;
         m_filterEdit->setPalette(pal);
-        m_filterEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 0px; }")
-            .arg(theme.border.name()));
         m_filterEdit->setAccessibleName(QStringLiteral("Filter types"));
         m_filterEdit->installEventFilter(this);
         connect(m_filterEdit, &QLineEdit::textChanged,
@@ -565,10 +591,12 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_escLabel->setText(QStringLiteral("\u2715"));
         m_escLabel->setAutoRaise(true);
         m_escLabel->setCursor(Qt::PointingHandCursor);
+        // Hover is `text` on a t.hover ground, not the accent: indHoverSpan
+        // is budgeted to a "current" marker, and a close glyph is not one.
         m_escLabel->setStyleSheet(QStringLiteral(
             "QToolButton { color: %1; border: none; padding: 2px 4px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+            "QToolButton:hover { color: %2; background: %3; }")
+            .arg(theme.textDim.name(), theme.text.name(), theme.hover.name()));
         connect(m_escLabel, &QToolButton::clicked, this, [this]() { hide(); });
         row->addWidget(m_escLabel);
 
@@ -770,6 +798,25 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_listView->setBatchSize(50);
         m_listView->installEventFilter(this);
 
+        // The scrollbar carries the section rules across its track
+        // (SeamScrollBar): a rule the delegate paints ends at the viewport,
+        // and while the list scrolled it stopped short of the frame under
+        // the bare track.
+        auto* seamBar = new SeamScrollBar(Qt::Vertical);
+        seamBar->seams = [this]() {
+            QVector<SeamScrollBar::Seam> out;
+            const QColor seam = containerBorderColor(m_theme);
+            const QRect visible = m_listView->viewport()->rect();
+            for (int r = 1; r < m_filteredTypes.size(); ++r) {
+                if (m_filteredTypes[r].entryKind != TypeEntry::Section) continue;
+                const QRect vr = m_listView->visualRect(m_model->index(r));
+                if (!vr.isValid() || !vr.intersects(visible)) continue;
+                out.append({QRectF(vr), /*bottomEdge*/ false, seam});
+            }
+            return out;
+        };
+        m_listView->setVerticalScrollBar(seamBar);
+
         auto* delegate = new TypeSelectorDelegate(this, m_listView);
         m_listView->setItemDelegate(delegate);
 
@@ -848,7 +895,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     {
         m_modRow = new QWidget;
         auto* modLayout = new QHBoxLayout(m_modRow);
-        modLayout->setContentsMargins(0, 0, 0, 0);
+        modLayout->setContentsMargins(kGutter, 4, kGutter, 2);
         modLayout->setSpacing(4);
 
         m_modLabel = new QLabel(QStringLiteral("Apply as:"));
@@ -934,7 +981,7 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     // ── Action row: live preview banner (left) + "＋ New" / "OK" (right) ──
     {
         auto* row = new QHBoxLayout;
-        row->setContentsMargins(0, 0, 0, 0);
+        row->setContentsMargins(kGutter, 2, kGutter, 6);
         row->setSpacing(6);
 
         m_titleLabel = new QLabel;
@@ -942,6 +989,10 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         m_titleLabel->setAlignment(Qt::AlignVCenter);
         m_titleLabel->setTextFormat(Qt::RichText);
         m_titleLabel->setContentsMargins(0, 0, 0, 0);
+        // The banner yields before the buttons do: a QLabel's minimum is its
+        // full text, and at a narrow popup that pushed the OK button out
+        // through the right frame (its outline painted ON the border).
+        m_titleLabel->setMinimumWidth(1);
         row->addWidget(m_titleLabel);
 
         row->addStretch();
@@ -984,6 +1035,11 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
     // info one band lower without adding anything. Less visual noise,
     // same actionable information.)
 //TODO-DELETE(m_footerLabel = nullptr)     m_footerLabel = nullptr;
+
+    // The field's seam, the clear glyph and the scrollbar rule are set in
+    // applyTheme (the one place, so a theme switch and the first paint
+    // cannot disagree).
+    applyTheme(m_theme);
 
     // Apply the initial chrome gating for the default (simple/Common) mode.
     updateModeChrome();
@@ -1108,6 +1164,10 @@ void TypeSelectorPopup::setFont(const QFont& font) {
     }
     m_escLabel->setFont(font);
     m_filterEdit->setFont(font);
+    // The field's height follows the face (fm.height() + 8, the section
+    // band rule) with PanelSearchField's 26 as the floor.
+    m_filterEdit->setFixedHeight(qMax(PopupFilterField::kMinHeight,
+                                      QFontMetrics(font).height() + 8));
     m_listView->setFont(font);
 
     QFont smallFont = font;
@@ -1152,8 +1212,9 @@ void TypeSelectorPopup::setFont(const QFont& font) {
 }
 
 void TypeSelectorPopup::applyTheme(const Theme& theme) {
+    m_theme = theme;
     QPalette pal;
-    pal.setColor(QPalette::Window,          theme.backgroundAlt);
+    pal.setColor(QPalette::Window,          theme.background);
     pal.setColor(QPalette::WindowText,      theme.text);
     pal.setColor(QPalette::Base,            theme.background);
     pal.setColor(QPalette::AlternateBase,   theme.surface);
@@ -1162,7 +1223,6 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
     pal.setColor(QPalette::ButtonText,      theme.text);
     pal.setColor(QPalette::Highlight,       theme.hover);
     pal.setColor(QPalette::HighlightedText, theme.text);
-    pal.setColor(QPalette::Dark,            theme.border);  // 1px frame border
     setPalette(pal);
 
     m_titleLabel->setPalette(pal);
@@ -1171,20 +1231,32 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
     m_listView->viewport()->setPalette(pal);
     m_arrayCountEdit->setPalette(pal);
 
-    // Esc button (snapped to corner)
+    // Esc button (snapped to corner) — hover `text` on t.hover, not the
+    // accent (see the ctor).
     m_escLabel->setStyleSheet(QStringLiteral(
         "QToolButton { color: %1; border: none; padding: 2px 4px; }"
-        "QToolButton:hover { color: %2; }")
-        .arg(theme.textDim.name(), theme.indHoverSpan.name()));
+        "QToolButton:hover { color: %2; background: %3; }")
+        .arg(theme.textDim.name(), theme.text.name(), theme.hover.name()));
 
     // Create / OK buttons are DialogButtons — they self-theme on
     // themeChanged, so no per-button stylesheet here (removes the old
     // square-vs-rounded constructor/applyTheme drift).
 
-    // Filter (no focus accent)
-    m_filterEdit->setStyleSheet(QStringLiteral(
-        "QLineEdit { border: 1px solid %1; padding: 2px 4px; border-radius: 0px; }")
-        .arg(theme.border.name()));
+    // The field: the popup surface plus its own device-exact seam
+    // (PopupFilterField) — no QSS box; the clear glyph tinted textDim.
+    static_cast<PopupFilterField*>(m_filterEdit)->applyTheme(theme, theme.background, kGutter - 2);
+    if (m_filterClear) {
+        constexpr int kClearIconPx = 12;
+        m_filterClear->setIcon(themedVsIcon(QStringLiteral(":/vsicons/close.svg"),
+                                            theme.textDim, kClearIconPx, devicePixelRatioF()));
+        // QLineEdit creates the action's button lazily; size it once it
+        // exists so the glyph is the spec'd 12 px, not Qt's 16.
+        for (auto* b : m_filterEdit->findChildren<QToolButton*>())
+            b->setIconSize(QSize(kClearIconPx, kClearIconPx));
+    }
+
+    // The scrollbar: the popup's local 6-px rule, not the app-wide rod.
+    m_listView->verticalScrollBar()->setStyleSheet(popupScrollBarQss(theme, theme.background));
 
     // Segmented modifier control (square, joined)
     QString segStyle = QStringLiteral(
@@ -1230,13 +1302,15 @@ void TypeSelectorPopup::applyTheme(const Theme& theme) {
             .arg(theme.textFaint.name(), theme.border.name()));
     }
 
-    // Detail pane
+    // Detail pane — the same surface as the rest of the popup.
     if (m_detailPane) {
         QPalette dp;
         dp.setColor(QPalette::Window, theme.background);
         m_detailPane->setPalette(dp);
     }
 
+    update();
+    m_listView->viewport()->update();
 }
 
 //TODO-DELETE(TypeSelectorPopup::setTitle) void TypeSelectorPopup::setTitle(const QString& /*title*/) {
@@ -1421,11 +1495,22 @@ void TypeSelectorPopup::popup(const QPoint& globalPos) {
     int estMaxW = iconColW + fm.horizontalAdvance(QChar('W')) * m_cachedMaxNameLen + 16;
     int maxTextW = qMax(fm.horizontalAdvance(QStringLiteral("Choose element type        ")), estMaxW);
     int popupW = qBound(charW * 46, maxTextW + 24, maxPopupW);
-    int rowH = fm.height() + 6;
-    int headerH = rowH * 2 + 10;
-    int footerH = rowH + 6;
-    int listH = qBound(rowH * 3, rowH * (int)m_filteredTypes.size(), rowH * 16);
-    int popupH = qMax(400, headerH + listH + footerH);
+    // Height from the real hints: the rows through the delegate (a section
+    // row is taller than an item row), capped at 16 item rows, and the
+    // chrome through the layout — never a hand-summed table. `rowH * n`
+    // undercounted every section row by a few px, and the 1-px overflow put
+    // a full-length scrollbar handle on a list that fit.
+    const int rowH = fm.height() + 6;
+    const int listCap = rowH * 16;
+    int contentH = 0;
+    for (int r = 0, n = m_model->rowCount(); r < n && contentH < listCap; ++r)
+        contentH += m_listView->sizeHintForRow(r);
+    const int listH = qBound(rowH * 3, contentH, listCap);
+    layout()->invalidate();
+    layout()->activate();
+    const int chromeH = layout()->sizeHint().height()
+        - m_listView->sizeHint().expandedTo(m_listView->minimumSizeHint()).height();
+    int popupH = qMax(400, chromeH + listH);
 
     placeOnScreen(globalPos, popupW, popupH);
 }
@@ -1549,10 +1634,10 @@ void TypeSelectorPopup::updateDetailPane() {
 
     // ── Header ──
     html += QStringLiteral(
-        "<div style='padding:7px 8px 5px 8px;border-bottom:1px solid %1;background:%2'>"
-        "<div style='font-size:%3pt;font-weight:bold;color:%4'>%5</div>"
-        "<div style='font-size:%6pt;color:%7'>%8</div></div>")
-        .arg(t.border.name(), t.backgroundAlt.name())
+        "<div style='padding:7px 8px 5px 8px;border-bottom:1px solid %1'>"
+        "<div style='font-size:%2pt;font-weight:bold;color:%3'>%4</div>"
+        "<div style='font-size:%5pt;color:%6'>%7</div></div>")
+        .arg(t.border.name())
         .arg(pt).arg(t.text.name(), entry.displayName.toHtmlEscaped())
         .arg(ptXS).arg(t.textMuted.name(), entry.kindGroup);
 
@@ -2250,6 +2335,12 @@ int TypeSelectorPopup::nextSelectableRow(int from, int direction) const {
 }
 
 bool TypeSelectorPopup::eventFilter(QObject* obj, QEvent* event) {
+    // The field's seam is continued under the close glyph beside it
+    // (paintEvent) in the field's focus colour, so a focus change repaints
+    // the popup, not just the field.
+    if (obj == m_filterEdit
+        && (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut))
+        update();
     if (event->type() == QEvent::KeyPress) {
         auto* ke = static_cast<QKeyEvent*>(event);
 
@@ -2331,16 +2422,26 @@ bool TypeSelectorPopup::eventFilter(QObject* obj, QEvent* event) {
     return QFrame::eventFilter(obj, event);
 }
 
-void TypeSelectorPopup::paintEvent(QPaintEvent* event) {
-    QFrame::paintEvent(event);
-    // 1px border drawn manually (QFrame::Box draws 2px with Fusion)
+// The popup family rule (the comment above SourceChooserPopup::paintEvent,
+// src/sourcechooserpopup.cpp): ONE surface — theme.background, which the
+// filter strip and the detail pane used to sit on as a second one under a
+// backgroundAlt body — inside ONE device-exact theme.border frame. The four
+// 1-logical fillRect strips this painted before snapped to one or two
+// device rows at 125 % depending on where the popup landed.
+void TypeSelectorPopup::paintEvent(QPaintEvent*) {
+    const Theme& t = m_theme;
     QPainter p(this);
-    QColor bd = palette().color(QPalette::Dark);
-    int w = width(), h = height();
-    p.fillRect(0, 0, w, 1, bd);
-    p.fillRect(0, h - 1, w, 1, bd);
-    p.fillRect(0, 0, 1, h, bd);
-    p.fillRect(w - 1, 0, 1, h, bd);
+    p.setRenderHint(QPainter::Antialiasing, false);
+    p.fillRect(rect(), t.background);
+    // The field's seam across the whole interior: the field paints its own
+    // row over its rect, and this carries it under the close glyph beside
+    // it in the same (focus-aware) colour.
+    if (m_filterEdit && !m_filterEdit->isHidden()) {
+        const QRect f = m_filterEdit->geometry();
+        fillBottomDeviceRowOfRect(p, QRectF(1, f.top(), width() - 2, f.height()),
+                                  static_cast<PopupFilterField*>(m_filterEdit)->seamColor());
+    }
+    fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
 }
 
 void TypeSelectorPopup::hideEvent(QHideEvent* event) {

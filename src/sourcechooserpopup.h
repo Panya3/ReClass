@@ -78,9 +78,15 @@ public:
 
     void setFont(const QFont& font);
     void applyTheme(const Theme& theme);
+    // Rebuilds the list; while the popup is up (a per-row x delete) it also
+    // re-fits the height to the new rows, top edge anchored.
     void setSources(const QVector<SourceEntry>& entries);
     void setLivenessResults(const QVector<bool>& alive);
-    void popup(const QPoint& globalPos);
+    // `globalPos` is the anchor — the bar's bottom edge under the chip — and
+    // `anchorTop` the bar's top edge (global y), so a popup that has to flip
+    // above the bar ends one device row above it instead of covering the bar
+    // and the chip. -1 = no bar: a flipped popup ends on the anchor.
+    void popup(const QPoint& globalPos, int anchorTop = -1);
     void warmUp();
 
     const Theme& theme() const { return m_theme; }
@@ -90,7 +96,7 @@ signals:
     void providerSelected(const QString& identifier);
     void removeRequested(int savedIndex);
     void clearRequested();
-    void dismissed();   // hidden by any route (pick, Esc, outside click); the chip that opened it un-presses
+    void dismissed();   // hidden by any route (pick, Esc, outside click); the chip that opened it drops its hover
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;
@@ -100,7 +106,7 @@ protected:
 private:
     QLabel*           m_titleLabel  = nullptr;
     QWidget*          m_escBtn      = nullptr;
-    QLineEdit*        m_filterEdit  = nullptr;   // a SourceFilterField (sourcechooserpopup.cpp)
+    QLineEdit*        m_filterEdit  = nullptr;   // a PopupFilterField (widgets/popup_chrome.h)
     QAction*          m_clearAction = nullptr;   // the field's trailing × — shown only with text
     QListView*        m_listView    = nullptr;   // a SourceListView (sourcechooserpopup.cpp)
     QStringListModel* m_model       = nullptr;
@@ -114,8 +120,15 @@ private:
     QVector<SourceEntry> m_filteredEntries;
     QVector<QVector<int>> m_matchPositions;
     int m_cachedMaxNameLen = 0;
+    // Where popup() was asked to open: re-read by the re-fit setSources()
+    // runs while the popup is up.
+    QPoint m_anchor;
+    int    m_anchorTop = -1;
 
     void applyFilter(const QString& text);
+    // Sizes the popup to its rows, capped by the screen; `keepTop` re-fits
+    // in place (the top edge stays, only the bottom moves).
+    void fitToScreen(bool keepTop);
     void acceptCurrent();
     void acceptIndex(int row);
     int  nextSelectableRow(int from, int direction) const;

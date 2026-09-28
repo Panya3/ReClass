@@ -514,8 +514,8 @@ public:
 
     // The source chooser is the one dropdown the bar does not own (the
     // controller opens the shared SourceChooserPopup), so the controller
-    // says when it is up and when it went away; in between the chip reads
-    // pressed, exactly like a cell with its own QMenu open.
+    // says when it is up and when it went away; in between the chip stays
+    // t.hover, exactly like a cell with its own QMenu open.
     void setSourceMenuOpen(bool open) {
         const QString id = QStringLiteral("src");
         if (open) { if (m_menuOpenId == id) return; m_menuOpenId = id; }
@@ -848,7 +848,7 @@ protected:
         }
         if (id == QLatin1String("overflow")) {
             // Menus open on press (like every other dropdown in the app);
-            // the cell shows pressed through m_menuOpenId until it hides.
+            // the cell stays t.hover through m_menuOpenId until it hides.
             m_pressedId.clear();
             showOverflowMenu();
             e->accept();
@@ -1634,7 +1634,7 @@ private:
         case Cell::SrcChev: {
             // The anchor is the bar's bottom edge under the chip, not the
             // cell's bottom: the popup hangs below the seam instead of
-            // covering it. The controller marks the chip pressed while the
+            // covering it. The controller holds the chip at t.hover while the
             // popup is up (setSourceMenuOpen) — it, not the bar, knows when
             // the popup closed.
             const QRect chip = itemRect(QStringLiteral("src"));
@@ -1779,7 +1779,7 @@ private:
             QAction* a = menu->addAction(m_state.crumbs[i].label);
             connect(a, &QAction::triggered, this, [this, i] { if (m_cb.onCrumb) m_cb.onCrumb(i); });
         }
-        // The « cell stays pressed while its menu is up.
+        // The « cell stays t.hover while its menu is up.
         m_menuOpenId = QStringLiteral("overflow");
         connect(menu, &QMenu::aboutToHide, this, [this, menu] {
             m_menuOpenId.clear();
@@ -1790,7 +1790,7 @@ private:
         menu->popup(mapToGlobal(QPoint(r.left(), r.bottom() + 1)));
     }
 
-    // A menu hung under a cell: the cell stays pressed (m_menuOpenId) until
+    // A menu hung under a cell: the cell stays t.hover (m_menuOpenId) until
     // the menu hides, and the menu frees itself then — every dropdown the
     // bar owns is built per open, since what it lists changes underneath.
     void popupUnderCell(QMenu* menu, const QString& cellId, const QRect& cell) {
@@ -1899,7 +1899,7 @@ private:
             });
         }
         if (menu->actions().isEmpty()) { menu->deleteLater(); return; }
-        // The overlay is its own pressed state; no cell to hold down.
+        // The overlay carries its own look; no cell to hold at t.hover.
         connect(menu, &QMenu::aboutToHide, this, [this, menu] { update(); menu->deleteLater(); });
         menu->popup(mapToGlobal(QPoint(m_editRect.left(), height())));
     }
@@ -1967,8 +1967,8 @@ private:
             connect(clear, &QAction::triggered, this, [] { GotoAddressDialog::clearRecent(); });
         }
         const QRect anchor = forEdit ? m_editRect : itemRect(QStringLiteral("recent"));
-        // The recent cell stays pressed while its menu is up; the edit's
-        // menu belongs to the overlay, which is its own pressed state.
+        // The recent cell stays t.hover while its menu is up; the edit's
+        // menu belongs to the overlay, which carries its own state.
         m_menuOpenId = forEdit ? QString() : QStringLiteral("recent");
         connect(menu, &QMenu::aboutToHide, this, [this, menu] {
             if (m_menuOpenId == QLatin1String("recent")) m_menuOpenId.clear();
@@ -2117,7 +2117,7 @@ private:
 
     QString m_hoverId;
     QString m_pressedId;
-    QString m_menuOpenId;      // cell kept pressed while its menu (or the source popup) is up
+    QString m_menuOpenId;      // cell held at t.hover while its menu (or the source popup) is up
     bool    m_swallowNextPress = false;   // the press that ended an edit is spent...
     QRect   m_swallowRect;                // ...only inside what the overlay covered
     // Keyboard mode: the focused cell's id while it lasts; m_synthPress

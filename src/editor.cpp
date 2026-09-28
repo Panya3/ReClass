@@ -37,6 +37,7 @@
 #include <functional>
 #include <cmath>
 #include "themes/thememanager.h"
+#include "paintutil.h"
 
 namespace rcx {
 
@@ -1146,9 +1147,11 @@ public:
 
         vbox->addLayout(topRow);
 
+        // The seam under the title: a 1-px spacer the host paints ONE device
+        // row of containerBorderColor over (paintEvent). A QFrame::HLine is
+        // 1 logical px — two device rows at 125 %.
         m_separator = new QFrame(this);
-        m_separator->setFrameShape(QFrame::HLine);
-        m_separator->setFrameShadow(QFrame::Plain);
+        m_separator->setFrameShape(QFrame::NoFrame);
         m_separator->setFixedHeight(1);
         vbox->addWidget(m_separator);
 
@@ -1171,12 +1174,27 @@ public:
                 [this](const QString&) { if (m_onHidePopups) m_onHidePopups(); });
         vbox->addWidget(m_footerHint);
 
-        // 1 px themed border on the whole popup — no rounding, no
-        // shadow. setFrameShape(Box) draws the actual border; the
-        // palette set in applyHostTheme controls its color.
-        setFrameShape(QFrame::Box);
-        setFrameShadow(QFrame::Plain);
-        setLineWidth(1);
+        // The frame is painted (paintEvent below): ONE device-exact
+        // theme.border row / column per side — the popup family rule's frame
+        // (the comment above SourceChooserPopup::paintEvent,
+        // src/sourcechooserpopup.cpp). QFrame::Box at lineWidth 1 was 1
+        // logical px: one or two device rows at 125 %, depending on where
+        // the popup landed.
+        setFrameShape(QFrame::NoFrame);
+    }
+
+    // The family's one exception is the surface: it stays backgroundAlt,
+    // the TOOLTIP surface (RcxTooltip's), because a hover popup is transient
+    // like a tooltip — it is not a chooser the user works inside. The frame
+    // and the title seam are device rows like everyone else's.
+    void paintEvent(QPaintEvent* e) override {
+        HoverPopup::paintEvent(e);
+        const auto& t = ThemeManager::instance().current();
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, false);
+        if (m_separator)
+            fillTopDeviceRowOfRect(p, QRectF(m_separator->geometry()), containerBorderColor(t));
+        fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
     }
 
     void setOnActiveChanged(ActiveChangedFn fn) { m_onActiveChanged = std::move(fn); }
@@ -1401,10 +1419,9 @@ private:
     void applyHostTheme() {
         if (!m_titleLabel || !m_footerHint) return;
         const auto& t = ThemeManager::instance().current();
-        // Popup background + border palette. With QFrame::Box +
-        // lineWidth=1 set in the ctor, the frame draws a 1 px border
-        // in WindowText color around a backgroundAlt fill — matching
-        // every other panel surface in the editor.
+        // The tooltip surface (backgroundAlt) as the ground; the frame and
+        // the title seam are painted in device rows (paintEvent), so the
+        // palette no longer carries a border colour anything draws with.
         QPalette pal;
         pal.setColor(QPalette::Window, t.backgroundAlt);
         pal.setColor(QPalette::WindowText, t.border);
@@ -1415,9 +1432,7 @@ private:
             refreshDots();
             refreshFooter();
         }
-        QPalette sp;
-        sp.setColor(QPalette::WindowText, t.border);
-        m_separator->setPalette(sp);
+        update();
     }
 
     QLabel*           m_titleLabel  = nullptr;
