@@ -50,7 +50,7 @@ Every cell is addressed by a string id — the namespace `itemRect(id)`,
 | — | field divider: one device column, `containerBorderColor`, inset 4 px | 6 + 1 + 6 | everything right of it is "the field" |
 | `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source". Icon-only in a narrow pane (step 7a): the name lives in the tooltip, `sourceDisplayText()` is empty | 4 + 16 + 4 + text + 2 (icon-only: 4 + 16 + 2) | the source chooser, anchored under the chip; the chip stays `t.hover` while it is up |
 | `src.chev` | `chevron-down` `textFaint` | 14 | same as `src` (one hover group, one keyboard stop) |
-| `base` | the formula if set else `0x…`, plus a `textMuted` ` = 0x…` suffix (what the formula resolves to; only beside a formula — an equation, evenly spaced, and NOT an arrow: the bar's own Back and Forward are arrows); in a narrow pane (step 7b) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + suffix + 6 | the base edit — always on the FULL formula |
+| `base` | the formula if set else `0x…`, then `baseSepGap()` (one space, as geometry) and a `textMuted` `= 0x…` suffix (what the formula resolves to; only beside a formula — an equation, evenly spaced, and NOT an arrow: the bar's own Back and Forward are arrows); in a narrow pane (step 7b) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + gap + suffix + 6 | the base edit — always on the FULL formula |
 | `overflow` | `«` in `textDim`, present only when crumbs are folded | 18 | menu of the hidden crumbs, root first → `onCrumb(i)` |
 | `crumb:<i>` | one crumb: `Class.field` for an ancestor, bare `Class` for the deepest | 6 + text + 6 | ancestor → collapse below + scroll (one undo entry, one history entry); the deepest is a FIELD on its own class name (no fill, IBeam) — click or F2 renames it in place, and its context menu carries "Scroll to top" (what the click used to do) and "Other classes…" (the line-0 chooser) |
 | `chev:<i>` | after crumb *i*, same › → ˅ flip | 14 | menu of the drillable fields of the class at crumb *i*, the trail's hop checked, each row saying where its field leads (`@ 0x…` in the row's tab column when known, always in its tooltip); the trailing one drills further |
@@ -129,20 +129,56 @@ the same `editGeometryFor` rule a fresh open uses), the "after" paper is
 recomputed, and the text, caret and selection are left exactly as the user
 had them; Esc still restores.
 
-**Every overlay is the size of its value.** `editFitWidth` measures the FULL
-text in the field's own font and adds `kEditChromeW` (12: the `QLineEdit`
-interior's 2 + 6 padding plus the 2 Qt reserves inside each end) and
-`kEditCaretSlack`; `kEditMinW` (90) is the floor for a short one, and the
-right bound is `editLimit()` less `kEditPreviewMinW` so growth can never
-squeeze out the preview. Within one edit session the width is **monotonic**:
-`placeEdit` records `m_editGrownW` and `editWidthFor` reads it back as a
-second floor, so the field grows as you type and never shrinks back — a box
+### The overlay IS the cell
+
+Clicking into a segment draws the ring and selects the value. It moves
+**nothing** — the standard the editor's own inline edit sets, which replaces a
+span inside the Scintilla buffer and so cannot move anything by construction.
+Four rules get an overlaid `QLineEdit` to the same place, and
+`testOpeningAnEditMovesNothingOutsideItsSegment` is the one that actually
+proves it: the bar grabbed at rest and mid-edit, every differing device column
+counted, all of them required to fall inside the segment.
+
+1. **Same first pixel.** `syncEditTextMargins` MEASURES the inset a
+   `QLineEdit` keeps for itself (our margins at zero, the caret at position 0,
+   `cursorRect().left()` — hence `address_bar_detail::EditField`, a two-line
+   subclass that makes the protected `cursorRect` reachable) and sets text
+   margins so the left inset is exactly `kBasePad`, the same the cell paints
+   at. Assuming Qt's number instead of measuring it is a 2-px shove.
+2. **Same width.** `editFitWidth` = `kBasePad + advance(FULL text) +
+   baseSepGap()`, which for a cell's own text is that cell's width. There is
+   deliberately **no minimum** — a one-character value gets a one-character
+   field, because that is what the cell is. (`kEditMinW` is not a width floor;
+   it is the narrow-STRIP fallback, plus a real floor for the Path scope,
+   which stands in for the whole trail rather than for one cell.)
+3. **Same face.** `editFont(scope)` returns the cell's own, `deepestFont()`
+   included — the deepest crumb is DemiBold from depth 2, and a field that
+   opened in the regular weight would re-set the text lighter and narrower.
+4. **Same suffix column.** `baseSepGap()` — one space wide — is the gap the
+   cell leaves before its `= 0x…`, and it is GEOMETRY rather than a space in
+   the string because it doubles as the room the caret needs. The field ends
+   in it, so `m_editRect.right() + 1` is exactly where the resting suffix
+   stands, and that is where `paintEditChrome` starts the preview.
+
+Growth is for text you **add**. Within one edit session the width is
+**monotonic**: `placeEdit` records `m_editGrownW` and `editWidthFor` reads it
+back as a floor, so the field grows as you type and never shrinks back — a box
 that reflowed under the caret, dragging the preview with every character,
-was the reason the old rule was a flat 180-px slab instead.
+would be its own kind of annoying. The right bound is `editLimit()` less
+`kEditPreviewMinW`, so growth can never squeeze out the preview; past that the
+`QLineEdit` scrolls internally.
+
+**What an overlay covers** is the cell too, not the strip: the field, the cell
+it replaces, and the preview's run (`placeEdit` → `editCellRect` +
+`editPreviewRight`). Papering out to `recent` was right when the field was a
+180-px slab that half-overlapped the crumbs and left their tails showing;
+blanking the trail because you clicked the address is the same sin as shoving
+it. **Path is the exception** — it stands in for the whole trail, so it covers
+the whole trail, and it is the scope whose covered cells go hover-quiet.
 
 | Scope | Opened by | Text | Grammar | Commit |
 |---|---|---|---|---|
-| **Base** | click `base`, F2 on `base` in keyboard mode, "Edit address" in its context menu | the FULL formula (never the elided display), selected, in a field fitted to it | while it is open a PRIVATE `RcxTooltip` shows the grammar (`fmt::baseAddressHelpTitle` / `Body`, a monospace table of the five forms plus the operators) — private because `GlobalTooltipBridge` clears the shared one on every `KeyPress`, and re-armed by a 5-s timer against `RcxTooltip`'s own 20-s expiry; anything `AddressParser` takes: `0x1000`, `<mod.exe>+0x40`, `[<mod.exe>+0x10]*2`. Live: `fmt::validateBaseAddress` + the controller's evaluator drive the seam colour and a `→ 0x…` preview; Down / `▾` opens a fuzzy-filtered menu of recents, bookmarks and `Provider::modulesCached()` as `<mod.exe>` | `onBaseCommit` → `rebaseTo`: strip backticks / CRLF → evaluate → bare-literal rule → `cmd::ChangeBase` only on change → `GotoAddressDialog::pushRecent`. Invalid input is REFUSED: the overlay stays, the seam goes `markerError`, the status bar says `Base: <error>`. |
+| **Base** | click `base`, F2 on `base` in keyboard mode, "Edit address" in its context menu | the FULL formula (never the elided display), selected, in a field fitted to it | while it is open a PRIVATE `RcxTooltip` shows the grammar (`fmt::baseAddressHelpTitle` / `Body`, a monospace table of the five forms plus the operators) — private because `GlobalTooltipBridge` clears the shared one on every `KeyPress`, and re-armed by a 5-s timer against `RcxTooltip`'s own 20-s expiry; anything `AddressParser` takes: `0x1000`, `<mod.exe>+0x40`, `[<mod.exe>+0x10]*2`. Live: `fmt::validateBaseAddress` + the controller's evaluator drive the seam colour and, for a FORMULA only, a `= 0x…` preview — a literal evaluates to itself, and `0x1000 = 0x1000` is the same number twice appearing out of nowhere the moment you click in; Down / `▾` opens a fuzzy-filtered menu of recents, bookmarks and `Provider::modulesCached()` as `<mod.exe>` | `onBaseCommit` → `rebaseTo`: strip backticks / CRLF → evaluate → bare-literal rule → `cmd::ChangeBase` only on change → `GotoAddressDialog::pushRecent`. Invalid input is REFUSED: the overlay stays, the seam goes `markerError`, the status bar says `Base: <error>`. |
 | **Path** | click `space`, Alt+D, Ctrl+L, F2 on an ANCESTOR crumb in keyboard mode | the dotted trail (`trailPathText`): `RcxEditor.vptr.parent`, from the base's right edge to `recent` | `Root.field.field…` — the first segment names a top-level struct by type name or name, every later one a drillable field of the class the segments before it reach (a pointer's `refId` class or an embedded struct). Whitespace, a trailing dot and doubled dots are tolerated. Down completes the last segment from that class's drillable fields. | `onPathCommit` → `navigateToDrillPath`: one macro "Navigate to path" (expand every collapsed hop), `focusPath` = the resolved hops, one history entry. An unknown segment is refused with the seam in `markerError` and a hint naming it (`No field 'nope' in RcxEditor`). |
 | **Class** | click the DEEPEST crumb, F2 on it in keyboard mode, "Rename class" in its context menu | that crumb's label, which is a bare class name (ancestors read `Class.field`, which is a path segment and not a name) — selected, in a field over the crumb itself | a name. The one rule is that it is not empty, the same rule line 0's class-name edit enforces; nothing stricter, because a bar that refused what the editor accepts would be the odd one out | `onClassRename(Crumb::classId, name)` → `cmd::ChangeStructTypeName` — the class the CRUMB names, not the view root, so a drilled crumb renames the drilled class. One undo entry; renaming a class to the name it already has closes the overlay and pushes nothing. |
 

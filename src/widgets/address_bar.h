@@ -181,6 +181,15 @@ inline QString fieldHalf(const QString& label) {
     return d < 0 ? QString() : label.mid(d + 1);
 }
 
+// The overlay field. A QLineEdit whose cursorRect() is reachable: the bar
+// measures the inset Qt keeps inside the widget rather than assuming it, and
+// that measurement is what makes an opening overlay land on the cell's own
+// pixels. No signals, no slots, no moc.
+struct EditField : QLineEdit {
+    using QLineEdit::QLineEdit;
+    using QLineEdit::cursorRect;
+};
+
 }  // namespace address_bar_detail
 
 class AddressBar : public QWidget {
@@ -300,7 +309,7 @@ public:
         // focus seam under the field the way PanelSearchField paints its
         // own, so the two fields ring alike. Its keys and focus are read
         // through eventFilter (a virtual, so no Q_OBJECT is needed).
-        m_edit = new QLineEdit(this);
+        m_edit = new address_bar_detail::EditField(this);
         m_edit->setObjectName(QStringLiteral("rcxAddressBarEdit"));
         m_edit->setFrame(false);
         m_edit->setFont(font());
@@ -426,28 +435,48 @@ public:
     // following a pane resize while one is up (resizeEvent), so the
     // field sits where a fresh open would put it at the new width. False
     // when the base is not laid out (an empty bar).
-    // Width the field needs to hold `text` whole: its own chrome, the text,
-    // and a sliver for the caret. Measured on the FULL string — the base cell
-    // middle-elides its display at kBaseMaxW, but the edit always opens on the
-    // whole formula, so a long formula opens wide and a bare address opens
-    // tight. This is the number the old kEditMinW = 180 slab overrode: a
-    // 13-character address measures ~102, so ~78 px of the field were dead air
-    // between the value and the preview beside it.
-    int editFitWidth(const QString& text) const {
-        const QFontMetrics fm(font());
-        return kEditChromeW + fm.horizontalAdvance(text) + kEditCaretSlack;
+    // Width the field needs to hold `text` whole: the cell's left padding,
+    // the text, and the right inset the caret lives in. For a cell's OWN text
+    // this is the cell's own width to the pixel (kBasePad + advance +
+    // kBasePad), which is the point — opening an edit must not resize
+    // anything. Measured on the FULL string: the base cell middle-elides its
+    // display at kBaseMaxW but the edit always opens on the whole formula, so
+    // a formula too long to have been shown whole is the one case where the
+    // field is wider than the cell, because you cannot edit what you cannot
+    // see.
+    int editFitWidth(EditScope scope, const QString& text) const {
+        const QFontMetrics fm(editFont(scope));
+        return kBasePad + fm.horizontalAdvance(text) + baseSepGap();
     }
 
-    // The width an overlay holding `text` should have. Three rules, in order:
-    //   fit the text, never below the floor, and never past the point where
-    //   the "= 0x…" preview beside it would stop fitting.
-    // While an edit is open m_editGrownW is a second floor, so the field can
-    // GROW as you type but never shrink back: a field that resized on every
-    // keystroke in both directions would jiggle under the caret and drag the
-    // preview with it, and backspacing would reflow the box you are typing in.
-    int editWidthFor(const QString& text, int left, int limit) const {
-        const int floorW = m_editVisible ? qMax(kEditMinW, m_editGrownW) : kEditMinW;
-        const int want = qMax(editFitWidth(text), floorW);
+    // The face the overlay wears: the cell's own. The deepest crumb is
+    // painted DemiBold from depth 2 (the tone ladder's single weight step),
+    // and a field that opened on it in the regular face would re-set the text
+    // a pixel narrower and a shade lighter the instant you clicked — the same
+    // class of tell as a box that resizes.
+    QFont editFont(EditScope scope) const {
+        const bool deepIsBold = m_state.crumbs.size() > 1;
+        return (scope == EditScope::Class && deepIsBold) ? deepestFont() : font();
+    }
+    QFont editFont() const { return editFont(m_editScope); }
+
+    // The width an overlay holding `text` should have: the text's, and
+    // nothing else. There is deliberately NO minimum — a short value gets a
+    // short field because the CELL it replaces is exactly that short, and the
+    // whole contract is that opening an edit resizes nothing. (A floor of 90
+    // lived here and was the last thing still inflating a field on click: a
+    // seven-letter class name opened 22 px wider than its crumb.)
+    //
+    // While an edit is open m_editGrownW is a floor, so the field can GROW as
+    // you type and never shrink back: one that resized on every keystroke in
+    // both directions would jiggle under the caret and drag the preview with
+    // it, and backspacing would reflow the box you are typing in. Growing is
+    // for text you ADD. Opening grows nothing.
+    int editWidthFor(EditScope scope, const QString& text, int left, int limit) const {
+        const int want = qMax(editFitWidth(scope, text), m_editVisible ? m_editGrownW : 0);
+        // The one hard bound: never so wide that the preview after it has
+        // nowhere to go. Past this the QLineEdit scrolls internally, which is
+        // the honest answer for a formula longer than the strip.
         const int room = qMax(kEditMinW, limit - left - kEditPreviewMinW);
         return qMin(want, room);
     }
@@ -462,9 +491,14 @@ public:
             const QRect cell = itemRect(deepestCrumbId());
             if (cell.isNull()) return false;
             QRect g = cell;
-            g.setWidth(editWidthFor(text, g.left(), limit));
-            if (g.right() >= limit) g.setRight(limit - 1);
-            if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);
+            g.setWidth(editWidthFor(scope, text, g.left(), limit));
+            if (g.right() >= limit) {
+                g.setRight(limit - 1);
+                // CLIPPED by the strip's edge — not merely short. Only then is
+                // it worth covering `recent` to keep the field usable; a short
+                // name gets a short field, because that is the cell.
+                if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);
+            }
             *r = g;
             *coveredLeft = g.left();
             return true;
@@ -476,23 +510,30 @@ public:
             // recent cell. The crumbs under it are simply covered — the
             // layout is frozen while the overlay is up, so nothing shifts.
             QRect g = base;
-            g.setWidth(editWidthFor(text, g.left(), limit));
-            if (g.right() >= limit) g.setRight(limit - 1);
-            if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);   // a narrow strip: cover `recent` rather than shrink to nothing
+            g.setWidth(editWidthFor(scope, text, g.left(), limit));
+            if (g.right() >= limit) {
+                g.setRight(limit - 1);
+                if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);   // clipped by a narrow strip: cover `recent` rather than shrink to nothing
+            }
             *r = g;
             *coveredLeft = g.left();
             return true;
         }
         const int covered = base.right() + 1;
-        // The line edit's own left padding is 2 px (panelFieldInteriorQss);
-        // the crumb label sat kCrumbPad in — start the field kCrumbPad - 2
-        // later so the text does not jump when the overlay opens.
-        QRect g(covered + kCrumbPad - 2, kCellTop, 0, kCellH);
+        // The field's own left inset IS kCrumbPad (syncEditTextMargins), and
+        // the first crumb's cell starts here — so the field starts here too
+        // and the trail's first glyph does not move when the overlay opens.
+        QRect g(covered, kCellTop, 0, kCellH);
         // Fitted like the base one. The trail behind it is covered either way
         // (m_coveredRect still runs to the recent cell), so the only thing the
         // old full-bleed width bought was distance between the path and the
         // resolver's answer painted after it.
-        g.setWidth(editWidthFor(text, g.left(), limit));
+        // kEditMinW IS a floor here, and only here: this scope stands in for
+        // the whole trail rather than for one cell, so there is no cell width
+        // to match — and a trail that is currently empty would otherwise open
+        // as a 12-px sliver. Everything to its right is covered anyway, so a
+        // floor costs nothing visible.
+        g.setWidth(qMax(kEditMinW, editWidthFor(scope, text, g.left(), limit)));
         if (g.right() >= limit) g.setRight(limit - 1);
         // A narrow strip: keep the field usable — grow back over the base,
         // then past the recent cell, before shrinking below the minimum.
@@ -590,7 +631,7 @@ public:
         // where the bar picks the new chrome face up (PanelSearchField does
         // the same). setFont → changeEvent(FontChange) → markLayoutDirty.
         setFont(chromeFont());
-        m_edit->setFont(font());
+        m_edit->setFont(editFont());
         applyEditStyle();
         // A theme or font change while the field is open re-shows the help in
         // the new colours rather than leaving the old ones on screen.
@@ -684,11 +725,18 @@ public:
     // The one glyph that says "this formula evaluates to". It is `=`, and
     // deliberately not an arrow: this same bar carries ← and → as its Back and
     // Forward buttons, so a third arrow mid-strip read as one more direction
-    // rather than as arithmetic. Its padding was asymmetric too (two spaces
-    // before, one after), which left the formula looking like it had trailing
-    // space. `=` is what a formula IS — an expression with a value — and it
-    // cannot be misread as the › that separates crumbs.
-    static QString baseSepText() { return QStringLiteral(" = "); }
+    // rather than as arithmetic. It cannot be misread as the › that separates
+    // crumbs either. One space after it; the space BEFORE it is baseSepGap.
+    static QString baseSepText() { return QStringLiteral("= "); }
+
+    // The gap between a formula and its `=`. One space wide — so the phrase is
+    // evenly spaced — but GEOMETRY rather than a space inside the string,
+    // because it is also the room the caret needs when the field opens over
+    // the formula. Reserved at rest, it means the suffix is already standing
+    // where the preview will be, and clicking in moves it by nothing.
+    int baseSepGap() const {
+        return QFontMetrics(font()).horizontalAdvance(QLatin1Char(' '));
+    }
 
     QString sourceDisplayText() const {
         const LaidItem* li = itemById(QStringLiteral("src"));
@@ -743,18 +791,18 @@ public:
     static constexpr int kCellTop      = 2;
     static constexpr int kCellH        = 22;
     static constexpr int kBaseBareMinW = 60;   // the bare literal, narrow-pane step 7c
-    // An edit overlay is sized to the value it holds, not to a slab: the
-    // 180 that used to live here left ~78 px of dead air between a 13-char
-    // address and the preview beside it. This is only the floor that keeps a
-    // one- or two-character value a usable target; see editFitWidth.
+    // NOT a floor on the field's width (see editWidthFor — the field is the
+    // size of its cell, full stop). This is the narrow-STRIP fallback: the
+    // width below which the geometry arms stop trying to keep the overlay
+    // clear of its neighbours and start growing it back over them instead.
     static constexpr int kEditMinW     = 90;
-    static constexpr int kEditCaretSlack = 4;   // so a caret parked at the end is not clipped
-    // The QLineEdit interior (panelFieldInteriorQss): 2 px of padding on the
-    // left, 6 on the right, plus the 2 px Qt reserves inside each end. The
-    // text therefore lives in `width - 12` — the same 12 the base cell spends
-    // on kBasePad either side, which is why a fitted field is the size of the
-    // cell it covers.
-    static constexpr int kEditChromeW  = 12;
+    // The overlay is the CELL, to the pixel. Its left inset is the cell's own
+    // kBasePad, so the first glyph lands on the device column the cell painted
+    // it on; its width is kBasePad + the text + baseSepGap(), and a cell with
+    // no suffix is exactly that wide, so clicking in resizes nothing. The
+    // caret lives in the gap, minus this — the field's own right padding, the
+    // only part of the box the text may not use.
+    static constexpr int kEditRightInset = 2;
     static constexpr int kHelpKeepAliveMs = 5000;   // well inside RcxTooltip's 20 s cap
     static constexpr int kEditPreviewMinW = 48; // room the preview beside the overlay needs to be worth painting
     static constexpr double kDisabledOpacity = 0.40;
@@ -937,7 +985,7 @@ protected:
             markLayoutDirty();
             // A font change while an edit is up re-measures every cell; the
             // overlay follows the field it covers, as it does on a resize.
-            if (m_editVisible) { m_edit->setFont(chromeFont()); followEditGeometry(); }
+            if (m_editVisible) { m_edit->setFont(editFont()); followEditGeometry(); }
         }
         // The window going inactive does NOT end the edit (ActiveWindowFocus
         // is one of the reasons the overlay survives), but the help is a
@@ -1294,8 +1342,13 @@ private:
         const QString baseText   = b.bareBase ? elide(fm, baseLiteralText(), kBaseBareMinW)
                                               : elide(fm, baseFullText(), b.baseMaxW);
         const QString baseSuffix = (b.showResolved && !b.bareBase) ? baseSuffixText() : QString();
+        // baseSepGap between the two, not a space inside the suffix: the same
+        // gap the edit overlay ends in, so the suffix sits where the preview
+        // will and neither moves when the field opens.
         add(QStringLiteral("base"), Cell::Base, -1,
-            kBasePad + fm.horizontalAdvance(baseText) + fm.horizontalAdvance(baseSuffix) + kBasePad,
+            kBasePad + fm.horizontalAdvance(baseText)
+                + (baseSuffix.isEmpty() ? 0 : baseSepGap() + fm.horizontalAdvance(baseSuffix))
+                + kBasePad,
             true, baseText);
         L.items.last().text2 = baseSuffix;
 
@@ -1601,7 +1654,8 @@ private:
             p.drawText(tr, textFlags, li.text);
             if (!li.text2.isEmpty()) {
                 p.setPen(t.textMuted);
-                p.drawText(tr.adjusted(p.fontMetrics().horizontalAdvance(li.text), 0, 0, 0),
+                p.drawText(tr.adjusted(p.fontMetrics().horizontalAdvance(li.text) + baseSepGap(),
+                                       0, 0, 0),
                            textFlags, li.text2);
             }
             break;
@@ -1640,18 +1694,25 @@ private:
     void paintEditChrome(QPainter& p) const {
         const Theme& t = m_theme;
         // Paper over everything the edit covers (the overlay child paints
-        // its own rect on top); the preview goes in what is left of that
-        // after the field — the base edit leaves a run, the path edit only
-        // a sliver, where the seam and the status bar carry the verdict.
+        // its own rect on top).
         if (m_coveredRect.width() > 0) p.fillRect(m_coveredRect, editorPaperColor(t));
-        const QRect after(m_editRect.right() + 1, kCellTop,
-                          qMax(0, m_coveredRect.right() - m_editRect.right()), kCellH);
-        if (!m_editPreview.isEmpty() && after.width() >= kEditPreviewMinW) {
-            p.setFont(font());
+        // The preview starts at the field's right edge — which, the field
+        // being kBasePad + text + baseSepGap wide, is exactly the column the
+        // resting "= 0x…" suffix stands on. Opening the edit does not shove
+        // it; only adding characters does, which is a bump you asked for.
+        p.setFont(font());
+        const int after0 = m_editRect.right() + 1;
+        const QRect after(after0, kCellTop, qMax(0, m_coveredRect.right() - after0 + 1), kCellH);
+        // Room for the WHOLE preview, or at least a run worth reading. The
+        // flat kEditPreviewMinW that used to be the only test dates from when
+        // the paper ran to `recent` and the run was always enormous; now the
+        // covered rect is sized to the preview, so a short one like "= 0x18"
+        // measured just under the 48 and was silently dropped.
+        const int need = p.fontMetrics().horizontalAdvance(m_editPreview);
+        if (!m_editPreview.isEmpty() && after.width() >= qMin(need, kEditPreviewMinW)) {
             p.setPen(editTextValid() ? t.textMuted : t.markerError);
-            const QRect tr = after.adjusted(kBasePad, 0, -kBasePad, 0);
-            p.drawText(tr, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
-                       p.fontMetrics().elidedText(m_editPreview, Qt::ElideRight, tr.width()));
+            p.drawText(after, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextSingleLine,
+                       p.fontMetrics().elidedText(m_editPreview, Qt::ElideRight, after.width()));
         }
         fillBottomDeviceRowOfRect(p, QRectF(fieldRect()),
                                   editTextValid() ? t.borderFocused : t.markerError);
@@ -2156,9 +2217,34 @@ private:
     // ── Base edit internals ──
 
     void applyEditStyle() {
-        // PanelSearchField's interior, verbatim (the shared builder), so the
-        // overlay and the panel filter boxes are one field family.
-        m_edit->setStyleSheet(panelFieldInteriorQss(m_theme));
+        // PanelSearchField's interior (the shared builder), so the overlay and
+        // the panel filter boxes are one field family — but with ITS padding
+        // dropped: the overlay's insets are the cell's, not a search box's,
+        // and they are set as text margins below.
+        m_edit->setStyleSheet(panelFieldInteriorQss(m_theme)
+                              + QStringLiteral("QLineEdit { padding: 0px; }"));
+        syncEditTextMargins();
+    }
+
+    // Land the first glyph exactly where the cell painted its text, and put
+    // the caret's room in the right inset where nothing can see it.
+    //
+    // A QLineEdit keeps a couple of px inside itself that no stylesheet can
+    // take back, and the number is Qt's, not ours — so it is MEASURED, not
+    // assumed: with our own margins at zero, the caret at position 0 sits
+    // exactly on that reserve. Getting this wrong by 2 px is the whole
+    // difference between an overlay that appears and one that shoves the line.
+    void syncEditTextMargins() {
+        const int selStart = m_edit->selectionStart();
+        const int selLen   = m_edit->selectedText().size();
+        const int cursor   = m_edit->cursorPosition();
+        m_edit->setTextMargins(0, 0, 0, 0);
+        m_edit->setCursorPosition(0);
+        const int own = qBound(0, m_edit->cursorRect().left(), kBasePad);
+        m_edit->setTextMargins(qMax(0, kBasePad - own), 0,
+                               qMax(0, kEditRightInset - own), 0);
+        if (selStart >= 0) m_edit->setSelection(selStart, selLen);
+        else               m_edit->setCursorPosition(cursor);
     }
 
     // Where an overlay may reach: short of the recent cell by one chevron
@@ -2169,16 +2255,44 @@ private:
         return recent.isNull() ? width() - kRightMargin : recent.left() - kChevW;
     }
 
-    // The overlay's geometry: the field at `r`, and what it covers — from
-    // `coveredLeft` to the recent cell: the overlay plus the paper painted
-    // beside it, where hover goes quiet. Shared by opening and by following
-    // a resize, so the covered rect is derived the same way both times.
+    // The cell the open overlay stands in for — the thing whose pixels it has
+    // to hide. Null for Path, which stands in for the whole trail and says so
+    // by covering out to `recent`.
+    QRect editCellRect() const {
+        if (m_editScope == EditScope::Base)  return itemRect(QStringLiteral("base"));
+        if (m_editScope == EditScope::Class) return itemRect(deepestCrumbId());
+        return QRect();
+    }
+
+    // Where the preview's last pixel falls, or the field's right edge when
+    // there is no preview.
+    int editPreviewRight() const {
+        return m_editPreview.isEmpty()
+                   ? m_editRect.right()
+                   : m_editRect.right() + QFontMetrics(font()).horizontalAdvance(m_editPreview);
+    }
+
+    // The overlay's geometry: the field at `r`, and what it covers — the
+    // paper that hides what was there, where hover goes quiet.
+    //
+    // It is the CELL, not the rest of the strip. Papering out to `recent` was
+    // right when the field was a 180-px slab that half-overlapped the crumbs
+    // and left their tails showing; a field that is exactly its cell overlaps
+    // nothing, and blanking the trail because you clicked the address is the
+    // same sin as shoving it. So: the field, the cell it replaces, and the
+    // preview's run — which at open is exactly the suffix's run, and grows
+    // only with what you type. Path is the exception: it stands in for the
+    // whole trail, so it covers the whole trail.
     void placeEdit(const QRect& r, int coveredLeft) {
         const QRect recent = itemRect(QStringLiteral("recent"));
         const int stop = recent.isNull() ? width() - kRightMargin : recent.left();
         m_editRect = r;
-        m_coveredRect = QRect(coveredLeft, kCellTop, qMax(r.width(), stop - coveredLeft), kCellH);
         m_edit->setGeometry(r);
+        const QRect cell = editCellRect();
+        int right = cell.isNull() ? stop - 1
+                                  : qMax(qMax(r.right(), cell.right()), editPreviewRight());
+        right = qBound(r.right(), right, stop - 1);
+        m_coveredRect = QRect(coveredLeft, kCellTop, right - coveredLeft + 1, kCellH);
         // The high-water mark editWidthFor reads back as a floor. Recording it
         // here — the one place a field is ever positioned — is what makes the
         // width monotonic for as long as the overlay is up: growEditToText can
@@ -2195,8 +2309,8 @@ private:
         QRect r;
         int coveredLeft = 0;
         if (!editGeometryFor(m_editScope, m_edit->text(), &r, &coveredLeft)) return;
-        if (r == m_editRect) return;
-        placeEdit(r, coveredLeft);
+        placeEdit(r, coveredLeft);   // unconditional: the preview may have
+                                     // moved even when the field did not
     }
 
     // resizeEvent while an edit is up: re-place the overlay for its scope
@@ -2221,8 +2335,9 @@ private:
         m_relayoutDeferred = false;
         m_commitError.clear();
         placeEdit(r, coveredLeft);
-        m_edit->setFont(font());
+        m_edit->setFont(editFont(scope));   // the cell's own face, weight included
         m_edit->setText(text);
+        syncEditTextMargins();   // the insets are measured on the real text
         m_edit->selectAll();
         setFocusPolicy(Qt::StrongFocus);
         m_edit->show();
@@ -2243,7 +2358,6 @@ private:
     void onEditTextChanged() {
         if (!m_editVisible) return;
         m_commitError.clear();
-        growEditToText();
         const QString text = m_edit->text().trimmed();
         if (m_editScope == EditScope::Class) {
             // The one rule line 0's rename also enforces: a class needs a
@@ -2252,6 +2366,7 @@ private:
             // field, is where a name's shape is anyone's business.
             m_editValid = !text.isEmpty();
             m_editPreview = m_editValid ? QString() : QStringLiteral("a class needs a name");
+            growEditToText();
             update();
             return;
         }
@@ -2259,6 +2374,7 @@ private:
             const QString why = m_treeQ.validatePath ? m_treeQ.validatePath(text) : QString();
             m_editValid = why.isEmpty();
             m_editPreview = why;
+            growEditToText();
             update();
             return;
         }
@@ -2266,14 +2382,19 @@ private:
         m_editValid = why.isEmpty();
         if (m_editValid) {
             const QString r = m_cb.evaluate ? m_cb.evaluate(text) : QString();
-            // Same grammar as the resting display: what you are typing, then
-            // `=`, then what it comes to. baseSepText's own leading space would
-            // land inside the gap the preview already keeps from the field.
-            m_editPreview = r.isEmpty() ? QString()
-                                        : baseSepText().trimmed() + QLatin1Char(' ') + r;
+            // The resting rule, live: a formula gets " = 0x…", a literal gets
+            // nothing. `0x1000 = 0x1000` is not an evaluation, it is the same
+            // number twice — and it appeared out of nowhere the moment you
+            // clicked into a plain address. Compared case-insensitively
+            // because the parser echoes hex in its own case.
+            m_editPreview = (r.isEmpty() || r.compare(text, Qt::CaseInsensitive) == 0)
+                                ? QString()
+                                : baseSepText() + r;
         } else {
             m_editPreview = why;
         }
+        // AFTER the preview: the covered rect has to know how far it runs.
+        growEditToText();
         update();
     }
 
@@ -2348,7 +2469,7 @@ private:
     // The edit overlay (base or path scope). While it is visible a state
     // push is stored but not laid out (see setState); endEdit applies the
     // deferred relayout.
-    QLineEdit* m_edit = nullptr;
+    address_bar_detail::EditField* m_edit = nullptr;
     QRect      m_editRect;
     QRect      m_coveredRect;      // overlay + the paper beside it: hover-quiet while up
     EditScope  m_editScope = EditScope::None;

@@ -42,6 +42,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPainter>
+#include <QtMath>
 #include <QPixmap>
 #include <QStringConverter>
 #include <QTextStream>
@@ -175,6 +176,14 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
         for (int mode = 0; mode < 5; ++mode) {
             AddressBar bar;
             if (haveTheme) bar.applyTheme(theme);
+            {   // an evaluator, so the "= 0x…" preview is exercised
+                AddressBar::Callbacks cb;
+                cb.evaluate = [](const QString& t) {
+                    return t.startsWith(QLatin1Char('<')) ? QStringLiteral("0x7FF6DEAD1234")
+                                                          : QString();
+                };
+                bar.setCallbacks(std::move(cb));
+            }
             AddressBarState st = stateWithDepth(3);
             if (mode == 1) {
                 st.baseFormula.clear();
@@ -184,6 +193,11 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
             bar.show();
             bar.resize(w, AddressBar::kAddressBarHeight);
             app.processEvents();
+            // The cell the overlay is about to replace, measured BEFORE it
+            // opens: an edit that resizes anything shows up here as a
+            // difference, and "cell == edit" is the whole contract.
+            const QRect cellBefore = bar.itemRect(mode == 4 ? bar.deepestCrumbId()
+                                                            : QStringLiteral("base"));
             if (mode == 1 || mode == 2) bar.beginBaseEdit();
             if (mode == 3) bar.beginPathEdit();
             if (mode == 4) bar.beginClassNameEdit();
@@ -199,12 +213,13 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
                                                       : mode == 3 ? "path" : "class-rename")
                << "  text=\"" << bar.editText() << "\"";
             if (!e.isNull()) {
-                const int fit = AddressBar::kEditChromeW
-                              + QFontMetrics(bar.font()).horizontalAdvance(bar.editText())
-                              + AddressBar::kEditCaretSlack;
-                rs << "  edit=" << e.x() << "," << e.width()
-                   << "  fit=" << fit << "  slack=" << (e.width() - fit)
+                rs << "  cell=" << cellBefore.x() << "," << cellBefore.width()
+                   << "  edit=" << e.x() << "," << e.width()
+                   << "  dx=" << (e.x() - cellBefore.x())
+                   << "  dw=" << (e.width() - cellBefore.width())
                    << "  covered=" << c.x() << "," << c.width()
+                   << "  preview=\"" << bar.editPreviewText() << "\""
+                   << "  after=" << (c.right() - e.right())
                    << "  recent.left=" << recent.left()
                    << "  help=" << (bar.editHelpVisible() ? "up" : "DOWN");
             }
@@ -234,6 +249,57 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
         out << path << "  width=" << w << "  dpr=" << dpr << "\n";
         for (int i = 0; i < reports.size(); ++i)
             out << "  row " << i << " yDev=" << rowTopDev[i] << reports[i] << "\n";
+    }
+
+    // ── The contract, in pixels ──
+    //
+    // Clicking into a segment must change the ring and the selection and
+    // NOTHING ELSE. Rects proving dx == 0 and dw == 0 are half the story; this
+    // is the other half — the same bar grabbed at rest and mid-edit, differing
+    // columns counted. Every differing column must fall inside the segment
+    // being edited (its selection band and caret); a single one outside it is
+    // the line having been shoved.
+    for (int scope = 0; scope < 2; ++scope) {
+        AddressBar bar;
+        if (haveTheme) bar.applyTheme(theme);
+        AddressBarState st = stateWithDepth(3);
+        st.baseFormula.clear();
+        st.baseAddress = st.resolvedBase = 0x279B3D07010ULL;
+        bar.setState(st);
+        bar.show();
+        bar.resize(1080, AddressBar::kAddressBarHeight);
+        app.processEvents();
+        app.processEvents();
+        const QRect cell = bar.itemRect(scope == 0 ? QStringLiteral("base")
+                                                   : bar.deepestCrumbId());
+        const QImage rest = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        if (scope == 0) bar.beginBaseEdit(); else bar.beginClassNameEdit();
+        app.processEvents();
+        app.processEvents();
+        const QImage edit = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        const qreal dpr = bar.devicePixelRatioF();
+        const int cellL = qFloor(cell.left() * dpr), cellR = qCeil((cell.right() + 1) * dpr);
+        int outside = 0, firstOutside = -1, inside = 0;
+        for (int x = 0; x < qMin(rest.width(), edit.width()); ++x) {
+            bool diff = false;
+            // The bottom two device rows are the focus seam — the ring IS
+            // what clicking in is supposed to draw. Everything above it is
+            // content, and content must not move.
+            const int h = qMin(rest.height(), edit.height()) - qCeil(2 * dpr);
+            for (int y = 0; y < h && !diff; ++y)
+                diff = rest.pixel(x, y) != edit.pixel(x, y);
+            if (!diff) continue;
+            if (x >= cellL && x < cellR) { ++inside; continue; }
+            ++outside;
+            if (firstOutside < 0) firstOutside = x;
+        }
+        out << "  open-" << (scope == 0 ? "base " : "class")
+            << "  cellDev=[" << cellL << "," << cellR << ")"
+            << "  changed inside=" << inside << "  OUTSIDE=" << outside;
+        if (outside) out << "  firstOutsideCol=" << firstOutside;
+        out << (outside ? "   <-- the line moved\n"
+                          : "   ok: nothing outside the segment moved\n");
+        bar.hide();
     }
 
     // The help block on its own. Columns line up only in a fixed-pitch face,

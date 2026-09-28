@@ -155,6 +155,15 @@ QAction* actionWithText(const QMenu* menu, const QString& text) {
 // The bar frees a menu with deleteLater on hide, which a processEvents()
 // at the test's loop level does not run — a hidden predecessor can still
 // be a child. The one that is up is the one that is visible.
+// The width an overlay fitted to `text` must have: the cell's left padding,
+// the text, and the one-space gap the caret lives in — which is also the gap
+// a resting cell leaves before its "= 0x…" suffix, so the field ends exactly
+// where that suffix begins. `f` is the face the cell was painted in.
+int fittedEditW(const QString& text, const QFont& f) {
+    return AddressBar::kBasePad + QFontMetrics(f).horizontalAdvance(text)
+         + QFontMetrics(f).horizontalAdvance(QLatin1Char(' '));
+}
+
 QMenu* visibleMenu(const QWidget* w, const QString& name) {
     for (QMenu* m : w->findChildren<QMenu*>(name))
         if (m->isVisible()) return m;
@@ -1624,7 +1633,12 @@ private slots:
         QVERIFY(bar.isEditing());
         QCOMPARE(bar.findChildren<QLineEdit*>().size(), 1);
         // The interior is PanelSearchField's rule set, verbatim.
-        QCOMPARE(bar.editWidget()->styleSheet(), panelFieldInteriorQss(bar.theme()));
+        // PanelSearchField's interior, then OUR padding: the overlay's insets
+        // are the cell's (kBasePad in, kEditRightInset out) so the first glyph
+        // lands on the column the cell painted it on.
+        QVERIFY2(bar.editWidget()->styleSheet().startsWith(panelFieldInteriorQss(bar.theme())),
+                 qPrintable(bar.editWidget()->styleSheet()));
+        QVERIFY(bar.editWidget()->styleSheet().endsWith(QStringLiteral("QLineEdit { padding: 0px; }")));
         QVERIFY(bar.editWidget()->styleSheet().contains(QStringLiteral("border-radius: 0px")));
         QVERIFY(bar.editWidget()->styleSheet().contains(QStringLiteral("border: none")));
     }
@@ -1642,7 +1656,16 @@ private slots:
         QCOMPARE(bar->editText(), QStringLiteral("0x1000"));
         // A literal parses: the live preview is the controller's evaluator.
         QVERIFY(bar->editTextValid());
-        QCOMPARE(bar->editPreviewText(), QStringLiteral("= 0x1000"));
+        // A literal evaluates to itself, so there is nothing to preview:
+        // `0x1000 = 0x1000` is the same number twice, appearing out of
+        // nowhere the moment you click into a plain address.
+        QVERIFY2(bar->editPreviewText().isEmpty(), qPrintable(bar->editPreviewText()));
+        // A FORMULA does resolve to something else, and says so.
+        bar->editWidget()->setText(QStringLiteral("0x1000+0x24"));
+        QApplication::processEvents();
+        QCOMPARE(bar->editPreviewText(), QStringLiteral("= 0x1024"));
+        bar->editWidget()->setText(QStringLiteral("0x1000"));
+        QApplication::processEvents();
         QTest::keyClick(bar->editWidget(), Qt::Key_Return);
         QApplication::processEvents();
         QCOMPARE(commit.count(), 1);
@@ -1702,7 +1725,9 @@ private slots:
         bar.applyTheme(ThemeManager::instance().current());
         const Theme& t = bar.theme();
         AddressBar::Callbacks cb;
-        cb.evaluate = [](const QString& s) { return s == QStringLiteral("0x10") ? QStringLiteral("0x10") : QString(); };
+        // A real evaluation: "0x10+8" is not "0x18", so there is something to
+        // preview. (A literal previews nothing — see testBaseSeparator….)
+        cb.evaluate = [](const QString& s) { return s == QStringLiteral("0x10+8") ? QStringLiteral("0x18") : QString(); };
         bar.setCallbacks(std::move(cb));
         bar.setState(stateWith(twoLevel()));
         showBar(bar, 800);
@@ -1713,21 +1738,24 @@ private slots:
         QCOMPARE(countColour(img, seam, t.markerError), 0);
         QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
         QVERIFY(bar.isEditing());
-        QTest::keyClicks(bar.editWidget(), QStringLiteral("0x10"));
+        QTest::keyClicks(bar.editWidget(), QStringLiteral("0x10+8"));
         QVERIFY(bar.editTextValid());
-        QCOMPARE(bar.editPreviewText(), QStringLiteral("= 0x10"));
+        QCOMPARE(bar.editPreviewText(), QStringLiteral("= 0x18"));
         img = grabOf(bar);
         seam = seamRowUnder(img, bar.editRect());
         QVERIFY(countColour(img, seam, t.borderFocused) > seam.width() / 2);
         QCOMPARE(countColour(img, seam, t.markerError), 0);
-        // The preview sits right after the overlay in textMuted.
-        const QRect after(bar.editRect().right() + 1, AddressBar::kCellTop,
-                          bar.itemRect(QStringLiteral("recent")).left() - bar.editRect().right() - 1,
+        // The preview picks up where the TEXT ends, in textMuted — the column
+        // the resting " = 0x…" suffix occupies, not wherever the box happens
+        // to stop.
+        const int after0 = bar.editRect().right() + 1;
+        const QRect after(after0, AddressBar::kCellTop,
+                          bar.itemRect(QStringLiteral("recent")).left() - after0,
                           AddressBar::kCellH);
         QVERIFY(countColour(img, devRect(img, after), t.textMuted) > 0);
         // An unclosed deref does not parse: the ring turns markerError and
         // the parser's words replace the preview.
-        QTest::keyClicks(bar.editWidget(), QStringLiteral("\b\b\b\b[0x100"));
+        QTest::keyClicks(bar.editWidget(), QStringLiteral("\b\b\b\b\b\b[0x100"));
         QCOMPARE(bar.editText(), QStringLiteral("[0x100"));
         QVERIFY(!bar.editTextValid());
         QVERIFY(!bar.editPreviewText().isEmpty());
@@ -2342,13 +2370,13 @@ private slots:
         QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier,
                           bar->itemRect(QStringLiteral("crumb:0")).center());
         QVERIFY(bar->isClassNameEditing());
-        const QRect crumb = bar->itemRect(QStringLiteral("crumb:0"));
-        QCOMPARE(bar->editRect().left(), crumb.left());
-        QCOMPARE(bar->editRect().width(),
-                 qMax(AddressBar::kEditMinW,
-                      AddressBar::kEditChromeW
-                          + QFontMetrics(bar->font()).horizontalAdvance(bar->editText())
-                          + AddressBar::kEditCaretSlack));
+        const QRect crumbCell = bar->itemRect(QStringLiteral("crumb:0"));
+        // The cell, to the pixel on the left and within the caret's gap on
+        // the right — the two are paper against paper.
+        QCOMPARE(bar->editRect().left(), crumbCell.left());
+        QVERIFY(qAbs(bar->editRect().width() - crumbCell.width())
+                    <= QFontMetrics(bar->font()).horizontalAdvance(QLatin1Char(' ')));
+        QCOMPARE(bar->editRect().width(), fittedEditW(bar->editText(), bar->font()));
         const int opened = bar->editRect().width();
         bar->editWidget()->setText(QStringLiteral("AVeryLongClassNameIndeedYesReally"));
         QApplication::processEvents();
@@ -2478,7 +2506,7 @@ private slots:
         // what it covers starts at the base's right edge.
         const QRect base = bar->itemRect(QStringLiteral("base"));
         const QRect recent = bar->itemRect(QStringLiteral("recent"));
-        QCOMPARE(bar->editRect().left(), base.right() + 1 + AddressBar::kCrumbPad - 2);
+        QCOMPARE(bar->editRect().left(), base.right() + 1);
         QVERIFY(bar->editRect().right() < recent.left());
         QVERIFY(bar->editRect().width() >= AddressBar::kEditMinW);
         QCOMPARE(bar->editRect(), bar->editWidget()->geometry());
@@ -2759,6 +2787,8 @@ private slots:
     void testCoveredCellsGoQuietWhileEditing() {
         // Phase-3 follow-up: the crumbs under the overlay's paper painted
         // as nothing but still answered hover with a hand and a tooltip.
+        // The paper is the PATH edit's now — that scope stands in for the whole
+        // trail. A base edit stands in for one cell and leaves the trail alone.
         AddressBar bar;
         bar.setState(stateWith(twoLevel()));
         showBar(bar, 800);
@@ -2768,26 +2798,33 @@ private slots:
         hoverAt(bar, c0.center());
         QCOMPARE(bar.cursor().shape(), Qt::PointingHandCursor);
         QVERIFY(bar.toolTip().contains(QStringLiteral("RcxEditor.vptr")));
+
+        // Opening the BASE edit covers the base cell and nothing else: the
+        // crumbs stay on screen, so they stay live.
         QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
         QVERIFY(bar.isBaseEditing());
+        QVERIFY2(!bar.editCoveredRect().contains(c0.center()),
+                 "a base edit papered over the trail");
+        QCOMPARE(bar.itemIdAt(c0.center()), QStringLiteral("crumb:0"));
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+
+        // The PATH edit does cover them — it is standing in for them.
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("space")).center());
+        QVERIFY(bar.isPathEditing());
         QVERIFY(bar.editCoveredRect().contains(c0.center()));
         QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);
         hoverAt(bar, c0.center());
         QVERIFY(bar.cursor().shape() != Qt::PointingHandCursor);
         QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
         QVERIFY(bar.itemIdAt(c0.center()).isEmpty());
-        // Past the covered range the recent cell is still a cell — it hits,
-        // and it takes the click. What it does NOT do is publish a tooltip:
-        // while the field is open the grammar help owns the tooltip layer,
-        // and RcxTooltip::showAt dismisses every other instance, so one hover
-        // out here would take the examples off the screen mid-formula.
+        // Past the covered range the recent cell is still a cell — it hits, it
+        // takes the click, and (this scope showing no help) it still talks.
         QCOMPARE(bar.itemIdAt(recent.center()), QStringLiteral("recent"));
         hoverAt(bar, recent.center());
-        QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
+        QVERIFY(!bar.toolTip().isEmpty());
         QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
         QVERIFY(!bar.isEditing());
-        hoverAt(bar, recent.center());
-        QVERIFY(!bar.toolTip().isEmpty());                        // back
         hoverAt(bar, c0.center());
         QCOMPARE(bar.cursor().shape(), Qt::PointingHandCursor);   // back
         QCOMPARE(bar.itemIdAt(c0.center()), QStringLiteral("crumb:0"));
@@ -2864,7 +2901,6 @@ private slots:
         QVERIFY(!recent.isNull() && !c0.isNull());
         QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
         QVERIFY(bar->isBaseEditing());
-        QVERIFY(bar->editCoveredRect().contains(c0.center()));
         QVERIFY(!bar->editCoveredRect().contains(recent.center()));
         // The click-away as Qt delivers it: focus leaves the overlay
         // (MouseFocusReason) BEFORE the press reaches the bar.
@@ -2878,9 +2914,11 @@ private slots:
         QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
         QTest::qWait(10);
         QVERIFY(!bar->isEditing());
-        // A press on a crumb the paper covered is still spent.
-        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
-        QVERIFY(bar->isBaseEditing());
+        // A press on a crumb the paper covered is still spent — the PATH
+        // edit's paper, since that is the scope that covers the trail.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("space")).center());
+        QVERIFY(bar->isPathEditing());
+        QVERIFY(bar->editCoveredRect().contains(c0.center()));
         QFocusEvent out2(QEvent::FocusOut, Qt::MouseFocusReason);
         QApplication::sendEvent(bar->editWidget(), &out2);
         QVERIFY(!bar->isEditing());
@@ -4208,17 +4246,18 @@ private slots:
             QVERIFY2(bar.isBaseEditing(), qPrintable(QString::number(w)));
             QCOMPARE(bar.editRect(), bar.editWidget()->geometry());
             QCOMPARE(bar.editRect().left(), base.left());
-            QVERIFY2(bar.editRect().width() >= AddressBar::kEditMinW, qPrintable(QString::number(w)));
             // Fitted, not full-bleed: the field is the size of its value at
             // every width, so the dead air never comes back on a resize.
-            QCOMPARE(bar.editRect().width(),
-                     qMax(AddressBar::kEditMinW,
-                          AddressBar::kEditChromeW + QFontMetrics(bar.font()).horizontalAdvance(text)
-                              + AddressBar::kEditCaretSlack));
+            QCOMPARE(bar.editRect().width(), fittedEditW(text, bar.font()));
             QVERIFY2(bar.rect().contains(bar.editRect()), qPrintable(QString::number(w)));
             QVERIFY2(bar.editRect().right() < recent.left(), qPrintable(QString::number(w)));
             QCOMPARE(bar.editCoveredRect().left(), bar.editRect().left());
-            QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);   // the 'after' paper, recomputed
+            // The paper is the CELL's, not the strip's: with the formula's
+            // resolved suffix folded into the preview, what it hides is the
+            // base cell and nothing past it. The crumbs stay on screen.
+            QVERIFY2(bar.editCoveredRect().right() < recent.left() - 1,
+                     qPrintable(QStringLiteral("the paper still runs to `recent` at %1").arg(w)));
+            QVERIFY(bar.editCoveredRect().right() >= base.right());
             QCOMPARE(bar.editText(), text);
             QCOMPARE(bar.editWidget()->selectedText(), text.mid(2, 5));
         }
@@ -4236,14 +4275,17 @@ private slots:
             const QRect base   = bar.itemRect(QStringLiteral("base"));
             const QRect recent = bar.itemRect(QStringLiteral("recent"));
             QCOMPARE(bar.editRect(), bar.editWidget()->geometry());
-            QCOMPARE(bar.editRect().left(), base.right() + 1 + AddressBar::kCrumbPad - 2);
+            // The field starts where the first crumb's CELL does — its own
+            // left inset is kCrumbPad, so the trail's first glyph lands on
+            // the column it was already on.
+            QCOMPARE(bar.editRect().left(), base.right() + 1);
+            // The path scope keeps a floor: it stands in for the whole trail,
+            // not for one cell, and everything right of it is covered anyway.
             QCOMPARE(bar.editRect().width(),
-                     qMax(AddressBar::kEditMinW,
-                          AddressBar::kEditChromeW + QFontMetrics(bar.font()).horizontalAdvance(path)
-                              + AddressBar::kEditCaretSlack));
+                     qMax(AddressBar::kEditMinW, fittedEditW(path, bar.font())));
             QVERIFY(bar.editRect().right() < recent.left() - AddressBar::kChevW);
-            // The trail behind it is covered all the same — only the FIELD
-            // stops at the text; the paper still runs to the recent cell.
+            // The path scope is the one that DOES cover the whole strip: it
+            // stands in for the entire trail, not for one cell.
             QCOMPARE(bar.editCoveredRect().left(), base.right() + 1);
             QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);
             QCOMPARE(bar.editText(), path);
@@ -4260,12 +4302,7 @@ private slots:
     // uses for Back and Forward — so it read as one more direction rather
     // than as arithmetic. It is an equation now, spaced evenly.
     void testBaseSeparatorIsAnEvenlySpacedEquals() {
-        QCOMPARE(AddressBar::baseSepText(), QStringLiteral(" = "));
-        const QString sep = AddressBar::baseSepText();
-        QCOMPARE(sep.trimmed(), QStringLiteral("="));
-        QCOMPARE(sep.length() - sep.trimmed().length(), 2);              // one space...
-        QVERIFY2(sep.startsWith(QLatin1Char(' ')) && sep.endsWith(QLatin1Char(' ')),
-                 "the separator's padding is not symmetric");            // ...on each side
+        QCOMPARE(AddressBar::baseSepText(), QStringLiteral("= "));
 
         AddressBar bar;
         AddressBarState s = stateWith(twoLevel());
@@ -4275,9 +4312,18 @@ private slots:
         showBar(bar, 900);
 
         // What the cell actually holds: formula, separator, value — and no
-        // arrow of any kind, in either direction.
-        const QString shown = bar.baseDisplayText() + bar.baseSuffixShown();
+        // arrow of any kind, in either direction. The space before the `=` is
+        // GEOMETRY (baseSepGap, one space wide), reserved so the suffix
+        // already stands where the edit overlay's preview will.
+        const QString shown = bar.baseDisplayText() + QStringLiteral(" ") + bar.baseSuffixShown();
         QCOMPARE(shown, QStringLiteral("<REECLASS.exe>+0x1234 = 0x7FF6DEAD1234"));
+        const QRect cell = bar.itemRect(QStringLiteral("base"));
+        const int sepGap = QFontMetrics(bar.font()).horizontalAdvance(QLatin1Char(' '));
+        QCOMPARE(cell.width(), AddressBar::kBasePad
+                                   + QFontMetrics(bar.font()).horizontalAdvance(bar.baseDisplayText())
+                                   + sepGap
+                                   + QFontMetrics(bar.font()).horizontalAdvance(bar.baseSuffixShown())
+                                   + AddressBar::kBasePad);
         for (QChar arrow : {QChar(0x2192), QChar(0x2190), QChar(0x203a)})
             QVERIFY2(!shown.contains(arrow), qPrintable(QStringLiteral("arrow %1 back in the base")
                                                             .arg(arrow.unicode(), 4, 16, QLatin1Char('0'))));
@@ -4289,6 +4335,96 @@ private slots:
         QApplication::processEvents();
         QVERIFY2(bar.baseSuffixShown().isEmpty(), qPrintable(bar.baseSuffixShown()));
         QCOMPARE(bar.baseDisplayText(), QStringLiteral("0x279B3D07010"));
+    }
+
+    // ── Clicking in moves nothing ──
+    //
+    // The rule the RcxEditor's inline edit sets and this one has to match: an
+    // inline edit is pixel-perfect. It replaces a span in place, so nothing
+    // around it can move — and the user's word for an overlay that does move
+    // things is "annoying as fuck". Rects proving the field stands where the
+    // cell did are half the proof; this is the other half, and the one that
+    // would have caught every version of the bug: the same bar grabbed at
+    // rest and mid-edit, every differing device column counted.
+    //
+    // Everything that changes must lie inside the segment being edited (its
+    // selection band and caret). One column outside it is the line having
+    // been shoved. The bottom two device rows are excluded: the focus seam is
+    // what clicking in is FOR.
+    void testOpeningAnEditMovesNothingOutsideItsSegment() {
+        for (int scope = 0; scope < 2; ++scope) {
+            AddressBar bar;
+            bar.applyTheme(ThemeManager::instance().current());
+            AddressBarState s = stateWith(twoLevel());
+            s.baseAddress = s.resolvedBase = 0x279B3D07010ULL;   // a literal: no suffix
+            bar.setState(s);
+            showBar(bar, 900);
+
+            const QRect cell = bar.itemRect(scope == 0 ? QStringLiteral("base")
+                                                       : QStringLiteral("crumb:1"));
+            QVERIFY(!cell.isNull());
+            const QImage rest = grabOf(bar);
+            if (scope == 0) bar.beginBaseEdit(); else bar.beginClassNameEdit();
+            QApplication::processEvents();
+            QVERIFY(bar.isEditing());
+            const QImage edit = grabOf(bar);
+            QCOMPARE(rest.size(), edit.size());
+
+            const qreal dpr = bar.devicePixelRatioF();
+            const int cellL = int(cell.left() * dpr);
+            const int cellR = int((cell.right() + 1) * dpr) + 1;   // +1: AA on the edge
+            const int rows  = edit.height() - int(2 * dpr) - 1;    // above the focus seam
+            int inside = 0, outside = 0, firstOutside = -1;
+            for (int x = 0; x < edit.width(); ++x) {
+                bool diff = false;
+                for (int y = 0; y < rows && !diff; ++y)
+                    diff = rest.pixel(x, y) != edit.pixel(x, y);
+                if (!diff) continue;
+                if (x >= cellL && x <= cellR) { ++inside; continue; }
+                ++outside;
+                if (firstOutside < 0) firstOutside = x;
+            }
+            QVERIFY2(inside > 0, "opening the edit changed nothing at all");
+            QVERIFY2(outside == 0,
+                     qPrintable(QStringLiteral("%1 opened and moved the line: %2 device columns "
+                                               "changed outside [%3,%4], first at %5")
+                                    .arg(scope == 0 ? QStringLiteral("the base edit")
+                                                    : QStringLiteral("the class rename"))
+                                    .arg(outside).arg(cellL).arg(cellR).arg(firstOutside)));
+        }
+    }
+
+    // The same rule where a formula IS evaluated: the "= 0x…" the cell shows
+    // at rest and the preview the overlay shows are the same phrase on the
+    // same pixels. The gap before the `=` is geometry (baseSepGap) precisely
+    // so it can double as the room the caret needs.
+    void testTheResolvedSuffixDoesNotMoveWhenTheFieldOpens() {
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        AddressBar::Callbacks cb;
+        cb.evaluate = [](const QString& s) {
+            return s == QStringLiteral("<REECLASS.exe>+0x1234") ? QStringLiteral("0x7FF6DEAD1234")
+                                                                : QString();
+        };
+        bar.setCallbacks(std::move(cb));
+        AddressBarState s = stateWith(twoLevel());
+        s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+        s.resolvedBase = 0x7FF6DEAD1234ULL;
+        bar.setState(s);
+        showBar(bar, 900);
+
+        const QRect cell = bar.itemRect(QStringLiteral("base"));
+        const QFontMetrics fm(bar.font());
+        // Where the cell paints its suffix: text, then one space of geometry.
+        const int suffixX = cell.left() + AddressBar::kBasePad
+                          + fm.horizontalAdvance(bar.baseDisplayText())
+                          + fm.horizontalAdvance(QLatin1Char(' '));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, cell.center());
+        QVERIFY(bar.isBaseEditing());
+        QCOMPARE(bar.editPreviewText(), QStringLiteral("= 0x7FF6DEAD1234"));
+        // The preview starts at the field's right edge — the same column.
+        QCOMPARE(bar.editRect().right() + 1, suffixX);
+        QCOMPARE(bar.baseSuffixShown(), QStringLiteral("= 0x7FF6DEAD1234"));
     }
 
     // ── The field is the size of its value ──
@@ -4310,33 +4446,59 @@ private slots:
 
         const QString text = bar.editText();
         QCOMPARE(text, QStringLiteral("0x279B3D07010"));
-        const int fit = AddressBar::kEditChromeW
-                      + QFontMetrics(bar.font()).horizontalAdvance(text)
-                      + AddressBar::kEditCaretSlack;
-        QCOMPARE(bar.editRect().width(), qMax(AddressBar::kEditMinW, fit));
+        QCOMPARE(bar.editRect().width(), fittedEditW(text, bar.font()));
         QVERIFY2(bar.editRect().width() < 180,
                  qPrintable(QStringLiteral("still slab-wide: %1").arg(bar.editRect().width())));
+        // THE contract: the overlay stands exactly where the cell did. Same
+        // left edge to the pixel, and a width that differs from the cell's
+        // only by the gap the caret lives in (a space, versus the cell's
+        // 6-px right padding) — paper against paper, invisible.
+        QCOMPARE(bar.editRect().left(), baseCell.left());
+        QVERIFY2(qAbs(bar.editRect().width() - baseCell.width())
+                     <= QFontMetrics(bar.font()).horizontalAdvance(QLatin1Char(' ')),
+                 qPrintable(QStringLiteral("field %1 vs cell %2")
+                                .arg(bar.editRect().width()).arg(baseCell.width())));
         // The selection is the whole value — the half the user said was
         // already right, pinned so the width work cannot cost it.
         QCOMPARE(bar.editWidget()->selectedText(), text);
-        // And it covers the crumbs regardless: only the field shrank.
-        QCOMPARE(bar.editCoveredRect().right(),
-                 bar.itemRect(QStringLiteral("recent")).left() - 1);
+        // Nothing readable beyond the cell is papered over: the paper stops
+        // inside the next crumb's own padding, well short of its first glyph,
+        // so the trail is still there and still legible.
+        QCOMPARE(bar.editCoveredRect().left(), baseCell.left());
+        QVERIFY2(bar.editCoveredRect().right()
+                     < bar.itemRect(QStringLiteral("crumb:0")).left() + AddressBar::kCrumbPad,
+                 qPrintable(QStringLiteral("paper to %1, crumb text at %2")
+                                .arg(bar.editCoveredRect().right())
+                                .arg(bar.itemRect(QStringLiteral("crumb:0")).left()
+                                     + AddressBar::kCrumbPad)));
     }
 
-    // A one- or two-character value would measure to nothing, so the floor
-    // keeps it a target you can hit and see a caret in.
-    void testShortBaseValueKeepsTheFieldFloor() {
+    // A one-character value gets a one-character field. There is deliberately
+    // no minimum: the CELL is that small, and the whole contract is that the
+    // overlay is the cell. A 90-px floor lived here and was the last thing
+    // still inflating a field on click.
+    void testShortBaseValueGetsAShortFieldNotAFloor() {
         AddressBar bar;
         AddressBarState s = stateWith(twoLevel());
         s.baseFormula = QStringLiteral("1");
         bar.setState(s);
         showBar(bar, 900);
-        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier,
-                          bar.itemRect(QStringLiteral("base")).center());
+        const QRect cell = bar.itemRect(QStringLiteral("base"));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, cell.center());
         QVERIFY(bar.isBaseEditing());
         QCOMPARE(bar.editText(), QStringLiteral("1"));
-        QCOMPARE(bar.editRect().width(), AddressBar::kEditMinW);
+        // The cell here also carries the resolved suffix, so only the field's
+        // own share of it is the comparison: same left edge, fitted width.
+        QCOMPARE(bar.editRect().left(), cell.left());
+        QCOMPARE(bar.editRect().width(), fittedEditW(bar.editText(), bar.font()));
+        QVERIFY2(bar.editRect().width() < AddressBar::kEditMinW,
+                 qPrintable(QStringLiteral("a one-char field is %1 px wide")
+                                .arg(bar.editRect().width())));
+        // ...and it grows the moment there is something to grow for.
+        const int opened = bar.editRect().width();
+        bar.editWidget()->setText(QStringLiteral("<REECLASS.exe>+0x1234"));
+        QApplication::processEvents();
+        QVERIFY(bar.editRect().width() > opened);
     }
 
     // Growth is one-way for as long as the overlay is up. A field that
@@ -4358,9 +4520,7 @@ private slots:
         QApplication::processEvents();
         const int grown = bar.editRect().width();
         QVERIFY2(grown > opened, qPrintable(QStringLiteral("%1 -> %2").arg(opened).arg(grown)));
-        QCOMPARE(grown, AddressBar::kEditChromeW
-                            + QFontMetrics(bar.font()).horizontalAdvance(bar.editText())
-                            + AddressBar::kEditCaretSlack);
+        QCOMPARE(grown, fittedEditW(bar.editText(), bar.font()));
 
         // Back to the short value: the box does NOT close up around it.
         bar.editWidget()->setText(QStringLiteral("0x10"));
