@@ -1062,6 +1062,9 @@ if(BUILD_TESTING)
             src/sourcechooserpopup.cpp
             src/themes/theme.cpp src/themes/thememanager.cpp src/resources.qrc)
         target_include_directories(test_source_chooser PRIVATE src)
+        # The chrome tests load tw / vs from src/themes/defaults by path, so
+        # the frame rule is pinned under both polarities.
+        target_compile_definitions(test_source_chooser PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
         target_link_libraries(test_source_chooser PRIVATE
             ${QT}::Widgets ${QT}::Test ${QT}::Svg)
         if(WIN32)

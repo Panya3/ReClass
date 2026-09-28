@@ -16,7 +16,7 @@ same trail (only the pane a gesture came from scrolls).
 
 Paper, not chrome: the band is `editorPaperColor` (it sits inside the
 document column), the seam under it one device row of `containerBorderColor`,
-hover `t.hover`, pressed `pressedFill(t)`, tones walk `text > textDim >
+hover `t.hover`, a mouse-down flash `pressedFill(t)` (a cell with its menu up stays `t.hover`), tones walk `text > textDim >
 textMuted > textFaint`, and there is **no accent anywhere on the bar** —
 purple is spent on document tabs and real selection, not on a navigation aid.
 The first ink (the Back glyph) sits on `kGutter`, the same device column every
@@ -69,7 +69,8 @@ tokens only).
 | Crumbs | a lone crumb is `textDim` regular (it repeats the doc tab); from depth 2 the ancestors are `textDim` and the deepest is `text` DemiBold — the single weight step on this surface. |
 | Rest | nothing filled. Nav glyphs, chevrons and the chip's chevron are `textDim` / `textFaint`. |
 | Hover | `t.hover` fill under the cell, tone → `text`; a chevron flips › → ˅. The chip and its chevron light as one rect. |
-| Pressed / menu open | `pressedFill(t)` for as long as the menu is up (`aboutToHide` releases it). |
+| Pressed | `pressedFill(t)` for the mouse-down flash only. |
+| Menu open | `t.hover` for as long as the menu is up (`aboutToHide` releases it; the source chooser's `dismissed`). A hung dropdown reads as the hover it grew from, not as a selection: on tw.json `pressedFill` is `t.selected` (button == background), which painted the chip as a pale-blue selected box for the life of the popup. |
 | Disabled | `setOpacity(0.40)` around the whole cell — never `textDim × 0.4`. Back / Forward / Up / history follow the controller's `canBack` / `canForward` / `canUp`; a disabled cell is laid out (the field never shifts when history appears) and its click is ignored. |
 | Keyboard focus | one device-exact 1-px ring in `borderFocused` (the four edge fills — a `QPen` rect is two rows at 125 %). |
 | Editing | the overlay is up; the seam row under the field turns `borderFocused` while the text parses / resolves and `markerError` while it does not (or the controller refused it). |
@@ -331,6 +332,41 @@ a popup, ends keyboard mode.
   `<prefix>_<w>.png` — three bars (1, 3, 6 crumbs) stacked with magenta gaps
   — and crop by the printed rects (logical × dpr, plus the row's device y).
 
+## The source chooser
+
+`SourceChooserPopup` (`src/sourcechooserpopup.cpp`) is the chip's dropdown
+and the reference for the popup family rule, which lives in the comment
+above its `paintEvent`: ONE surface (`theme.background`, the ground
+`MenuBarStyle::PE_FrameMenu` gives the bar's own `QMenu`s) inside ONE
+device-exact 1-px `theme.border` frame painted with `paintutil`'s four edge
+fills, the layout inset 1 logical px so no child — the filter field, the
+list viewport, its scrollbar, a delegate fill, the accent — ever touches the
+frame; square corners, `Qt::NoDropShadowWindowHint`; the filter is the same
+surface plus one device-exact seam underneath (`containerBorderColor` at
+rest, `borderFocused` while focused — `PanelSearchField`'s grammar on the
+popup ground); section captions follow `section_header.h` (8-pt regular
+`textDim`, hairline under the row); the Clear All divider and the footer
+seam are `containerBorderColor` too, so the frame is the only full
+`theme.border` line. Rows: tinted `themedVsIcon` at `textDim` (0.40 when the
+source exited), name `text` (bold when active), row 2 as plain tokens
+`Process  PID n  x64  active` — the word "active" is the popup's one accent;
+no side bar, no pills, no stale-row tint. The scrollbar is styled locally (6
+px, track = the surface, handle `textFaint` at 45 % over it) so the app-wide
+`QScrollBar` rule never reaches it, and the popup's height comes from the
+real row hints capped by the screen under the anchor (flipping above when
+there is more room there), so a scrollbar appears only when the list truly
+cannot fit. The anchor is the bar's bottom edge under the chip: the popup's
+top frame row is the device row after the bar's seam row at any scale.
+
+Pinned by `test_source_chooser` (the frame on exactly one device row /
+column per side, the surface strips, the accent budget, the sizing and the
+scroll case, at dpr 1.0 and 1.25 under tw and vs) and `test_breadcrumb`
+(`testMenuOpenCellIsHoverNotSelected`,
+`testSourceChooserHangsOnTheSeamAtBothScales`). Harness:
+`sourcechooser_render <prefix> [tw vs ...] [many]` (EXCLUDE_FROM_ALL; run on
+the hidden desktop) grabs one PNG per theme and prints the popup size, the
+dpr and every child / row rect for cropping.
+
 ## Rules
 
 - No new theme tokens; no accent on the bar; no `border-radius`, no QSS
@@ -338,9 +374,9 @@ a popup, ends keyboard mode.
 - `setState()` early-returns on `operator==`: a live tick with nothing new
   costs nothing. Never tear down and rebuild children — there is exactly one
   (the edit overlay), hidden at rest.
-- Every dropdown is built per open and freed on `aboutToHide`; the cell stays
-  pressed until then. The source chooser is the one popup the bar does not
-  own (`setSourceMenuOpen` mirrors it).
+- Every dropdown is built per open and freed on `aboutToHide`; the cell keeps
+  its hover fill until then. The source chooser is the one popup the bar does
+  not own (`setSourceMenuOpen` mirrors it).
 - The bar has no `NodeTree`: what its menus and the path edit need arrives
   as `AddressBarTreeQueries`, pulled when a menu opens or a key is typed —
   never per refresh. Likewise the module list is `Provider::modulesCached()`,

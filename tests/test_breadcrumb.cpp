@@ -24,6 +24,7 @@
 #include <QFile>
 #include <QFocusEvent>
 #include <QPainter>
+#include <QScreen>
 #include <QTemporaryDir>
 #include <QImage>
 #include <QJsonDocument>
@@ -1532,14 +1533,19 @@ private slots:
         QVERIFY(popup);
         QVERIFY(popup->isVisible());
         QImage img = bar->grab().toImage().convertToFormat(QImage::Format_ARGB32);
-        QVERIFY2(countColour(img, devRect(img, src), pressedFill(t)) > 0, "chip not pressed while the popup is up");
+        // A cell with its dropdown up is t.hover, not pressedFill: on tw.json
+        // pressedFill is t.selected, which boxed the chip in pale blue for
+        // the life of the popup (build/issue.png).
+        QVERIFY2(countColour(img, devRect(img, src), t.hover) > 0, "chip not hover-filled while the popup is up");
+        if (pressedFill(t) != t.hover)
+            QCOMPARE(countColour(img, devRect(img, src), pressedFill(t)), 0);
         QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), t.indHoverSpan), 0);
         QApplication::processEvents();
         popup->hide();
         QApplication::processEvents();
         QVERIFY(!popup->isVisible());
         img = grabOf(*bar);
-        QVERIFY2(countColour(img, devRect(img, src), pressedFill(t)) < 16, "chip stayed pressed after the popup hid");
+        QVERIFY2(countColour(img, devRect(img, src), t.hover) < 16, "chip stayed filled after the popup hid");
     }
 
     void testSourceStatusSignalMovesTheDot() {
@@ -2010,9 +2016,9 @@ private slots:
         QVERIFY2(texts.contains(QStringLiteral("Go to address\u2026\tCtrl+G")), qPrintable(texts.join('|')));
         QVERIFY2(texts.contains(QStringLiteral("Clear recent")), qPrintable(texts.join('|')));
         QVERIFY(actionWithText(menu, QStringLiteral("Clear recent"))->isEnabled());
-        // The cell reads pressed while its menu is up (grab before the pump).
+        // The cell keeps its hover fill while its menu is up (grab before the pump).
         QImage img = bar->grab().toImage().convertToFormat(QImage::Format_ARGB32);
-        QVERIFY2(countColour(img, devRect(img, recent), pressedFill(t)) > 0, "recent cell not pressed while its menu is up");
+        QVERIFY2(countColour(img, devRect(img, recent), t.hover) > 0, "recent cell not hover-filled while its menu is up");
         // "Go to address…" is a request the editor forwards; main.cpp wires
         // it in a later phase, so here only the signal is checked.
         actionWithText(menu, QStringLiteral("Go to address\u2026\tCtrl+G"))->trigger();
@@ -2030,7 +2036,7 @@ private slots:
         m_doc->undoStack.undo();
         QCOMPARE(m_doc->tree.baseAddress, 0ULL);
         img = grabOf(*bar);
-        QVERIFY2(countColour(img, devRect(img, recent), pressedFill(t)) < 16, "recent cell stayed pressed after its menu hid");
+        QVERIFY2(countColour(img, devRect(img, recent), t.hover) < 16, "recent cell stayed filled after its menu hid");
         // Clear recent empties the shared list (restored by cleanup()).
         QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
         menu = visibleMenu(bar, QStringLiteral("rcxAddressBarRecentMenu"));
@@ -2156,9 +2162,9 @@ private slots:
         QVERIFY(menu->actions()[0]->isChecked());
         QVERIFY(!menu->actions()[1]->isChecked());
         QVERIFY(menu->actions()[1]->isEnabled());              // collapsed siblings are not dimmed
-        // The chevron reads pressed while its menu is up (grab before the pump).
+        // The chevron keeps its hover fill while its menu is up (grab before the pump).
         QImage img = bar->grab().toImage().convertToFormat(QImage::Format_ARGB32);
-        QVERIFY2(countColour(img, devRect(img, chev), pressedFill(t)) > 0, "chevron not pressed while its menu is up");
+        QVERIFY2(countColour(img, devRect(img, chev), t.hover) > 0, "chevron not hover-filled while its menu is up");
         menu->actions()[1]->trigger();
         closeMenuOn(bar, QStringLiteral("chev:0"), menu);
         QCOMPARE(pick.count(), 1);
@@ -2168,7 +2174,7 @@ private slots:
         QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ ptr2 }));
         QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.ptr2"), QStringLiteral("QWidget") }));
         img = grabOf(*bar);
-        QVERIFY2(countColour(img, devRect(img, chev), pressedFill(t)) < 16, "chevron stayed pressed after its menu hid");
+        QVERIFY2(countColour(img, devRect(img, chev), t.hover) < 16, "chevron stayed filled after its menu hid");
         // The trailing chevron (after the deepest crumb) lists the deepest
         // class's fields with nothing checked: drill further. QWidget has
         // none in this chain, so the menu says so and offers nothing.
@@ -3598,6 +3604,101 @@ private slots:
             if (countColour(img, QRect(x, topY + 2, 1, bottomY - topY - 4), t.borderFocused) >= bottomY - topY - 6)
                 ringCols << x;
         QCOMPARE(ringCols, (QVector<int>{ leftX, rightX }));
+    }
+
+    void testMenuOpenCellIsHoverNotSelected() {
+        // The chip while the source chooser is up: t.hover, never
+        // pressedFill. On tw.json pressedFill is t.selected (button ==
+        // background), so the shared state boxed the chip in pale blue for
+        // as long as the popup stayed open (build/issue.png); the mouse-down
+        // flash keeps pressedFill, a hung dropdown reads as hover.
+        AddressBar bar;
+        bar.applyTheme(loadTheme(QStringLiteral("tw")));
+        const Theme& t = bar.theme();
+        QVERIFY(pressedFill(t) != t.hover);
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        const QRect src = bar.itemRect(QStringLiteral("src"));
+        QVERIFY(!src.isNull());
+        bar.setSourceMenuOpen(true);
+        QImage img = grabOf(bar);
+        QVERIFY2(countColour(img, devRect(img, src), t.hover) > 0, "menu-open chip has no hover fill");
+        QCOMPARE(countColour(img, devRect(img, src), pressedFill(t)), 0);
+        QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), t.indHoverSpan), 0);
+        bar.setSourceMenuOpen(false);
+        img = grabOf(bar);
+        QCOMPARE(countColour(img, devRect(img, src), t.hover), 0);
+    }
+
+    void testSourceChooserHangsOnTheSeamAtBothScales() {
+        // The anchor is the bar's bottom edge under the chip: the popup's
+        // top frame row is the device row right after the bar's seam row and
+        // its left frame column is the chip cell's left device column — at
+        // dpr 1.0 and at 1.25, where the edge fills pick qFloor(edge ± 0.5)
+        // and floor(x + 0.5) is always floor(x - 0.5) + 1. Rendered onto one
+        // image, the bar at the origin and the popup at (chip.left, barH),
+        // the way the real windows stack.
+        AddressBar bar;
+        bar.applyTheme(loadTheme(QStringLiteral("tw")));
+        const Theme& t = bar.theme();
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        const QRect src = bar.itemRect(QStringLiteral("src"));
+        QVERIFY(!src.isNull());
+        SourceChooserPopup popup;
+        popup.applyTheme(t);
+        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+        {
+            QVector<SourceEntry> entries;
+            SourceEntry h; h.entryKind = SourceEntry::SectionHeader; h.displayName = QStringLiteral("Connected"); h.enabled = false;
+            entries.append(h);
+            SourceEntry e; e.entryKind = SourceEntry::SavedSource; e.displayName = QStringLiteral("REECLASS.exe");
+            e.providerIdentifier = QStringLiteral("processmemory"); e.kindLabel = QStringLiteral("Process");
+            e.iconPath = iconForProvider(e.providerIdentifier); e.pid = QStringLiteral("34856");
+            e.arch = QStringLiteral("x64"); e.savedIndex = 0; e.isActive = true;
+            entries.append(e);
+            popup.setSources(entries);
+        }
+        const QPoint anchor = bar.mapToGlobal(QPoint(src.left(), bar.height()));
+        popup.popup(anchor);
+        QTest::qWait(30);
+        QApplication::processEvents();
+        // The popup sits at the anchor unless the screen edge pushes it in.
+        const QRect screen = QApplication::screenAt(anchor) ? QApplication::screenAt(anchor)->availableGeometry()
+                                                            : QApplication::primaryScreen()->availableGeometry();
+        QCOMPARE(popup.pos().x(), qBound(screen.left(), anchor.x(), screen.right() - popup.width()));
+        QCOMPARE(popup.pos().y(), anchor.y());
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            const int barH = bar.height();
+            const int w = qMax(bar.width(), src.left() + popup.width());
+            QImage img(qRound(w * dpr), qRound((barH + popup.height()) * dpr), QImage::Format_ARGB32);
+            img.setDevicePixelRatio(dpr);
+            img.fill(Qt::black);
+            {
+                QPainter p(&img);
+                bar.render(&p);
+                popup.render(&p, QPoint(src.left(), barH));
+            }
+            const int seamRow  = qFloor(barH * dpr - 0.5);
+            const int frameRow = qFloor(barH * dpr + 0.5);
+            QCOMPARE(frameRow, seamRow + 1);
+            const int barW = qRound(bar.width() * dpr);
+            QVERIFY2(countColour(img, QRect(0, seamRow, barW, 1), containerBorderColor(t)) >= barW - 2,
+                     qPrintable(QStringLiteral("dpr %1: the bar's seam is not on row %2").arg(dpr).arg(seamRow)));
+            const QRectF pdev(src.left() * dpr, barH * dpr, popup.width() * dpr, popup.height() * dpr);
+            const int left  = qFloor(pdev.left() + 0.5);
+            const int right = qFloor(pdev.right() - 0.5);
+            const int bottom = qFloor(pdev.bottom() - 0.5);
+            QCOMPARE(countColour(img, QRect(left, frameRow, right - left + 1, 1), t.border), right - left + 1);
+            QCOMPARE(countColour(img, QRect(left, frameRow, right - left + 1, 1), containerBorderColor(t)), 0);
+            QCOMPARE(countColour(img, QRect(left, frameRow, right - left + 1, 1), t.indHoverSpan), 0);
+            QCOMPARE(countColour(img, QRect(left, frameRow, 1, bottom - frameRow + 1), t.border), bottom - frameRow + 1);
+            // The column just left of the popup is the ground under the bar's
+            // window, so nothing of the frame leaks a device column left.
+            QCOMPARE(countColour(img, QRect(left - 1, frameRow + 1, 1, bottom - frameRow), t.border), 0);
+        }
+        popup.hide();
+        QApplication::processEvents();
     }
 
     void testDocumentShortcutsReachTheBar() {

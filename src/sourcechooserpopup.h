@@ -1,18 +1,18 @@
 #pragma once
+#include "themes/theme.h"
 #include <QFrame>
 #include <QFont>
 #include <QVector>
 #include <QString>
 #include <cstdint>
 
+class QAction;
 class QLineEdit;
 class QListView;
 class QStringListModel;
 class QLabel;
 
 namespace rcx {
-
-struct Theme;
 
 // ── Provider icon + kind label helpers (shared between popup and controller) ──
 
@@ -64,6 +64,12 @@ struct SourceEntry {
 };
 
 // ── Popup widget ──
+// The address bar's data-source chooser: a title row, a filter field, the
+// Connected / Add Source list and a key-hint footer, on ONE surface inside
+// ONE device-exact frame (the popup family rule — see paintEvent in the
+// .cpp). Everything paints from the Theme applyTheme() was handed, so a
+// preview theme or a harness never shows chrome in one theme and rows in
+// another.
 
 class SourceChooserPopup : public QFrame {
     Q_OBJECT
@@ -76,6 +82,8 @@ public:
     void setLivenessResults(const QVector<bool>& alive);
     void popup(const QPoint& globalPos);
     void warmUp();
+
+    const Theme& theme() const { return m_theme; }
 
 signals:
     void sourceSelected(int savedIndex);
@@ -92,12 +100,15 @@ protected:
 private:
     QLabel*           m_titleLabel  = nullptr;
     QWidget*          m_escBtn      = nullptr;
-    QLineEdit*        m_filterEdit  = nullptr;
-    QFrame*           m_separator   = nullptr;
-    QListView*        m_listView    = nullptr;
+    QLineEdit*        m_filterEdit  = nullptr;   // a SourceFilterField (sourcechooserpopup.cpp)
+    QAction*          m_clearAction = nullptr;   // the field's trailing × — shown only with text
+    QListView*        m_listView    = nullptr;   // a SourceListView (sourcechooserpopup.cpp)
     QStringListModel* m_model       = nullptr;
     QLabel*           m_footerLabel = nullptr;
 
+    // The theme applyTheme() received: the palette, the QSS, the frame, the
+    // field's seam and every delegate row paint from this one copy.
+    Theme m_theme;
     QFont m_font;
     QVector<SourceEntry> m_allEntries;
     QVector<SourceEntry> m_filteredEntries;

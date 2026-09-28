@@ -41,7 +41,8 @@
 //
 // Chrome rules: the band is editorPaperColor (it sits inside the document
 // column — paper, not a third chrome strip), the seam under it is one device
-// row of containerBorderColor, hover is t.hover, pressed is pressedFill(t),
+// row of containerBorderColor, hover is t.hover, the mouse-down flash is
+// pressedFill(t), a cell whose menu is up stays t.hover,
 // tones walk text > textDim > textMuted > textFaint, and there is no accent
 // anywhere on the bar — purple is spent on document tabs and real selection,
 // not on a navigation aid.
@@ -1364,9 +1365,16 @@ private:
     void paintItem(QPainter& p, const LaidItem& li) const {
         const Theme& t = m_theme;
         const bool hovered = li.enabled && !m_hoverId.isEmpty() && sameGroup(m_hoverId, li.id);
+        // Two states, two fills: the mouse-down flash is pressedFill(t); a
+        // cell whose dropdown is up (a menu, or the source chooser through
+        // setSourceMenuOpen) reads as the hover it grew from. They used to
+        // share pressedFill, and on tw.json pressedFill is t.selected
+        // (button == background), so the chip sat in a pale-blue
+        // "selected" box for the life of the popup.
         const bool pressed = li.enabled
-            && ((hovered && !m_pressedId.isEmpty() && sameGroup(m_pressedId, li.id))
-                || (!m_menuOpenId.isEmpty() && sameGroup(m_menuOpenId, li.id)));
+            && hovered && !m_pressedId.isEmpty() && sameGroup(m_pressedId, li.id);
+        const bool menuOpen = li.enabled
+            && !m_menuOpenId.isEmpty() && sameGroup(m_menuOpenId, li.id);
         const QRect r = li.rect;
         const bool deepest = isDeepest(li);
         const qreal prevOpacity = p.opacity();
@@ -1377,8 +1385,8 @@ private:
         // the base is a text field (IBeam, no fill) and the stretch is air.
         const bool fillable = li.kind != Cell::Space && li.kind != Cell::Base && !deepest;
         if (fillable) {
-            if (pressed)      p.fillRect(r, pressedFill(t));
-            else if (hovered) p.fillRect(r, t.hover);
+            if (pressed)                  p.fillRect(r, pressedFill(t));
+            else if (menuOpen || hovered) p.fillRect(r, t.hover);
         }
 
         p.setFont(font());
