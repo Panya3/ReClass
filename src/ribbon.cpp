@@ -96,21 +96,8 @@ constexpr int kLargeMaxW    = 112;
 constexpr int kLargeIconOnlyW = 40;
 constexpr double kDisabledOpacity = 0.40;
 
-// Draws a dpr-stamped pixmap so its top-left lands on a whole device pixel
-// (no SmoothPixmapTransform: the pixmap is already at device resolution).
-void drawPixmapSnapped(QPainter& p, const QPointF& logicalPos, const QPixmap& pm) {
-    const QTransform dt = p.deviceTransform();
-    QPointF dev = dt.map(logicalPos);
-    dev = QPointF(qRound(dev.x()), qRound(dev.y()));
-    p.drawPixmap(dt.inverted().map(dev), pm);
-}
-
-// Pressed surface: `button`, or `selected` on themes whose button colour is
-// the body colour (tw.json) so a press is still visible.
-QColor pressedFill(const Theme& t) {
-    return (t.button.isValid() && t.button != t.background) ? t.button
-         : (t.selected.isValid() ? t.selected : t.hover);
-}
+// drawPixmapSnapped / pressedFill live in paintutil.h — shared with the
+// address bar so both strips snap icons and paint presses identically.
 
 }  // namespace
 

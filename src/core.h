@@ -590,6 +590,11 @@ struct Crumb {
     QString  label;
     uint64_t rootId  = 0;      // crumb index for class segments (0 for field segments)
     bool     isField = false;  // true = inert field connector, false = clickable class
+
+    bool operator==(const Crumb& o) const {
+        return label == o.label && rootId == o.rootId && isField == o.isField;
+    }
+    bool operator!=(const Crumb& o) const { return !(*this == o); }
 };
 
 // ── NodeTree ──

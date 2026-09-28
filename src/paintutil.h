@@ -1,5 +1,8 @@
 #pragma once
+#include "themes/theme.h"
 #include <QPainter>
+#include <QPixmap>
+#include <QPointF>
 #include <QRectF>
 #include <QTransform>
 #include <QColor>
@@ -89,6 +92,27 @@ inline void fillTopDeviceRowsOfRect(QPainter& p, const QRectF& r, int n, const Q
     const qreal first = qFloor(dev.top() + 0.5);
     const QRectF devRows(dev.left(), first, dev.width(), qreal(n));
     p.fillRect(dt.inverted().mapRect(devRows), c);
+}
+
+// ── Painted-control primitives (ribbon, address bar) ──
+// Shared by every custom-painted strip so an icon or a pressed cell looks the
+// same wherever it appears; they started life in ribbon.cpp's anonymous
+// namespace and moved here once a second strip needed them.
+
+// Draws a dpr-stamped pixmap so its top-left lands on a whole device pixel
+// (no SmoothPixmapTransform: the pixmap is already at device resolution).
+inline void drawPixmapSnapped(QPainter& p, const QPointF& logicalPos, const QPixmap& pm) {
+    const QTransform dt = p.deviceTransform();
+    QPointF dev = dt.map(logicalPos);
+    dev = QPointF(qRound(dev.x()), qRound(dev.y()));
+    p.drawPixmap(dt.inverted().map(dev), pm);
+}
+
+// Pressed surface: `button`, or `selected` on themes whose button colour is
+// the body colour (tw.json) so a press is still visible.
+inline QColor pressedFill(const Theme& t) {
+    return (t.button.isValid() && t.button != t.background) ? t.button
+         : (t.selected.isValid() ? t.selected : t.hover);
 }
 
 } // namespace rcx

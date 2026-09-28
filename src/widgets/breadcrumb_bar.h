@@ -61,6 +61,11 @@ public:
     // (isField=false, rootId = crumb index) and inert "fieldName" connectors
     // (isField=true). Always shown when there is ≥1 class crumb.
     void setCrumbs(const QVector<Crumb>& crumbs) {
+        // The controller pushes the trail on EVERY refresh tick (live memory
+        // recomposes several times a second); an unchanged trail must not
+        // tear down and recreate every label and button. applyTheme still
+        // rebuilds unconditionally — the crumbs are equal but the QSS is not.
+        if (crumbs == m_crumbs) return;
         m_crumbs = crumbs;
         rebuild();
     }

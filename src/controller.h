@@ -494,7 +494,18 @@ public:
     // for tests; handleNodeClick assigns its result to m_focusPath.
     QVector<uint64_t> focusChainToNode(uint64_t nodeId) const;
 
-    // Bookmarks
+    // Rebase the document to `expr` (anything AddressParser understands —
+    // "0x7FF6...", "<game.exe>+0x40", "[ntdll!Ldr]"). THE base-address
+    // mutation: the inline command-row edit, Goto, the bookmarks dock, the
+    // scanner's Set-as-Base and MCP change_base all come through here, so
+    // every rebase is one undoable cmd::ChangeBase (pushed only when base or
+    // formula actually change), lands in the Goto recent list, arms the
+    // value-tracking cooldown, and keeps m_focusPath. A bare hex/decimal
+    // literal clears the formula; anything else is kept as the formula. On
+    // failure: *err (parser message), statusHint("Base: …"), false, nothing
+    // pushed. recordHistory is reserved for the address bar's NavHistory.
+    bool rebaseTo(const QString& expr, QString* err = nullptr, bool recordHistory = true);
+    // Bookmarks / Goto — a wrapper over rebaseTo, kept for its callers.
     bool navigateToFormula(const QString& formula, QString* errOut = nullptr);
     void addBookmark(const QString& name, const QString& formula);
     void removeBookmark(int idx);
@@ -612,10 +623,22 @@ private:
     // virtually-expanded member's parentId points at its struct root, NOT the
     // pointer that expanded it (the refId hop isn't in the parentId chain).
     uint64_t rootStructOf(uint64_t nodeId) const;
-    // Reconstruct the chain of expanded pointers from the view root down to
-    // `pid` (inclusive) by following refId hops — so ancestors expanded via the
-    // fold margin (which never grew m_focusPath) are still represented. Empty
-    // if no expanded chain reaches the view root (orphan / cycle).
+    // Nearest enclosing drill FRAME of a node: a top-level root, or an
+    // embedded struct expanded in place (drillTargetId(n) == n.id). This —
+    // not rootStructOf — is the container notion every focus-path consumer
+    // (reconcile / chain / breadcrumb) shares, so a trail through
+    // `Player.stats` is neither trimmed by one nor mislabelled. 0 for roots
+    // and orphans.
+    uint64_t containerOf(uint64_t nodeId) const;
+    // The expanded hop that put `containerId`'s rows on screen: the embedded
+    // struct itself, or the first expanded drillable pointer whose refId is
+    // the root. 0 when nothing expanded opens it.
+    uint64_t expandedHopInto(uint64_t containerId) const;
+    // Reconstruct the chain of expanded hops from the view root down to
+    // `pid` (inclusive) by following containerOf/expandedHopInto — so
+    // ancestors expanded via the fold margin (which never grew m_focusPath)
+    // are still represented. Empty if no expanded chain reaches the view root
+    // (orphan / cycle).
     QVector<uint64_t> focusChainTo(uint64_t pid) const;
     // Trim m_focusPath at the first entry that is gone, no longer a drillable
     // pointer, collapsed, or whose container breaks the chain (e.g. the user
@@ -778,7 +801,6 @@ private:
     void handleMarginClick(RcxEditor* editor, int margin, int line, Qt::KeyboardModifiers mods);
     void updateCommandRow();
     void switchToSavedSource(int idx);
-    void pushSavedSourcesToEditors();
     void showTypePopup(RcxEditor* editor, TypePopupMode mode, int nodeIdx, QPoint globalPos);
     TypeSelectorPopup* ensurePopup(RcxEditor* editor);
 

@@ -152,9 +152,6 @@ public:
 
     void setRelativeOffsets(bool rel) { m_relativeOffsets = rel; reformatMargins(); }
 
-    // Saved sources for quick-switch in source picker
-    void setSavedSources(const QVector<SavedSourceDisplay>& sources) { m_savedSourceDisplay = sources; }
-
 signals:
     void marginClicked(int margin, int line, Qt::KeyboardModifiers mods);
     void contextMenuRequested(int line, int nodeIdx, int subLine, QPoint globalPos);
@@ -454,9 +451,6 @@ private:
 
     // ── Custom type names for type picker ──
     QStringList m_customTypeNames;
-
-    // ── Saved sources for quick-switch ──
-    QVector<SavedSourceDisplay> m_savedSourceDisplay;
 
     // ── Value history ref (owned by controller) ──
     const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;

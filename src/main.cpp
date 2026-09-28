@@ -9664,10 +9664,8 @@ void MainWindow::ensureScannerPanel() {
     connect(m_scannerPanel, &ScannerPanel::goToAddress, this, [this](uint64_t addr) {
         auto* ctrl = activeController();
         if (!ctrl) return;
-        ctrl->document()->tree.baseAddress = addr;
-        ctrl->document()->tree.baseAddressFormula.clear();
-        ctrl->resetChangeTracking();
-        ctrl->refresh();
+        // Undoable, recent-listed and tracking-cooled like every other rebase.
+        ctrl->rebaseTo(QStringLiteral("0x") + QString::number(addr, 16).toUpper());
     });
 }
 

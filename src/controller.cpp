@@ -1,5 +1,6 @@
 #include "controller.h"
 #include "addressparser.h"
+#include "address_callbacks.h"
 #include "symbolstore.h"
 #include "profiler.h"
 #include "typeselectorpopup.h"
@@ -16,6 +17,7 @@
 #include "widgets/themed_inputdialog.h"
 #include "widgets/dialog_button.h"
 #include "widgets/enum_picker_popup.h"
+#include "gotoaddressdialog.h"
 #include "widgets/fieldlayoutdialog.h"
 #include "widgets/nestedstructdialog.h"
 #include <Qsci/qsciscintilla.h>
@@ -1527,24 +1529,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
         s.remove('`');
         s.remove('\'');
         if (s.isEmpty()) return {};
-        AddressParserCallbacks cbs;
-        if (m_doc->provider) {
-            auto* prov = m_doc->provider.get();
-            cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
-                uint64_t base = prov->symbolToAddress(name);
-                *ok = (base != 0);
-                return base;
-            };
-            int ptrSz = m_doc->tree.pointerSize;
-            cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
-                uint64_t val = 0;
-                *ok = prov->read(addr, &val, ptrSz);
-                return val;
-            };
-            cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
-                return SymbolStore::instance().resolve(name, prov, ok);
-            };
-        }
+        const AddressParserCallbacks cbs =
+            makeAddressCallbacks(m_doc->provider.get(), m_doc->tree.pointerSize);
         auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
         if (!result.ok) return {};
         return QStringLiteral("0x") + QString::number(result.value, 16).toUpper();
@@ -1683,63 +1669,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
             break;
         }
         case EditTarget::BaseAddress: {
-            QString s = text.trimmed();
-            s.remove('`');          // WinDbg backtick separators (e.g. 7ff6`6cce0000)
-            s.remove('\n');
-            s.remove('\r');
-
-            AddressParserCallbacks cbs;
-            if (m_doc->provider) {
-                auto* prov = m_doc->provider.get();
-                cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
-                    uint64_t base = prov->symbolToAddress(name);
-                    *ok = (base != 0);
-                    return base;
-                };
-                int ptrSz = m_doc->tree.pointerSize;
-                cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
-                    uint64_t val = 0;
-                    *ok = prov->read(addr, &val, ptrSz);
-                    return val;
-                };
-                cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
-                    return SymbolStore::instance().resolve(name, prov, ok);
-                };
-                // Wire kernel paging callbacks if provider supports it
-                if (prov->hasKernelPaging()) {
-                    cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
-                        Q_UNUSED(pid);
-                        auto r = prov->translateAddress(va);
-                        *ok = r.valid;
-                        return r.physical;
-                    };
-                    cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
-                        Q_UNUSED(pid);
-                        uint64_t cr3 = prov->getCr3();
-                        *ok = (cr3 != 0);
-                        return cr3;
-                    };
-                    cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
-                        auto entries = prov->readPageTable(physAddr, 0, 1);
-                        *ok = !entries.isEmpty();
-                        return entries.isEmpty() ? 0 : entries[0];
-                    };
-                }
-            }
-            auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
-            if (result.ok) {
-                // Preserve user-typed expression unless it's a bare hex/decimal literal
-                // that round-trips identically through the canonical "0xHEX" display.
-                static const QRegularExpression literalRx(
-                    QStringLiteral("^\\s*(?:0[xX][0-9A-Fa-f]+|\\d+)\\s*$"));
-                QString newFormula = literalRx.match(s).hasMatch() ? QString() : s;
-                uint64_t oldBase = m_doc->tree.baseAddress;
-                QString oldFormula = m_doc->tree.baseAddressFormula;
-                if (result.value != oldBase || newFormula != oldFormula) {
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
-                }
-            }
+            // One rebase implementation for every entry point (this edit,
+            // Goto, bookmarks, scanner, MCP): evaluate, undoable ChangeBase,
+            // recent list, error to the status bar.
+            rebaseTo(text);
             break;
         }
         case EditTarget::Source:
@@ -1884,9 +1817,49 @@ uint64_t RcxController::rootStructOf(uint64_t nodeId) const {
     return idx >= 0 ? m_doc->tree.nodes[idx].id : 0;
 }
 
+uint64_t RcxController::containerOf(uint64_t nodeId) const {
+    // Nearest enclosing DRILL FRAME: a top-level root, or an embedded struct
+    // expanded in place (drillTargetId(n) == n.id — it is its own hop).
+    // rootStructOf walks THROUGH embedded structs to the top, which is right
+    // for "which root owns this byte" but wrong for the focus path: with it,
+    // `Player.stats.hp` sits in `Player`, so a trail through `stats` failed
+    // reconcileFocusPath's container check while pushBreadcrumb labelled the
+    // frame from refId (0 → the first root class). Every focus-path consumer
+    // must agree on one notion of "container"; this is it.
+    int idx = m_doc->tree.indexOfId(nodeId);
+    if (idx < 0) return 0;
+    uint64_t cur = m_doc->tree.nodes[idx].parentId;
+    int guard = 0;
+    while (cur != 0 && guard++ < 4096) {
+        int ci = m_doc->tree.indexOfId(cur);
+        if (ci < 0) return 0;   // dangling parentId: orphan
+        const Node& c = m_doc->tree.nodes[ci];
+        if (c.parentId == 0 || drillTargetId(c) == c.id) return c.id;
+        cur = c.parentId;
+    }
+    return 0;
+}
+
+uint64_t RcxController::expandedHopInto(uint64_t containerId) const {
+    // The expanded hop that put `containerId`'s rows on screen. An embedded
+    // struct is its own hop; a root class was opened by the first expanded
+    // drillable pointer whose refId names it. First match wins (deterministic;
+    // ambiguous only when one class is referenced by 2+ expanded pointers).
+    int ci = m_doc->tree.indexOfId(containerId);
+    if (ci < 0) return 0;
+    const Node& c = m_doc->tree.nodes[ci];
+    if (c.parentId != 0)
+        return (!c.collapsed && drillTargetId(c) == c.id) ? c.id : 0;
+    for (const Node& nd : m_doc->tree.nodes) {
+        if (nd.refId == containerId && !nd.collapsed && drillTargetId(nd) != 0)
+            return nd.id;
+    }
+    return 0;
+}
+
 void RcxController::reconcileFocusPath() {
-    // Walk the chain: each focus pointer must still exist, be drillable, be
-    // expanded, and sit inside the previous depth's class (refId). Trim at the
+    // Walk the chain: each focus hop must still exist, be drillable, be
+    // expanded, and sit inside the frame the previous hop opened. Trim at the
     // first break so a fold-margin collapse can't leave a stale breadcrumb.
     uint64_t expectedContainer = m_viewRootId;
     int valid = 0;
@@ -1895,8 +1868,8 @@ void RcxController::reconcileFocusPath() {
         if (pi < 0) break;
         const Node& p = m_doc->tree.nodes[pi];
         if (drillTargetId(p) == 0 || p.collapsed) break;
-        if (expectedContainer != 0 && rootStructOf(p.id) != expectedContainer) break;
-        expectedContainer = p.refId;
+        if (expectedContainer != 0 && containerOf(p.id) != expectedContainer) break;
+        expectedContainer = drillTargetId(p);  // refId class, or the embedded struct itself
         valid = i + 1;
     }
     if (valid < m_focusPath.size()) m_focusPath.resize(valid);
@@ -1909,21 +1882,14 @@ QVector<uint64_t> RcxController::focusChainTo(uint64_t pid) const {
     while (cur != 0 && !seen.contains(cur)) {
         seen.insert(cur);
         chain.prepend(cur);
-        uint64_t container = rootStructOf(cur);
+        uint64_t container = containerOf(cur);
         if (container == 0) return {};                  // orphan
         if (container == m_viewRootId) return chain;    // reached the view root
-        if (m_viewRootId == 0) return chain;            // show-all: any root is a base
-        // The pointer that inline-expanded this class: an EXPANDED drillable
-        // pointer whose refId == container. First match wins (deterministic;
-        // ambiguous only when one class is referenced by 2+ expanded pointers).
-        uint64_t parentPtr = 0;
-        for (const Node& nd : m_doc->tree.nodes) {
-            if (nd.refId == container && !nd.collapsed && drillTargetId(nd) != 0) {
-                parentPtr = nd.id;
-                break;
-            }
+        if (m_viewRootId == 0) {                        // show-all: any ROOT is a base
+            int ci = m_doc->tree.indexOfId(container);  // (an embedded frame is not)
+            if (ci >= 0 && m_doc->tree.nodes[ci].parentId == 0) return chain;
         }
-        cur = parentPtr;
+        cur = expandedHopInto(container);
     }
     return {};  // no expanded chain reaches the view root
 }
@@ -1935,17 +1901,16 @@ QVector<uint64_t> RcxController::focusChainToNode(uint64_t nodeId) const {
     // The selected node is itself an expanded typed pointer → its own chain.
     if (drillTargetId(n) != 0 && !n.collapsed)
         return focusChainTo(n.id);
-    // Otherwise it sits inside some struct root. If that root is the view root
-    // it's a top-level row (no focus → bare root crumb); else the root is the
-    // refId class of the expanded pointer that inline-rendered it — return that
-    // pointer's chain, so selecting inside a NewClass* adds NewClass.
-    uint64_t container = rootStructOf(nodeId);
+    // Otherwise it sits inside some frame. If that frame is the view root it's
+    // a top-level row (no focus → bare root crumb); else the frame is the
+    // refId class of the expanded pointer that inline-rendered it, or an
+    // embedded struct expanded in place — return that hop's chain, so
+    // selecting inside a NewClass* adds NewClass and inside Player.stats adds
+    // stats.
+    uint64_t container = containerOf(nodeId);
     if (container == 0 || container == m_viewRootId) return {};
-    for (const Node& p : m_doc->tree.nodes) {
-        if (p.refId == container && !p.collapsed && drillTargetId(p) != 0)
-            return focusChainTo(p.id);
-    }
-    return {};
+    const uint64_t hop = expandedHopInto(container);
+    return hop ? focusChainTo(hop) : QVector<uint64_t>{};
 }
 
 void RcxController::collapseToFocus(int crumbIndex) {
@@ -2000,10 +1965,13 @@ void RcxController::pushBreadcrumb() {
         QString field = p.name.isEmpty() ? fmt::typeNameRaw(p.kind) : p.name;
         crumbs.push_back({ classLabelOf(container) + QStringLiteral(".") + field,
                            (uint64_t)i, /*isField=*/false });
-        container = p.refId;  // next depth's container = this pointer's class
+        // Next depth's container = the frame this hop opens: the pointer's
+        // refId class, or the embedded struct itself (refId is 0 there, and
+        // classLabelOf(0) would name the first root class instead).
+        container = drillTargetId(p);
     }
-    // Current (deepest) class — `container` is the last pointer's refId, or the
-    // view root when nothing is drilled.
+    // Current (deepest) class — `container` is the frame the last hop opens, or
+    // the view root when nothing is drilled.
     crumbs.push_back({ classLabelOf(container), (uint64_t)m_focusPath.size(),
                        /*isField=*/false });
 
@@ -2280,7 +2248,6 @@ void RcxController::refresh() {
     // then overlays last so hover indicators survive the refresh.
     {
         PROFILE_SCOPE("refresh.tail");
-        pushSavedSourcesToEditors();
         // Keep the grey row band (m_selIds) locked to any active byte
         // selection. The byte selection is address-based and owns the row
         // selection while active, but the prune above (and other m_selIds
@@ -8110,42 +8077,9 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
 
     // Re-evaluate stored formula against the new provider
     if (!m_doc->tree.baseAddressFormula.isEmpty()) {
-        AddressParserCallbacks cbs;
-        auto* prov = m_doc->provider.get();
-        cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
-            uint64_t base = prov->symbolToAddress(name);
-            *ok = (base != 0);
-            return base;
-        };
         int ptrSz = m_doc->tree.pointerSize;
-        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
-            uint64_t val = 0;
-            *ok = prov->read(addr, &val, ptrSz);
-            return val;
-        };
-        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
-            return SymbolStore::instance().resolve(name, prov, ok);
-        };
-        // Wire kernel paging callbacks if provider supports it
-        if (prov->hasKernelPaging()) {
-            cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
-                Q_UNUSED(pid); // current provider already targets a specific process
-                auto r = prov->translateAddress(va);
-                *ok = r.valid;
-                return r.physical;
-            };
-            cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
-                Q_UNUSED(pid);
-                uint64_t cr3 = prov->getCr3();
-                *ok = (cr3 != 0);
-                return cr3;
-            };
-            cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
-                auto entries = prov->readPageTable(physAddr, 0, 1);
-                *ok = !entries.isEmpty();
-                return entries.isEmpty() ? 0 : entries[0];
-            };
-        }
+        const AddressParserCallbacks cbs =
+            makeAddressCallbacks(m_doc->provider.get(), ptrSz);
         auto result = AddressParser::evaluate(m_doc->tree.baseAddressFormula, ptrSz, &cbs);
         if (result.ok)
             m_doc->tree.baseAddress = result.value;
@@ -8180,7 +8114,6 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
             m_savedSources.append(entry);
             m_activeSourceIdx = m_savedSources.size() - 1;
         }
-        pushSavedSourcesToEditors();
     }
 
     emit m_doc->documentChanged();
@@ -8301,42 +8234,9 @@ void RcxController::selectSource(const QString& text) {
 
                     // Re-evaluate formula if present (mirrors attachViaPlugin)
                     if (!m_doc->tree.baseAddressFormula.isEmpty()) {
-                        AddressParserCallbacks cbs;
-                        auto* prov = m_doc->provider.get();
-                        cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
-                            uint64_t base = prov->symbolToAddress(name);
-                            *ok = (base != 0);
-                            return base;
-                        };
                         int ptrSz = m_doc->tree.pointerSize;
-                        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
-                            uint64_t val = 0;
-                            *ok = prov->read(addr, &val, ptrSz);
-                            return val;
-                        };
-                        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
-                            return SymbolStore::instance().resolve(name, prov, ok);
-                        };
-                        // Wire kernel paging callbacks if provider supports it
-                        if (prov->hasKernelPaging()) {
-                            cbs.vtop = [prov](uint32_t pid, uint64_t va, bool* ok) -> uint64_t {
-                                Q_UNUSED(pid);
-                                auto r = prov->translateAddress(va);
-                                *ok = r.valid;
-                                return r.physical;
-                            };
-                            cbs.cr3 = [prov](uint32_t pid, bool* ok) -> uint64_t {
-                                Q_UNUSED(pid);
-                                uint64_t cr3 = prov->getCr3();
-                                *ok = (cr3 != 0);
-                                return cr3;
-                            };
-                            cbs.physRead = [prov](uint64_t physAddr, bool* ok) -> uint64_t {
-                                auto entries = prov->readPageTable(physAddr, 0, 1);
-                                *ok = !entries.isEmpty();
-                                return entries.isEmpty() ? 0 : entries[0];
-                            };
-                        }
+                        const AddressParserCallbacks cbs =
+                            makeAddressCallbacks(m_doc->provider.get(), ptrSz);
                         auto result = AddressParser::evaluate(
                             m_doc->tree.baseAddressFormula, ptrSz, &cbs);
                         if (result.ok)
@@ -8411,7 +8311,6 @@ void RcxController::clearSources() {
     m_doc->provider = std::make_shared<NullProvider>();
     m_doc->dataPath.clear();
     resetSnapshot();
-    pushSavedSourcesToEditors();
     refresh();
 }
 
@@ -8434,7 +8333,6 @@ void RcxController::removeSavedSource(int idx) {
         m_doc->dataPath.clear();
         resetSnapshot();
     }
-    pushSavedSourcesToEditors();
     refresh();
     emit m_doc->documentChanged();
 }
@@ -8442,7 +8340,6 @@ void RcxController::removeSavedSource(int idx) {
 void RcxController::copySavedSources(const QVector<SavedSourceEntry>& sources, int activeIdx) {
     m_savedSources = sources;
     m_activeSourceIdx = activeIdx;
-    pushSavedSourcesToEditors();
     // Notify so the new tab's source icon repaints to reflect the copied
     // active source (mirrors removeSavedSource). Without this, a tab opened
     // into an existing project (project_new, forceFreshDoc=false) keeps the
@@ -8450,20 +8347,6 @@ void RcxController::copySavedSources(const QVector<SavedSourceEntry>& sources, i
     // reconcile — the tab icon refresh is wired to documentChanged (the heavy
     // rebuild handler is deferred + guarded, so emitting here is safe).
     emit m_doc->documentChanged();
-}
-
-void RcxController::pushSavedSourcesToEditors() {
-    QVector<SavedSourceDisplay> display;
-    display.reserve(m_savedSources.size());
-    for (int i = 0; i < m_savedSources.size(); i++) {
-        SavedSourceDisplay d;
-        d.text = QStringLiteral("%1 '%2'")
-            .arg(m_savedSources[i].kind, m_savedSources[i].displayName);
-        d.active = (i == m_activeSourceIdx);
-        display.append(d);
-    }
-    for (auto* editor : m_editors)
-        editor->setSavedSources(display);
 }
 
 // ── Auto-refresh ──
@@ -8996,34 +8879,53 @@ void RcxController::setEditorFont(const QString& fontName) {
 }
 
 bool RcxController::navigateToFormula(const QString& formula, QString* errOut) {
-    QString f = formula.trimmed();
-    if (f.isEmpty()) { if (errOut) *errOut = QStringLiteral("empty formula"); return false; }
-    AddressParserCallbacks cbs;
-    if (m_doc->provider) {
-        auto* prov = m_doc->provider.get();
-        cbs.resolveModule = [prov](const QString& name, bool* ok) -> uint64_t {
-            uint64_t base = prov->symbolToAddress(name);
-            *ok = (base != 0);
-            return base;
-        };
-        int ptrSz = m_doc->tree.pointerSize;
-        cbs.readPointer = [prov, ptrSz](uint64_t addr, bool* ok) -> uint64_t {
-            uint64_t val = 0;
-            *ok = prov->read(addr, &val, ptrSz);
-            return val;
-        };
-        cbs.resolveIdentifier = [prov](const QString& name, bool* ok) -> uint64_t {
-            return SymbolStore::instance().resolve(name, prov, ok);
-        };
-    }
-    auto result = AddressParser::evaluate(f, m_doc->tree.pointerSize, &cbs);
-    if (!result.ok) {
-        if (errOut) *errOut = result.error;
+    // Kept for its callers (Goto dialog, bookmarks dock). The work is
+    // rebaseTo, so a Goto is undoable and lands in the recent list like an
+    // inline base edit does.
+    return rebaseTo(formula, errOut);
+}
+
+bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHistory) {
+    // recordHistory is accepted now so call sites don't churn when the
+    // address bar's NavHistory lands (P1/P5); there is nothing to record
+    // into yet.
+    Q_UNUSED(recordHistory);
+
+    QString s = expr.trimmed();
+    s.remove('`');          // WinDbg backtick separators (e.g. 7ff6`6cce0000)
+    s.remove('\n');
+    s.remove('\r');
+    auto refuse = [&](const QString& why) {
+        if (err) *err = why;
+        emit statusHint(QStringLiteral("Base: ") + why);
         return false;
+    };
+    if (s.isEmpty()) return refuse(QStringLiteral("empty formula"));
+
+    const AddressParserCallbacks cbs =
+        makeAddressCallbacks(m_doc->provider.get(), m_doc->tree.pointerSize);
+    const auto result = AddressParser::evaluate(s, m_doc->tree.pointerSize, &cbs);
+    if (!result.ok) return refuse(result.error);
+
+    // Preserve the typed expression as the formula unless it is a bare
+    // hex/decimal literal that round-trips identically through the canonical
+    // "0xHEX" display — a literal formula would only shadow the number.
+    static const QRegularExpression literalRx(
+        QStringLiteral("^\\s*(?:0[xX][0-9A-Fa-f]+|\\d+)\\s*$"));
+    const QString newFormula = literalRx.match(s).hasMatch() ? QString() : s;
+    const uint64_t oldBase = m_doc->tree.baseAddress;
+    const QString oldFormula = m_doc->tree.baseAddressFormula;
+    if (result.value != oldBase || newFormula != oldFormula) {
+        // Values read at the new base are not "changes": arm the tracking
+        // cooldown (what the scanner's Set-as-Base did by hand) before the
+        // command's apply resets the snapshot and recomposes.
+        resetChangeTracking();
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
     }
-    m_doc->tree.baseAddress = result.value;
-    m_doc->tree.baseAddressFormula = f;
-    emit m_doc->documentChanged();
+    // m_focusPath is deliberately kept: the expanded chain is still on
+    // screen, and reconcileFocusPath keeps it structurally honest.
+    GotoAddressDialog::pushRecent(s);
     refresh();
     return true;
 }

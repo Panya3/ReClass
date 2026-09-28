@@ -1629,11 +1629,20 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             }
         }
         else if (opType == "change_base") {
-            uint64_t newBase = op.value("baseAddress").toString().toULongLong(nullptr, 16);
-            QString oldFormula = tree.baseAddressFormula;
-            QString newFormula = op.value("formula").toString();
-            doc->undoStack.push(new RcxCommand(ctrl,
-                cmd::ChangeBase{tree.baseAddress, newBase, oldFormula, newFormula}));
+            // Through rebaseTo so an MCP rebase is undoable and lands in the
+            // recent list like every other rebase. A formula that cannot be
+            // evaluated yet (no provider attached — the documented
+            // "auto-resolve on provider attach" use) keeps the old contract:
+            // store the literal base plus the formula verbatim.
+            const QString formula = op.value("formula").toString().trimmed();
+            const QString baseStr = op.value("baseAddress").toString().trimmed();
+            const QString expr = formula.isEmpty() ? baseStr : formula;
+            QString err;
+            if (expr.isEmpty() || !ctrl->rebaseTo(expr, &err)) {
+                uint64_t newBase = baseStr.toULongLong(nullptr, 16);
+                doc->undoStack.push(new RcxCommand(ctrl,
+                    cmd::ChangeBase{tree.baseAddress, newBase, tree.baseAddressFormula, formula}));
+            }
             applied++;
         }
         else if (opType == "change_struct_type") {
