@@ -741,6 +741,7 @@ if(BUILD_TESTING)
     # stacked at 300/480/760/1080/1920 px, printing every laid-out cell's
     # logical rect + dpr so a pixel scan can crop. Hidden desktop only.
     #   address_bar_render <out-prefix> [themeJsonPath|themeName]
+    #   address_bar_render <out-prefix> <theme> edit   -> the inline overlay + the help block
     add_executable(address_bar_render EXCLUDE_FROM_ALL tools/address_bar_render.cpp
         src/format.cpp src/addressparser.cpp
         src/themes/theme.cpp src/themes/thememanager.cpp

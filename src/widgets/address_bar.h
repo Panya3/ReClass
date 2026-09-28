@@ -310,6 +310,12 @@ public:
         // pointer leaving; a quick click stays a plain Back.
         m_holdTimer.setSingleShot(true);
         connect(&m_holdTimer, &QTimer::timeout, this, [this] { onHoldElapsed(); });
+        // RcxTooltip expires itself (capped at 20 s by expiryMs), and a base
+        // formula can take longer than that to type. keepAlive() only re-arms
+        // a tooltip that is already showing, so a stray tick is harmless.
+        m_helpKeepAlive.setInterval(kHelpKeepAliveMs);
+        connect(&m_helpKeepAlive, &QTimer::timeout, this,
+                [this] { if (m_helpTip) m_helpTip->keepAlive(); });
     }
 
     void setCallbacks(Callbacks cb) { m_cb = std::move(cb); }
@@ -376,10 +382,12 @@ public:
     void beginBaseEdit() {
         if (m_editVisible && m_editScope == EditScope::Base) { m_edit->setFocus(); m_edit->selectAll(); return; }
         if (m_editVisible) endEdit();
+        const QString text = baseFullText();
         QRect r;
         int coveredLeft = 0;
-        if (!editGeometryFor(EditScope::Base, &r, &coveredLeft)) return;
-        openEdit(EditScope::Base, r, coveredLeft, baseFullText());
+        if (!editGeometryFor(EditScope::Base, text, &r, &coveredLeft)) return;
+        openEdit(EditScope::Base, r, coveredLeft, text);
+        showEditHelp();
     }
 
     // The overlay's rect for `scope` at the CURRENT layout, and the left
@@ -387,17 +395,43 @@ public:
     // following a pane resize while one is up (resizeEvent), so the
     // field sits where a fresh open would put it at the new width. False
     // when the base is not laid out (an empty bar).
-    bool editGeometryFor(EditScope scope, QRect* r, int* coveredLeft) const {
+    // Width the field needs to hold `text` whole: its own chrome, the text,
+    // and a sliver for the caret. Measured on the FULL string — the base cell
+    // middle-elides its display at kBaseMaxW, but the edit always opens on the
+    // whole formula, so a long formula opens wide and a bare address opens
+    // tight. This is the number the old kEditMinW = 180 slab overrode: a
+    // 13-character address measures ~102, so ~78 px of the field were dead air
+    // between the value and the preview beside it.
+    int editFitWidth(const QString& text) const {
+        const QFontMetrics fm(font());
+        return kEditChromeW + fm.horizontalAdvance(text) + kEditCaretSlack;
+    }
+
+    // The width an overlay holding `text` should have. Three rules, in order:
+    //   fit the text, never below the floor, and never past the point where
+    //   the "→ 0x…" preview beside it would stop fitting.
+    // While an edit is open m_editGrownW is a second floor, so the field can
+    // GROW as you type but never shrink back: a field that resized on every
+    // keystroke in both directions would jiggle under the caret and drag the
+    // preview with it, and backspacing would reflow the box you are typing in.
+    int editWidthFor(const QString& text, int left, int limit) const {
+        const int floorW = m_editVisible ? qMax(kEditMinW, m_editGrownW) : kEditMinW;
+        const int want = qMax(editFitWidth(text), floorW);
+        const int room = qMax(kEditMinW, limit - left - kEditPreviewMinW);
+        return qMin(want, room);
+    }
+
+    bool editGeometryFor(EditScope scope, const QString& text,
+                         QRect* r, int* coveredLeft) const {
         const QRect base = itemRect(QStringLiteral("base"));
         if (base.isNull()) return false;
         const int limit = editLimit();
         if (scope == EditScope::Base) {
-            // The base cell grown rightward to the minimum, stopping short
-            // of the recent cell. The crumbs under it are simply covered —
-            // the layout is frozen while the overlay is up, so nothing
-            // shifts.
+            // The base cell resized to its value, stopping short of the
+            // recent cell. The crumbs under it are simply covered — the
+            // layout is frozen while the overlay is up, so nothing shifts.
             QRect g = base;
-            g.setWidth(qMax(base.width(), kEditMinW));
+            g.setWidth(editWidthFor(text, g.left(), limit));
             if (g.right() >= limit) g.setRight(limit - 1);
             if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);   // a narrow strip: cover `recent` rather than shrink to nothing
             *r = g;
@@ -409,7 +443,12 @@ public:
         // the crumb label sat kCrumbPad in — start the field kCrumbPad - 2
         // later so the text does not jump when the overlay opens.
         QRect g(covered + kCrumbPad - 2, kCellTop, 0, kCellH);
-        g.setRight(limit - 1);
+        // Fitted like the base one. The trail behind it is covered either way
+        // (m_coveredRect still runs to the recent cell), so the only thing the
+        // old full-bleed width bought was distance between the path and the
+        // resolver's answer painted after it.
+        g.setWidth(editWidthFor(text, g.left(), limit));
+        if (g.right() >= limit) g.setRight(limit - 1);
         // A narrow strip: keep the field usable — grow back over the base,
         // then past the recent cell, before shrinking below the minimum.
         if (g.width() < kEditMinW) g.setLeft(qMax(base.left(), limit - kEditMinW));
@@ -431,7 +470,7 @@ public:
         if (m_editVisible) endEdit();
         QRect r;
         int coveredLeft = 0;
-        if (!editGeometryFor(EditScope::Path, &r, &coveredLeft)) return;
+        if (!editGeometryFor(EditScope::Path, m_state.trailPath, &r, &coveredLeft)) return;
         openEdit(EditScope::Path, r, coveredLeft, m_state.trailPath);
     }
 
@@ -442,6 +481,8 @@ public:
     QString editText() const { return m_edit->text(); }
     QLineEdit* editWidget() const { return m_edit; }       // test hook
     QRect editRect() const { return m_editVisible ? m_editRect : QRect(); }
+    // The base-address grammar help (see showEditHelp) is on screen.
+    bool editHelpVisible() const { return m_helpTip && m_helpTip->isVisible(); }
     // Everything the open edit hides: the overlay plus the paper painted
     // from it to the recent cell. Cells under it stop answering to hover.
     QRect editCoveredRect() const { return m_editVisible ? m_coveredRect : QRect(); }
@@ -497,6 +538,9 @@ public:
         setFont(chromeFont());
         m_edit->setFont(font());
         applyEditStyle();
+        // A theme or font change while the field is open re-shows the help in
+        // the new colours rather than leaving the old ones on screen.
+        if (editHelpVisible()) showEditHelp();
         update();
     }
     const Theme& theme() const { return m_theme; }
@@ -628,7 +672,19 @@ public:
     static constexpr int kCellTop      = 2;
     static constexpr int kCellH        = 22;
     static constexpr int kBaseBareMinW = 60;   // the bare literal, narrow-pane step 7c
-    static constexpr int kEditMinW     = 180;  // an edit overlay never opens narrower
+    // An edit overlay is sized to the value it holds, not to a slab: the
+    // 180 that used to live here left ~78 px of dead air between a 13-char
+    // address and the preview beside it. This is only the floor that keeps a
+    // one- or two-character value a usable target; see editFitWidth.
+    static constexpr int kEditMinW     = 90;
+    static constexpr int kEditCaretSlack = 4;   // so a caret parked at the end is not clipped
+    // The QLineEdit interior (panelFieldInteriorQss): 2 px of padding on the
+    // left, 6 on the right, plus the 2 px Qt reserves inside each end. The
+    // text therefore lives in `width - 12` — the same 12 the base cell spends
+    // on kBasePad either side, which is why a fitted field is the size of the
+    // cell it covers.
+    static constexpr int kEditChromeW  = 12;
+    static constexpr int kHelpKeepAliveMs = 5000;   // well inside RcxTooltip's 20 s cap
     static constexpr int kEditPreviewMinW = 48; // room the preview beside the overlay needs to be worth painting
     static constexpr double kDisabledOpacity = 0.40;
     // Where the narrow-pane steps bottom out with a folded trail: the chip's
@@ -809,6 +865,15 @@ protected:
             // A font change while an edit is up re-measures every cell; the
             // overlay follows the field it covers, as it does on a resize.
             if (m_editVisible) { m_edit->setFont(chromeFont()); followEditGeometry(); }
+        }
+        // The window going inactive does NOT end the edit (ActiveWindowFocus
+        // is one of the reasons the overlay survives), but the help is a
+        // top-level tooltip: left up, it would sit over whatever the user
+        // switched to. It comes back with the window.
+        if (e->type() == QEvent::ActivationChange && m_editVisible
+            && m_editScope == EditScope::Base) {
+            if (isActiveWindow()) showEditHelp();
+            else                  dismissEditHelp();
         }
     }
 
@@ -1532,6 +1597,40 @@ private:
         if (tip != toolTip()) setToolTip(tip);
     }
 
+    // ── The base-address grammar help ──
+    //
+    // The worked examples that used to hang off the editor's command-row
+    // address span (fmt::baseAddressHelpBody). It is shown while you TYPE, not
+    // on hover, which is where a beginner needs it, and that is exactly why it
+    // cannot use the shared tooltip: GlobalTooltipBridge clears that one on
+    // every KeyPress, so it would vanish on the first character. A private
+    // instance is invisible to the bridge — the same arrangement RcxEditor's
+    // m_arrowTooltip had.
+    //
+    // Two things still threaten it, and both are handled:
+    //   * RcxTooltip expires itself (capped at 20 s), so a repeating timer
+    //     re-arms it for as long as the field is open;
+    //   * showAt() calls dismissOthers(), so ANY shared tooltip shown while
+    //     the field is up would kill this one — hence tooltipFor() publishes
+    //     nothing at all while editing.
+    void showEditHelp() {
+        if (!m_editVisible || m_editScope != EditScope::Base) return;
+        if (!m_helpTip) m_helpTip = new RcxTooltip(this);
+        m_helpTip->setTheme(m_theme.backgroundAlt, m_theme.border,
+                            m_theme.text, m_theme.text, m_theme.border);
+        m_helpTip->populate(fmt::baseAddressHelpTitle(), fmt::baseAddressHelpBody(), font());
+        // Under the whole bar, centred on the field: clear of the value being
+        // typed and of the "→ 0x…" preview beside it.
+        m_helpTip->showAt(mapToGlobal(QPoint(m_editRect.center().x(), height())));
+        m_helpKeepAlive.start();
+    }
+
+    void dismissEditHelp() {
+        m_helpKeepAlive.stop();
+        if (m_helpTip) m_helpTip->dismiss();
+    }
+
+
     void updateCursor() {
         const LaidItem* li = itemById(m_hoverId);
         Qt::CursorShape shape = Qt::ArrowCursor;
@@ -1574,6 +1673,10 @@ private:
 
     QString tooltipFor(const QString& id) const {
         using namespace address_bar_detail;
+        // While an edit is open the grammar help owns the tooltip layer: any
+        // other RcxTooltip shown now would dismiss it (showAt → dismissOthers)
+        // and the user would lose the examples mid-formula.
+        if (m_editVisible) return QString();
         const LaidItem* li = itemById(id);
         if (!li) return QString();
         switch (li->kind) {
@@ -1912,6 +2015,10 @@ private:
     // carries "Go to address…" and "Clear recent". Built per open, freed on
     // hide, anchored under the seam like the source popup.
     void showPlacesMenu(bool forEdit) {
+        // The places list drops from the same edge the help hangs off, so the
+        // two would overlap. The list is the more specific answer; the help
+        // does not come back after it (the user has moved on to picking).
+        dismissEditHelp();
         const QString typed = forEdit ? m_edit->text().trimmed() : QString();
         auto matches = [&typed](const QString& s) { return typed.isEmpty() || fuzzyScore(typed, s) > 0; };
         auto* menu = new QMenu(this);
@@ -2005,6 +2112,24 @@ private:
         m_editRect = r;
         m_coveredRect = QRect(coveredLeft, kCellTop, qMax(r.width(), stop - coveredLeft), kCellH);
         m_edit->setGeometry(r);
+        // The high-water mark editWidthFor reads back as a floor. Recording it
+        // here — the one place a field is ever positioned — is what makes the
+        // width monotonic for as long as the overlay is up: growEditToText can
+        // widen it, and nothing narrows it until endEdit clears this. A field
+        // that shrank as you backspaced would reflow the box under your own
+        // caret and drag the preview beside it with every character.
+        m_editGrownW = r.width();
+    }
+
+    // Every keystroke: widen the field to the text if the text outgrew it.
+    // Never narrows (see placeEdit), so this is safe to call on any change.
+    void growEditToText() {
+        if (!m_editVisible) return;
+        QRect r;
+        int coveredLeft = 0;
+        if (!editGeometryFor(m_editScope, m_edit->text(), &r, &coveredLeft)) return;
+        if (r == m_editRect) return;
+        placeEdit(r, coveredLeft);
     }
 
     // resizeEvent while an edit is up: re-place the overlay for its scope
@@ -2016,7 +2141,7 @@ private:
         if (!m_editVisible) return;
         QRect r;
         int coveredLeft = 0;
-        if (!editGeometryFor(m_editScope, &r, &coveredLeft)) return;
+        if (!editGeometryFor(m_editScope, m_edit->text(), &r, &coveredLeft)) return;
         placeEdit(r, coveredLeft);
         update();
     }
@@ -2051,6 +2176,7 @@ private:
     void onEditTextChanged() {
         if (!m_editVisible) return;
         m_commitError.clear();
+        growEditToText();
         const QString text = m_edit->text().trimmed();
         if (m_editScope == EditScope::Path) {
             const QString why = m_treeQ.validatePath ? m_treeQ.validatePath(text) : QString();
@@ -2097,6 +2223,8 @@ private:
         m_coveredRect = QRect();
         m_commitError.clear();
         m_editPreview.clear();
+        m_editGrownW = 0;           // the next open measures its own value
+        dismissEditHelp();
         m_edit->hide();
         setFocusPolicy(Qt::NoFocus);
         if (m_relayoutDeferred) { m_relayoutDeferred = false; markLayoutDirty(); }
@@ -2141,6 +2269,11 @@ private:
     bool       m_editVisible = false;
     bool       m_relayoutDeferred = false;
     bool       m_editValid = true;
+    int        m_editGrownW = 0;   // widest the open overlay has been: a one-way floor
+    // The grammar help: a PRIVATE tooltip (the shared one dies on KeyPress)
+    // plus the timer that keeps its own expiry from ending it mid-formula.
+    RcxTooltip* m_helpTip = nullptr;
+    QTimer      m_helpKeepAlive;
     QString    m_editPreview;      // "→ 0x…", or the parser's / controller's words
     QString    m_commitError;      // set by a refused commit, cleared by the next keystroke
     // backInkInsetDev's cache: the SVG's ink inset at the last dpr seen.

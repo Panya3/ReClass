@@ -1919,6 +1919,13 @@ namespace fmt {
                              const QString& ptrTypeName, int colType = kColType, int colName = kColName,
                              bool compact = false);
     QString validateBaseAddress(const QString& text);
+    // The grammar validateBaseAddress accepts, written out for a reader:
+    // a titled block of worked examples plus the operator list. Lives
+    // beside the validator so the two cannot drift. Plain text, columns
+    // aligned by spaces — render it in a MONOSPACE face or the second
+    // column will not line up.
+    QString baseAddressHelpTitle();
+    QString baseAddressHelpBody();
     QString indent(int depth);
     QString readValue(const Node& node, const Provider& prov,
                       uint64_t addr, int subLine);

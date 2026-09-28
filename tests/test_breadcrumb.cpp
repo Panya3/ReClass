@@ -2573,12 +2573,18 @@ private slots:
         QVERIFY(bar.cursor().shape() != Qt::PointingHandCursor);
         QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
         QVERIFY(bar.itemIdAt(c0.center()).isEmpty());
-        // Past the covered range the recent cell still answers.
+        // Past the covered range the recent cell is still a cell — it hits,
+        // and it takes the click. What it does NOT do is publish a tooltip:
+        // while the field is open the grammar help owns the tooltip layer,
+        // and RcxTooltip::showAt dismisses every other instance, so one hover
+        // out here would take the examples off the screen mid-formula.
         QCOMPARE(bar.itemIdAt(recent.center()), QStringLiteral("recent"));
         hoverAt(bar, recent.center());
-        QVERIFY(!bar.toolTip().isEmpty());
+        QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
         QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
         QVERIFY(!bar.isEditing());
+        hoverAt(bar, recent.center());
+        QVERIFY(!bar.toolTip().isEmpty());                        // back
         hoverAt(bar, c0.center());
         QCOMPARE(bar.cursor().shape(), Qt::PointingHandCursor);   // back
         QCOMPARE(bar.itemIdAt(c0.center()), QStringLiteral("crumb:0"));
@@ -3997,6 +4003,12 @@ private slots:
             QCOMPARE(bar.editRect(), bar.editWidget()->geometry());
             QCOMPARE(bar.editRect().left(), base.left());
             QVERIFY2(bar.editRect().width() >= AddressBar::kEditMinW, qPrintable(QString::number(w)));
+            // Fitted, not full-bleed: the field is the size of its value at
+            // every width, so the dead air never comes back on a resize.
+            QCOMPARE(bar.editRect().width(),
+                     qMax(AddressBar::kEditMinW,
+                          AddressBar::kEditChromeW + QFontMetrics(bar.font()).horizontalAdvance(text)
+                              + AddressBar::kEditCaretSlack));
             QVERIFY2(bar.rect().contains(bar.editRect()), qPrintable(QString::number(w)));
             QVERIFY2(bar.editRect().right() < recent.left(), qPrintable(QString::number(w)));
             QCOMPARE(bar.editCoveredRect().left(), bar.editRect().left());
@@ -4007,8 +4019,8 @@ private slots:
         QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
         QVERIFY(!bar.isEditing());
         QCOMPARE(bar.state().baseFormula, s.baseFormula);
-        // The path scope follows the same way: from the base's right edge
-        // to the recent cell, at every width that has room for it.
+        // The path scope follows the same way: it starts at the base's right
+        // edge and is fitted to the trail, at every width that has room.
         QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("space")).center());
         QVERIFY(bar.isPathEditing());
         const QString path = bar.editText();
@@ -4019,13 +4031,175 @@ private slots:
             const QRect recent = bar.itemRect(QStringLiteral("recent"));
             QCOMPARE(bar.editRect(), bar.editWidget()->geometry());
             QCOMPARE(bar.editRect().left(), base.right() + 1 + AddressBar::kCrumbPad - 2);
-            QCOMPARE(bar.editRect().right(), recent.left() - AddressBar::kChevW - 1);
+            QCOMPARE(bar.editRect().width(),
+                     qMax(AddressBar::kEditMinW,
+                          AddressBar::kEditChromeW + QFontMetrics(bar.font()).horizontalAdvance(path)
+                              + AddressBar::kEditCaretSlack));
+            QVERIFY(bar.editRect().right() < recent.left() - AddressBar::kChevW);
+            // The trail behind it is covered all the same — only the FIELD
+            // stops at the text; the paper still runs to the recent cell.
             QCOMPARE(bar.editCoveredRect().left(), base.right() + 1);
             QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);
             QCOMPARE(bar.editText(), path);
         }
         QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
         QVERIFY(!bar.isEditing());
+    }
+
+    // ── The field is the size of its value ──
+    //
+    // It used to open at a flat kEditMinW = 180 whatever it held, so a
+    // 13-character address left ~78 px of empty field between the value and
+    // the "→ 0x…" preview painted after it (build/issue.png). The floor is now
+    // the floor for SHORT values only; anything longer measures itself.
+    void testBaseEditFieldFitsItsValue() {
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        s.baseAddress = s.resolvedBase = 0x279B3D07010ULL;
+        bar.setState(s);
+        showBar(bar, 900);
+
+        const QRect baseCell = bar.itemRect(QStringLiteral("base"));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, baseCell.center());
+        QVERIFY(bar.isBaseEditing());
+
+        const QString text = bar.editText();
+        QCOMPARE(text, QStringLiteral("0x279B3D07010"));
+        const int fit = AddressBar::kEditChromeW
+                      + QFontMetrics(bar.font()).horizontalAdvance(text)
+                      + AddressBar::kEditCaretSlack;
+        QCOMPARE(bar.editRect().width(), qMax(AddressBar::kEditMinW, fit));
+        QVERIFY2(bar.editRect().width() < 180,
+                 qPrintable(QStringLiteral("still slab-wide: %1").arg(bar.editRect().width())));
+        // The selection is the whole value — the half the user said was
+        // already right, pinned so the width work cannot cost it.
+        QCOMPARE(bar.editWidget()->selectedText(), text);
+        // And it covers the crumbs regardless: only the field shrank.
+        QCOMPARE(bar.editCoveredRect().right(),
+                 bar.itemRect(QStringLiteral("recent")).left() - 1);
+    }
+
+    // A one- or two-character value would measure to nothing, so the floor
+    // keeps it a target you can hit and see a caret in.
+    void testShortBaseValueKeepsTheFieldFloor() {
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        s.baseFormula = QStringLiteral("1");
+        bar.setState(s);
+        showBar(bar, 900);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier,
+                          bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isBaseEditing());
+        QCOMPARE(bar.editText(), QStringLiteral("1"));
+        QCOMPARE(bar.editRect().width(), AddressBar::kEditMinW);
+    }
+
+    // Growth is one-way for as long as the overlay is up. A field that
+    // resized in both directions would reflow the box under the caret and
+    // drag the preview with every keystroke; a field that never grew would
+    // pin the caret to its right edge on the longest strings in the app.
+    void testEditFieldGrowsWithTypingAndNeverShrinks() {
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        s.baseAddress = s.resolvedBase = 0x279B3D07010ULL;
+        bar.setState(s);
+        showBar(bar, 900);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier,
+                          bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isBaseEditing());
+        const int opened = bar.editRect().width();
+
+        bar.editWidget()->setText(QStringLiteral("<REECLASS.exe> + 0x1A0 + 0x58"));
+        QApplication::processEvents();
+        const int grown = bar.editRect().width();
+        QVERIFY2(grown > opened, qPrintable(QStringLiteral("%1 -> %2").arg(opened).arg(grown)));
+        QCOMPARE(grown, AddressBar::kEditChromeW
+                            + QFontMetrics(bar.font()).horizontalAdvance(bar.editText())
+                            + AddressBar::kEditCaretSlack);
+
+        // Back to the short value: the box does NOT close up around it.
+        bar.editWidget()->setText(QStringLiteral("0x10"));
+        QApplication::processEvents();
+        QCOMPARE(bar.editRect().width(), grown);
+
+        // Longer than the strip can hold: the field stops where the preview
+        // beside it would stop fitting and the QLineEdit scrolls internally.
+        bar.editWidget()->setText(QString(400, QLatin1Char('A')));
+        QApplication::processEvents();
+        const int limit = bar.itemRect(QStringLiteral("recent")).left() - AddressBar::kChevW;
+        QCOMPARE(bar.editRect().right(), limit - AddressBar::kEditPreviewMinW - 1);
+
+        // A fresh open measures its own value again — the high-water mark
+        // belongs to one edit session, not to the bar.
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier,
+                          bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isBaseEditing());
+        QCOMPARE(bar.editRect().width(), opened);
+    }
+
+    // ── The grammar help ──
+    //
+    // The worked examples that hung off the editor's command-row address
+    // span until that row was demoted. They must survive TYPING, which is the
+    // whole reason they are on a private RcxTooltip: the shared one is
+    // cleared by GlobalTooltipBridge on every KeyPress.
+    void testBaseEditShowsTheGrammarHelpWhileTyping() {
+        AddressBar bar;
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 900);
+        QVERIFY(!bar.editHelpVisible());
+
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier,
+                          bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isBaseEditing());
+        QVERIFY2(bar.editHelpVisible(), "no expression help on opening the base edit");
+
+        QTest::keyClicks(bar.editWidget(), QStringLiteral("0x1A0"));
+        QApplication::processEvents();
+        QVERIFY2(bar.editHelpVisible(), "the help died on the first keystroke");
+
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        QVERIFY(!bar.editHelpVisible());
+
+        // A commit closes it too — the overlay and the help end together.
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier,
+                          bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.editHelpVisible());
+        bar.baseCommitFinished(true);
+        QVERIFY(!bar.isEditing());
+        QVERIFY(!bar.editHelpVisible());
+    }
+
+    // The examples themselves: every form the parser accepts, in a body whose
+    // two columns only line up in a fixed-pitch face.
+    void testGrammarHelpNamesEveryFormOfTheGrammar() {
+        const QString body = fmt::baseAddressHelpBody();
+        QCOMPARE(fmt::baseAddressHelpTitle(), QStringLiteral("Base Address"));
+        const QStringList forms = {QStringLiteral("0x7FF61234ABCD"),
+                                   QStringLiteral("<app.exe>"),
+                                   QStringLiteral("<app.exe> + 0x1A0"),
+                                   QStringLiteral("[<app.exe> + 0x58]"),
+                                   QStringLiteral("ntdll!SymbolName"),
+                                   QStringLiteral("Operators: + - * << >> & | ^"),
+                                   QStringLiteral("hexadecimal")};
+        for (const QString& form : forms)
+            QVERIFY2(body.contains(form), qPrintable(form));
+        // Every description starts at column 24. Nothing enforces that but
+        // this test, and a stray character makes the block read as ragged.
+        int examples = 0;
+        const QStringList rows = body.split(QLatin1Char('\n'));
+        for (const QString& row : rows) {
+            const int gap = row.indexOf(QStringLiteral("   "));   // 3+ spaces: a column break
+            if (gap <= 0) continue;
+            int desc = gap;
+            while (desc < row.size() && row.at(desc) == QLatin1Char(' ')) ++desc;
+            QVERIFY2(desc == 24, qPrintable(QStringLiteral("column %1: %2").arg(desc).arg(row)));
+            ++examples;
+        }
+        QCOMPARE(examples, 5);
     }
 
     // ── A union root on line 0 ──

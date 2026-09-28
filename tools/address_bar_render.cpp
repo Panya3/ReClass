@@ -46,8 +46,12 @@
 #include <QStringConverter>
 #include <QTextStream>
 
+#include "core.h"                  // fmt::baseAddressHelpTitle / Body
+#include "rcxtooltip.h"
 #include "themes/theme.h"
+#include "themes/thememanager.h"
 #include "widgets/address_bar.h"
+#include "widgets/dock_header.h"   // chromeFont
 
 using namespace rcx;
 
@@ -151,6 +155,105 @@ static QStringList allIds(int crumbCount) {
     return ids;
 }
 
+// ── `edit` mode: the inline overlay, and the help beside it ──
+//
+// The base edit is where the width regression lived: the field opened at a
+// flat 180 px whatever it held, so a 13-character address sat in a box with
+// ~78 px of dead air before the "→ 0x…" preview. These sheets are the proof
+// it fits now — row 0 at rest, row 1 with the base edit open, row 2 with the
+// path edit open — and <prefix>_help.png is the grammar block the field
+// shows while you type, rendered in the same chrome face so the second
+// column can be checked for alignment.
+static int renderEditSheets(QApplication& app, QTextStream& out,
+                            const QString& prefix, bool haveTheme, const Theme& theme) {
+    for (int w : {480, 760, 1080}) {
+        QVector<QPixmap> rows;
+        QStringList reports;
+        // rest | base edit on a bare literal (the user's case in
+        // build/issue.png) | base edit on a long formula | path edit.
+        for (int mode = 0; mode < 4; ++mode) {
+            AddressBar bar;
+            if (haveTheme) bar.applyTheme(theme);
+            AddressBarState st = stateWithDepth(3);
+            if (mode == 1) {
+                st.baseFormula.clear();
+                st.baseAddress = st.resolvedBase = 0x279B3D07010ULL;
+            }
+            bar.setState(st);
+            bar.show();
+            bar.resize(w, AddressBar::kAddressBarHeight);
+            app.processEvents();
+            if (mode == 1 || mode == 2) bar.beginBaseEdit();
+            if (mode == 3) bar.beginPathEdit();
+            app.processEvents();
+            app.processEvents();
+            rows << bar.grab();
+            QString rep;
+            QTextStream rs(&rep);
+            const QRect e = bar.editRect(), c = bar.editCoveredRect();
+            const QRect recent = bar.itemRect(QStringLiteral("recent"));
+            rs << "  mode=" << (mode == 0 ? "rest" : mode == 1 ? "base-literal"
+                                                      : mode == 2 ? "base-formula" : "path")
+               << "  text=\"" << bar.editText() << "\"";
+            if (!e.isNull()) {
+                const int fit = AddressBar::kEditChromeW
+                              + QFontMetrics(bar.font()).horizontalAdvance(bar.editText())
+                              + AddressBar::kEditCaretSlack;
+                rs << "  edit=" << e.x() << "," << e.width()
+                   << "  fit=" << fit << "  slack=" << (e.width() - fit)
+                   << "  covered=" << c.x() << "," << c.width()
+                   << "  recent.left=" << recent.left()
+                   << "  help=" << (bar.editHelpVisible() ? "up" : "DOWN");
+            }
+            reports << rep;
+            bar.hide();
+        }
+        const qreal dpr = rows.first().devicePixelRatio();
+        const int gapDev = qRound(3 * dpr);
+        int sheetH = gapDev * (rows.size() - 1);
+        for (const QPixmap& r : rows) sheetH += r.height();
+        QImage sheet(rows.first().width(), sheetH, QImage::Format_ARGB32);
+        sheet.fill(QColor(255, 0, 255));
+        QVector<int> rowTopDev;
+        {
+            QPainter sp(&sheet);
+            int y = 0;
+            for (const QPixmap& r : rows) {
+                QImage ri = r.toImage();
+                ri.setDevicePixelRatio(1.0);
+                sp.drawImage(0, y, ri);
+                rowTopDev << y;
+                y += ri.height() + gapDev;
+            }
+        }
+        const QString path = QStringLiteral("%1_edit_%2.png").arg(prefix).arg(w);
+        sheet.save(path);
+        out << path << "  width=" << w << "  dpr=" << dpr << "\n";
+        for (int i = 0; i < reports.size(); ++i)
+            out << "  row " << i << " yDev=" << rowTopDev[i] << reports[i] << "\n";
+    }
+
+    // The help block on its own. Columns line up only in a fixed-pitch face,
+    // which is what chromeFont() is; this sheet is where that is checked.
+    RcxTooltip tip;
+    const Theme& t = haveTheme ? theme : ThemeManager::instance().current();
+    tip.setTheme(t.backgroundAlt, t.border, t.text, t.text, t.border);
+    tip.populate(fmt::baseAddressHelpTitle(), fmt::baseAddressHelpBody(), chromeFont());
+    tip.showAt(QPoint(400, 400));
+    app.processEvents();
+    app.processEvents();
+    const QString hp = QStringLiteral("%1_help.png").arg(prefix);
+    tip.grab().save(hp);
+    out << hp << "  size=" << tip.width() << "x" << tip.height()
+        << "  font=" << chromeFont().family() << "  fixedPitch="
+        << (QFontMetrics(chromeFont()).horizontalAdvance(QStringLiteral("iiii"))
+            == QFontMetrics(chromeFont()).horizontalAdvance(QStringLiteral("WWWW")) ? "yes" : "NO")
+        << "\n";
+    tip.dismiss();
+    out.flush();
+    return 0;
+}
+
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
     QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/JetBrainsMono.ttf"));
@@ -161,7 +264,7 @@ int main(int argc, char** argv) {
     // once stdout was a file (the driver redirects it on the hidden desktop).
     out.setEncoding(QStringConverter::Utf8);
     if (argc < 2) {
-        out << "usage: address_bar_render <outPrefix> [themeName|path]\n";
+        out << "usage: address_bar_render <outPrefix> [themeName|path] [edit]\n";
         out.flush();
         return 2;
     }
@@ -174,6 +277,10 @@ int main(int argc, char** argv) {
         if (!haveTheme) out << "theme not found: " << argv[2] << " — using the default\n";
     }
     if (!haveTheme) haveTheme = resolveTheme(QStringLiteral("vs"), theme);
+
+    // `edit`: the inline overlay sheets instead of the at-rest ones.
+    if (argc > 3 && QString::fromLocal8Bit(argv[3]) == QLatin1String("edit"))
+        return renderEditSheets(app, out, prefix, haveTheme, theme);
 
     const int depths[] = { 1, 3, 6 };
     const int gap = 3;   // magenta rows between the stacked bars

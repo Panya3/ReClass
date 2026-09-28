@@ -979,6 +979,24 @@ QString validateValue(NodeKind kind, const QString& text) {
 
 // ── Base address validation (delegates to AddressParser) ──
 
+// The examples the address bar shows while you are typing a base address.
+// This block is older than the bar: it hung off the editor's command-row
+// address span until that row was demoted, and went missing with it. The
+// descriptions are padded to column 24, so it only reads in a monospace face.
+QString baseAddressHelpTitle() { return QStringLiteral("Base Address"); }
+
+QString baseAddressHelpBody() {
+    return QStringLiteral(
+        "0x7FF61234ABCD          hex address\n"
+        "<app.exe>               module base\n"
+        "<app.exe> + 0x1A0       module + offset\n"
+        "[<app.exe> + 0x58]      follow pointer\n"
+        "ntdll!SymbolName        PDB symbol\n"
+        "\n"
+        "Operators: + - * << >> & | ^\n"
+        "All numbers are hexadecimal");
+}
+
 QString validateBaseAddress(const QString& text) {
     QString s = text.trimmed();
     if (s.isEmpty()) return QStringLiteral("empty");
