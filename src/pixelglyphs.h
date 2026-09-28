@@ -14,6 +14,9 @@
 // advance fixes the letterforms without widening a single ribbon cell.
 
 #include <QColor>
+#include <QFont>
+#include <QFontDatabase>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QString>
 #include <QStringView>
@@ -23,116 +26,6 @@
 
 namespace rcx {
 
-inline constexpr int kGlyphMaxW = 5;   // storage grid; each glyph declares its own advance
-inline constexpr int kGlyphH    = 7;
-inline constexpr int kGlyphGap  = 1;
-
-// One glyph: an advance width in font pixels (3, 4 or 5) plus 7 row masks,
-// bit (kGlyphMaxW-1) = leftmost column. Variable width is what buys the
-// legibility: digits and most caps get a proper 4-wide bowl, `I`/`T`/`Y` stay
-// 3 so they do not float in a too-wide cell, and `M`/`W`/`V`/`*` take the full
-// 5 they need — a 5-wide `V` with a real point can no longer be mistaken for a
-// 4-wide `U`, which is exactly what the old 3x5 grid could not express.
-struct PixelGlyph {
-    uint8_t w = 0;
-    uint8_t rows[kGlyphH] = {};
-
-    constexpr bool operator==(const PixelGlyph& o) const {
-        if (w != o.w) return false;
-        for (int r = 0; r < kGlyphH; ++r)
-            if (rows[r] != o.rows[r]) return false;
-        return true;
-    }
-    constexpr bool operator!=(const PixelGlyph& o) const { return !(*this == o); }
-};
-
-namespace detail {
-constexpr uint8_t packRow(const char* r) {
-    uint8_t v = 0;
-    for (int c = 0; c < kGlyphMaxW; ++c) {
-        v = static_cast<uint8_t>(v << 1);
-        if (r[c] == '#') v = static_cast<uint8_t>(v | 1);
-    }
-    return v;
-}
-// Rows are always written 5 chars wide; `w` says how many of them advance.
-constexpr PixelGlyph g(int w, const char* r0, const char* r1, const char* r2,
-                       const char* r3, const char* r4, const char* r5, const char* r6) {
-    return PixelGlyph{static_cast<uint8_t>(w),
-                      {packRow(r0), packRow(r1), packRow(r2), packRow(r3),
-                       packRow(r4), packRow(r5), packRow(r6)}};
-}
-}  // namespace detail
-
-// 5x7 variable-width bitmap font. Unknown characters and space return w = 0
-// glyphs that advance a word space and draw nothing.
-constexpr PixelGlyph pixelGlyph(char ch) {
-    using detail::g;
-    switch (ch) {
-    // ── digits ──
-    case '0': return g(4, ".##..", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", ".##..");
-    case '1': return g(4, "..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###.");
-    case '2': return g(4, ".##..", "#..#.", "...#.", "..#..", ".#...", "#....", "####.");
-    case '3': return g(4, "###..", "...#.", "...#.", ".##..", "...#.", "#..#.", ".##..");
-    case '4': return g(4, "..##.", ".#.#.", "#..#.", "####.", "...#.", "...#.", "...#.");
-    case '5': return g(4, "####.", "#....", "###..", "...#.", "...#.", "#..#.", ".##..");
-    case '6': return g(4, ".##..", "#..#.", "#....", "###..", "#..#.", "#..#.", ".##..");
-    case '7': return g(4, "####.", "...#.", "...#.", "..#..", "..#..", ".#...", ".#...");
-    case '8': return g(4, ".##..", "#..#.", "#..#.", ".##..", "#..#.", "#..#.", ".##..");
-    case '9': return g(4, ".##..", "#..#.", "#..#.", ".###.", "...#.", "#..#.", ".##..");
-    // ── letters ──
-    case 'A': return g(4, ".##..", "#..#.", "#..#.", "####.", "#..#.", "#..#.", "#..#.");
-    case 'B': return g(4, "###..", "#..#.", "#..#.", "###..", "#..#.", "#..#.", "###..");
-    case 'C': return g(4, ".##..", "#..#.", "#....", "#....", "#....", "#..#.", ".##..");
-    case 'D': return g(4, "###..", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", "###..");
-    case 'E': return g(4, "####.", "#....", "#....", "###..", "#....", "#....", "####.");
-    case 'F': return g(4, "####.", "#....", "#....", "###..", "#....", "#....", "#....");
-    case 'G': return g(4, ".##..", "#..#.", "#....", "#.##.", "#..#.", "#..#.", ".###.");
-    case 'H': return g(4, "#..#.", "#..#.", "#..#.", "####.", "#..#.", "#..#.", "#..#.");
-    case 'I': return g(3, "###..", ".#...", ".#...", ".#...", ".#...", ".#...", "###..");
-    case 'J': return g(4, "..##.", "...#.", "...#.", "...#.", "#..#.", "#..#.", ".##..");
-    case 'K': return g(4, "#..#.", "#.#..", "##...", "##...", "#.#..", "#..#.", "#..#.");
-    case 'L': return g(4, "#....", "#....", "#....", "#....", "#....", "#....", "####.");
-    case 'M': return g(5, "#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#");
-    case 'N': return g(4, "#..#.", "##.#.", "##.#.", "#.##.", "#.##.", "#..#.", "#..#.");
-    case 'O': return g(4, ".##..", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", ".##..");
-    case 'P': return g(4, "###..", "#..#.", "#..#.", "###..", "#....", "#....", "#....");
-    case 'Q': return g(4, ".##..", "#..#.", "#..#.", "#..#.", "#.##.", "#..#.", ".###.");
-    case 'R': return g(4, "###..", "#..#.", "#..#.", "###..", "##...", "#.#..", "#..#.");
-    case 'S': return g(4, ".###.", "#....", "#....", ".##..", "...#.", "...#.", "###..");
-    case 'T': return g(3, "###..", ".#...", ".#...", ".#...", ".#...", ".#...", ".#...");
-    case 'U': return g(4, "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", "#..#.", ".##..");
-    case 'V': return g(5, "#...#", "#...#", "#...#", "#...#", ".#.#.", ".#.#.", "..#..");
-    case 'W': return g(5, "#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#");
-    case 'X': return g(4, "#..#.", "#..#.", ".##..", ".##..", ".##..", "#..#.", "#..#.");
-    case 'Y': return g(3, "#.#..", "#.#..", "#.#..", ".#...", ".#...", ".#...", ".#...");
-    case 'Z': return g(4, "####.", "...#.", "..#..", ".#...", "#....", "#....", "####.");
-    // ── punctuation ──
-    case '+': return g(5, ".....", "..#..", "..#..", "#####", "..#..", "..#..", ".....");
-    case '-': return g(4, ".....", ".....", ".....", "####.", ".....", ".....", ".....");
-    // Raised, not centred: `*` only ever marks a pointer (FN*), and a
-    // full-height star read as a third letter rather than a modifier.
-    case '*': return g(5, "#.#.#", ".###.", "#####", ".###.", "#.#.#", ".....", ".....");
-    case '?': return g(4, ".##..", "#..#.", "...#.", "..#..", ".#...", ".....", ".#...");
-    case '[': return g(3, "##...", "#....", "#....", "#....", "#....", "#....", "##...");
-    case ']': return g(3, ".##..", "..#..", "..#..", "..#..", "..#..", "..#..", ".##..");
-    case '.': return g(2, ".....", ".....", ".....", ".....", ".....", ".....", "#....");
-    default:  return PixelGlyph{};
-    }
-}
-
-// Advance of one character: its own width, or a 3-wide word space when the
-// character is not in the table (space included).
-constexpr int pixelGlyphAdvance(char ch) {
-    const PixelGlyph g = pixelGlyph(ch);
-    return g.w > 0 ? int(g.w) : 3;
-}
-
-constexpr bool pixelGlyphBit(const PixelGlyph& g, int row, int col) {
-    return ((g.rows[row] >> (kGlyphMaxW - 1 - col)) & 1u) != 0;
-}
-
-// Fixed bitmaps ('#' = ink), drawn with drawBitmap(). Height ≤ 8 rows.
 struct PixelBitmap {
     int w;
     int h;
@@ -195,55 +88,69 @@ inline constexpr PixelBitmap kStar5x5{5, 5, {
 // Width in font pixels of a label at scale 1: the sum of the per-glyph
 // advances plus one gap between each pair (variable width, so this is no
 // longer a formula in the character count).
-inline int pixelLabelWidth(QStringView label) {
-    const int n = int(label.size());
-    if (n <= 0) return 0;
-    int w = (n - 1) * kGlyphGap;
-    for (int i = 0; i < n; ++i) {
-        const QChar qc = label.at(i).toUpper();
-        w += pixelGlyphAdvance(qc.unicode() < 128 ? char(qc.unicode()) : '?');
-    }
-    return w;
+// ── Text: Departure Mono, a real pixel font ──
+// Replaced a hand-drawn 5x7 bitmap table on 2026-09-07. That table was crisp
+// but had to be drawn at 2x to be legible, so every "pixel" was a 2x2 block —
+// the user's "blocky", and at that grid a 4 read as a 9 and U was a V.
+// Departure Mono (Helena Zhang, SIL OFL 1.1, no Reserved Font Name; licence in
+// src/fonts/DepartureMono-LICENSE.txt) is pixel-perfect at multiples of its
+// 11 px design size, so at 11 DEVICE px it draws 1-device-pixel strokes: same
+// physical size as the old 2x blocks, four times the detail, and ~25 % narrower.
+inline constexpr int kPixelFontDesign = 11;   // do not render at non-multiples
+
+// The font is drawn into the icon painters' DEVICE-resolution canvas, so the
+// size is chosen in device px and antialiasing is off — the two things a pixel
+// font needs to stay pixel-perfect at fractional DPI (a logical pixelSize at
+// dpr 1.25 would land on 13.75 device px and blur).
+inline int pixelFontSizeDev(qreal dpr) {
+    return kPixelFontDesign * qMax(1, qRound(dpr * 0.75));   // 11 up to 150 %, 22 at 200 %
 }
 
-// ONE scale per DPR for every label: s = round(1.6·dpr) → 1.0: 2, 1.25: 2,
-// 1.5: 2, 2.0: 3 (ink 14 / 14 / 14 / 21 device px). "H64" and "F" are the same
-// height in the same panel; the per-length seed (2× for 1–2 chars, 1× for
-// longer) made 3-char labels half the size of their neighbours at 125 %.
-// ROUND, not ceil: with the 7-row font ceil pushed 150 % to s = 3 (a 21-px
-// glyph beside a 24-px Codicon) and 200 % to s = 4, and the extra scale has to
-// be paid for in cell width at every DPR. Round keeps s/dpr ≤ 2 everywhere.
-// Logical width of the ribbon cell that holds a pixel label. Two logical px
-// per font px is the worst case ratio of the uniform integer scale to the DPR
-// (s/dpr = 2 at 100 %; 1.6 at 125 %, 1.33 at 150 %, 1.5 at 200 %), so sizing at
-// 2x guarantees pixelLabelScale's shrink guard never fires and every label in a
-// panel keeps the same scale. THE one rule: ribbonIconCellWidth (layout) and
-// typeGlyphIcon / fillSquaresIcon (painting) all call this, because when they
-// each carried their own copy the painter drew into a cell 2 px narrower than
-// the layout reserved and silently halved the glyph.
+inline QFont pixelLabelFont(qreal dpr) {
+    static const QString family = []() -> QString {
+        const int id = QFontDatabase::addApplicationFont(
+            QStringLiteral(":/fonts/DepartureMono.otf"));
+        const QStringList fams = id >= 0 ? QFontDatabase::applicationFontFamilies(id)
+                                         : QStringList();
+        return fams.isEmpty() ? QStringLiteral("Courier New") : fams.first();
+    }();
+    QFont f(family);
+    f.setPixelSize(pixelFontSizeDev(dpr));
+    f.setStyleStrategy(QFont::NoAntialias);   // pixel font: never smooth it
+    f.setHintingPreference(QFont::PreferNoHinting);
+    return f;
+}
+
+// Advance width of `label` in DEVICE px at this dpr.
+inline int pixelLabelWidthDev(QStringView label, qreal dpr) {
+    return QFontMetrics(pixelLabelFont(dpr)).horizontalAdvance(label.toString());
+}
+
+// Ink height in DEVICE px — the cap box, used to centre a label in its cell.
+inline int pixelLabelHeightDev(qreal dpr) {
+    const QFontMetrics fm(pixelLabelFont(dpr));
+    return fm.capHeight() > 0 ? int(fm.capHeight()) : fm.ascent();
+}
+
+// Logical width of the ribbon cell that holds a pixel label. THE one rule:
+// ribbonIconCellWidth (layout) and the icon painters both call this.
+//
+// Sized from the DEVICE advance at the design size, unscaled. Layout is in
+// logical px and must not depend on dpr, and the worst case (widest in logical
+// terms) is dpr 1.0, where 1 device px IS 1 logical px. So this is exact at
+// 100 % and leaves slack at every higher DPI.
 inline int pixelLabelCellWidth(QStringView label) {
-    return qMax(16, 2 * pixelLabelWidth(label));
+    return qMax(16, pixelLabelWidthDev(label, 1.0) + 6);
 }
 
-inline int pixelGlyphScale(qreal dpr) {
+// Scale for the fixed BITMAPS above (the plus, the hook arrow, the rail
+// chevron, the fill squares). Text no longer uses this — it is a real font
+// now — but these shapes are still hand-drawn grids and want whole device
+// pixels per grid cell: 2 up to 150 %, 3 at 200 %.
+inline int pixelBitmapScale(qreal dpr) {
     return qMax(1, qRound(1.6 * dpr));
 }
 
-// The uniform scale, shrunk until both the label width and the 5-row height
-// fit a cellWDev × cellHDev cell (the guard never fires for the ribbon's
-// 8·max(2, len)-wide cells; it does for the 16×16 QMenu icons). Never below 1.
-inline int pixelLabelScale(QStringView label, int cellWDev, int cellHDev, qreal dpr) {
-    const int w = pixelLabelWidth(label);
-    int s = pixelGlyphScale(dpr);
-    while (s > 1 && (w * s > cellWDev || kGlyphH * s > cellHDev)) --s;
-    return qMax(1, s);
-}
-
-inline int pixelLabelScale(QStringView label, int cellDev, qreal dpr) {
-    return pixelLabelScale(label, cellDev, cellDev, dpr);
-}
-
-// Paints one bitmap at device position (xDev, yDev), each set bit as an s×s block.
 inline void drawBitmap(QPainter& p, int xDev, int yDev, const PixelBitmap& bm,
                        int scale, const QColor& ink) {
     p.setRenderHint(QPainter::Antialiasing, false);
@@ -257,21 +164,45 @@ inline void drawBitmap(QPainter& p, int xDev, int yDev, const PixelBitmap& bm,
 }
 
 // Paints `label` (upper-cased) starting at device position (xDev, yDev).
+// Paints `label` at DEVICE position (xDev, yDev) — yDev is the TOP of the cap
+// box, matching how the old bitmap API was called.
+//
+// The text is rendered into a scratch image and its alpha HARD-THRESHOLDED
+// before it is composited. Departure Mono ships as an OTF, i.e. CFF outlines,
+// so Qt rasterises it through the normal vector path and antialiases the edges
+// even with NoAntialias + TextAntialiasing off — both are hints the font engine
+// may ignore. Measured: stray alpha 26 pixels along the stems. A pixel font
+// with soft edges is just a small blurry font, which is the thing this change
+// set out to fix, so the threshold is not optional polish — it is the feature.
+// At the exact 11 px design size the outlines land on the grid, so thresholding
+// snaps to the pixels the designer drew rather than inventing any.
 inline void drawPixelLabel(QPainter& p, int xDev, int yDev, QStringView label,
-                           int scale, const QColor& ink) {
-    p.setRenderHint(QPainter::Antialiasing, false);
-    p.setPen(Qt::NoPen);
-    int x = xDev;
-    for (int i = 0; i < label.size(); ++i) {
-        const QChar qc = label.at(i).toUpper();
-        const char ch = qc.unicode() < 128 ? char(qc.unicode()) : '?';
-        const PixelGlyph g = pixelGlyph(ch);
-        for (int r = 0; r < kGlyphH; ++r)
-            for (int c = 0; c < kGlyphMaxW; ++c)
-                if (pixelGlyphBit(g, r, c))
-                    p.fillRect(x + c * scale, yDev + r * scale, scale, scale, ink);
-        x += (pixelGlyphAdvance(ch) + kGlyphGap) * scale;
+                           qreal dpr, const QColor& ink) {
+    const QFont f = pixelLabelFont(dpr);
+    const QFontMetrics fm(f);
+    const QString text = label.toString();
+    const int w = qMax(1, fm.horizontalAdvance(text) + 2);
+    const int h = qMax(1, fm.height() + 2);
+
+    QImage mask(w, h, QImage::Format_ARGB32_Premultiplied);
+    mask.fill(Qt::transparent);
+    {
+        QPainter mp(&mask);
+        mp.setRenderHint(QPainter::Antialiasing, false);
+        mp.setRenderHint(QPainter::TextAntialiasing, false);
+        mp.setFont(f);
+        mp.setPen(ink);
+        mp.drawText(QPointF(1, 1 + fm.ascent()), text);
     }
+    // Any pixel at least half covered becomes solid ink; the rest vanishes.
+    const QRgb solid = qPremultiply(qRgba(ink.red(), ink.green(), ink.blue(), 255));
+    for (int y = 0; y < h; ++y) {
+        QRgb* row = reinterpret_cast<QRgb*>(mask.scanLine(y));
+        for (int x = 0; x < w; ++x)
+            row[x] = qAlpha(row[x]) >= 128 ? solid : 0u;
+    }
+    // Line the cap box up with what the caller asked for.
+    p.drawImage(QPoint(xDev - 1, yDev + 1 - (fm.ascent() - pixelLabelHeightDev(dpr))), mask);
 }
 
 }  // namespace rcx

@@ -16,7 +16,7 @@
 //
 // Cells: 16 logical px tall; TypeGlyph / FillSquares cells are 8·max(2, len)
 // wide (F = 16, H64 = 24, WSTR = 32) so every label shares ONE pixel scale
-// (pixelGlyphScale). The `wide = false` path renders the same label into a
+// (pixelBitmapScale). The `wide = false` path renders the same label into a
 // square 16×16 cell (shrunk to fit) for QAction / QMenu icons, so the 24/32-
 // wide ribbon cells are never downscaled into 16×16 action icons.
 //
@@ -234,10 +234,9 @@ inline QPixmap typeGlyphIcon(const QString& label, GlyphFamily family, int logic
     QImage img = detail::ribbonCanvas(cell);
     {
         QPainter p(&img);
-        const int s = pixelLabelScale(label, cell.width(), cell.height(), dpr);
-        const int w = pixelLabelWidth(label) * s;
-        const int h = kGlyphH * s;
-        drawPixelLabel(p, (cell.width() - w) / 2, (cell.height() - h) / 2, label, s, ink);
+        const int w = pixelLabelWidthDev(label, dpr);
+        const int h = pixelLabelHeightDev(dpr);
+        drawPixelLabel(p, (cell.width() - w) / 2, (cell.height() - h) / 2, label, dpr, ink);
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);
@@ -276,10 +275,9 @@ inline QPixmap addBytesIcon(int n, int logicalSize, qreal dpr, const Theme& them
             // right-aligned anywhere else. `pad` keeps the block off the
             // cell's right edge by the same 3 px a labelled icon uses.
             const QString text = ribbonBytesGlyphLabel(n, true);
-            const int s = pixelLabelScale(text, cell.width(), cell.height(), dpr);
             const int pad = 3 * k;
-            drawPixelLabel(p, cell.width() - pad - pixelLabelWidth(text) * s,
-                           (cell.height() - kGlyphH * s) / 2, text, s, ink);
+            drawPixelLabel(p, cell.width() - pad - pixelLabelWidthDev(text, dpr),
+                           (cell.height() - pixelLabelHeightDev(dpr)) / 2, text, dpr, ink);
         }
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
@@ -312,14 +310,14 @@ inline QPixmap insertBytesIcon(int n, int logicalSize, qreal dpr, const Theme& t
                        kHookArrow7x7, k, ink);
         } else {
             const QString text = ribbonBytesGlyphLabel(n, false);
-            const int s = pixelLabelScale(text, cell.width() - arrowSide - 2 * k, cell.height(), dpr);
-            const int textW = pixelLabelWidth(text) * s;
+            const int textW = pixelLabelWidthDev(text, dpr);
             const int blockW = arrowSide + 2 * k + textW;
             // Right-aligned like Add's, so the counts line up down the column
             // and the hook arrows stay a fixed gap to their left.
             const int x0 = cell.width() - 3 * k - blockW;
             drawBitmap(p, x0, (cell.height() - arrowSide) / 2, kHookArrow7x7, k, ink);
-            drawPixelLabel(p, x0 + arrowSide + 2 * k, (cell.height() - kGlyphH * s) / 2, text, s, ink);
+            drawPixelLabel(p, x0 + arrowSide + 2 * k,
+                           (cell.height() - pixelLabelHeightDev(dpr)) / 2, text, dpr, ink);
         }
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
@@ -401,19 +399,20 @@ inline QPixmap fillIcon(const QString& text, GlyphFamily family, int logicalSize
         // neighbouring glyph — the exact inconsistency the one-scale rule
         // exists to prevent. The label alone is the information; the squares
         // are decoration, so the decoration is what gives way.
-        constexpr int kBlockRows = kSquaresRow11x2.h + kSquaresGap + kGlyphH;
-        const int s = pixelLabelScale(text, cell.width(), cell.height(), dpr);
+        const int glyphH = pixelLabelHeightDev(dpr);
+        const int s = detail::ribbonUnit(dpr);       // scale for the SQUARES bitmap
+        const int kBlockRows = kSquaresRow11x2.h * s + kSquaresGap * s + glyphH;
         const bool withSquares = kSquaresRow11x2.w * s <= cell.width()
-                              && kBlockRows * s <= cell.height();
-        const int blockH = (withSquares ? kBlockRows : kGlyphH) * s;
+                              && kBlockRows <= cell.height();   // kBlockRows is already device px
+        const int blockH = withSquares ? kBlockRows : glyphH;
         const int y0 = (cell.height() - blockH) / 2;
         if (withSquares) {
             const int x0 = (cell.width() - kSquaresRow11x2.w * s) / 2;
             drawBitmap(p, x0, y0, kSquaresRow11x2, s, squares);
         }
-        const int lw = pixelLabelWidth(text) * s;
+        const int lw = pixelLabelWidthDev(text, dpr);
         drawPixelLabel(p, (cell.width() - lw) / 2,
-                       y0 + (withSquares ? (kSquaresRow11x2.h + kSquaresGap) * s : 0), text, s, ink);
+                       y0 + (withSquares ? (kSquaresRow11x2.h + kSquaresGap) * s : 0), text, dpr, ink);
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);

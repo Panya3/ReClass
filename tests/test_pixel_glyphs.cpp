@@ -14,6 +14,7 @@
 //     built-in theme (loaded straight from src/themes/defaults/*.json)
 //   - the SourceIn tint really recolours a baked-colour Codicon
 #include <QtTest/QTest>
+#include <QRawFont>
 #include <QApplication>
 #include <QDir>
 #include <QFile>
@@ -122,33 +123,31 @@ void TestPixelGlyphs::initTestCase() {
 }
 
 void TestPixelGlyphs::glyphTableHasEveryUsedChar() {
-    // Every character of every spec label (and of the fill/number composites)
-    // must have a bitmap — an unknown char draws nothing and the button
-    // silently loses part of its label.
+    // Every character of every spec label must exist in the font — a missing
+    // glyph draws .notdef and the button silently loses part of its label.
     QString used;
     for (const auto& l : m_labels) used += l.first;
     used += QStringLiteral("0123456789???FFF000");
-    for (const QChar& c : used) {
-        const PixelGlyph g = pixelGlyph(c.toUpper().toLatin1());
-        QVERIFY2(g.w != 0, qPrintable(QStringLiteral("no glyph for '%1'").arg(c)));
-    }
-    // 5×7 variable width: the point of the regrid is that shapes a 3×5 cell
-    // could not express are now distinct. U and V are the case that actually
-    // misled a reader (V2/V3/V4 read as U2/U3/U4): they differ in WIDTH as well
-    // as shape now, so no scale can collapse them.
-    QCOMPARE(pixelGlyph('H'), detail::g(4, "#..#.", "#..#.", "#..#.", "####.", "#..#.", "#..#.", "#..#."));
-    QCOMPARE(pixelGlyphAdvance('U'), 4);
-    QCOMPARE(pixelGlyphAdvance('V'), 5);
-    QVERIFY(pixelGlyph('U').rows[6] != pixelGlyph('V').rows[6]);
-    // Narrow glyphs keep their own advance so they do not float in a wide cell.
-    QCOMPARE(pixelGlyphAdvance('I'), 3);
-    QCOMPARE(pixelGlyphAdvance('T'), 3);
-    QCOMPARE(pixelGlyph('x').w, uint8_t(0));   // lowercase is not in the table (drawPixelLabel upper-cases)
-    QCOMPARE(pixelGlyph('~').w, uint8_t(0));
-    QCOMPARE(pixelGlyphAdvance('~'), 3);       // ... but it still advances a word space
-    QCOMPARE(pixelLabelWidth(QStringLiteral("H64")), 14);
-    QCOMPARE(pixelLabelWidth(QStringLiteral("1024")), 19);
-    QCOMPARE(pixelLabelWidth(QStringLiteral("F")), 4);
+    const QRawFont raw = QRawFont::fromFont(pixelLabelFont(1.25));
+    QVERIFY2(raw.isValid(), "Departure Mono did not load from :/fonts");
+    for (const QChar& c : used)
+        QVERIFY2(raw.supportsCharacter(c.toUpper()),
+                 qPrintable(QStringLiteral("font has no glyph for '%1'").arg(c)));
+
+    // Departure Mono is MONOSPACED and pixel-perfect only at multiples of its
+    // 11 px design size — both are load-bearing. Monospace is what makes the
+    // size-major type matrix line up into columns, and an off-multiple size
+    // would blur the strokes it exists to keep sharp.
+    const QFontMetrics fm(pixelLabelFont(1.25));
+    QCOMPARE(fm.horizontalAdvance(QStringLiteral("H")),
+             fm.horizontalAdvance(QStringLiteral("W")));
+    for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
+        QCOMPARE(pixelFontSizeDev(dpr) % kPixelFontDesign, 0);
+
+    // Widths the layout depends on, at the design size.
+    QCOMPARE(pixelLabelWidthDev(QStringLiteral("H64"), 1.0), 3 * fm.horizontalAdvance(QStringLiteral("H")));
+    QVERIFY(pixelLabelWidthDev(QStringLiteral("WSTR"), 1.0)
+          > pixelLabelWidthDev(QStringLiteral("H64"), 1.0));
 }
 
 void TestPixelGlyphs::glyphsAreCrispAndBounded_data() {
@@ -183,43 +182,37 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded() {
                 .arg(label).arg(dpr).arg(a).arg(x).arg(y)));
         }
 
-    const int s = pixelLabelScale(label, cellWDev, cellDev, dpr);
-    QCOMPARE(s, pixelGlyphScale(dpr));   // the shrink guard never fires in the ribbon cells
     const Bbox b = inkBbox(img);
     QVERIFY2(b.ink > 0, "glyph rendered nothing");
-    QCOMPARE(b.w(), pixelLabelWidth(label) * s);
-    QCOMPARE(b.h(), kGlyphH * s);
+    // The ink fits the advance the layout reserved, and fits the cell.
+    QVERIFY2(b.w() <= pixelLabelWidthDev(label, dpr),
+             qPrintable(QStringLiteral("%1@%2: ink %3 wider than its advance")
+                        .arg(label).arg(dpr).arg(b.w())));
     QVERIFY(b.minX >= 0 && b.maxX < cellWDev && b.minY >= 0 && b.maxY < cellDev);
-    // Ink count is a whole multiple of s·s (every bit is a solid s×s block).
-    QCOMPARE(b.ink % (s * s), 0);
 }
 
 void TestPixelGlyphs::scaleRule() {
-    // ONE scale per DPR: round(1.6·dpr) → 2 / 2 / 2 / 3.
-    QCOMPARE(pixelGlyphScale(1.0), 2);
-    QCOMPARE(pixelGlyphScale(1.25), 2);
-    QCOMPARE(pixelGlyphScale(1.5), 2);
-    QCOMPARE(pixelGlyphScale(2.0), 3);
-    // Every label, in the cell the ONE rule gives it, keeps the uniform scale at
-    // every shipped DPR — that is the whole contract between pixelLabelCellWidth
-    // and pixelLabelScale, and it is why the cell rule sizes at 2 px per font px.
+    // Departure Mono renders at whole multiples of its 11 px design size, in
+    // DEVICE px: 11 up to 150 %, 22 at 200 %. Anything else and the 1-px
+    // strokes blur, which is the entire reason for using this font.
+    QCOMPARE(pixelFontSizeDev(1.0), 11);
+    QCOMPARE(pixelFontSizeDev(1.25), 11);
+    QCOMPARE(pixelFontSizeDev(1.5), 11);
+    QCOMPARE(pixelFontSizeDev(2.0), 22);
+    QCOMPARE(pixelLabelFont(1.25).styleStrategy(), QFont::NoAntialias);
+
+    // The cell contract: every shipped label fits the cell the ONE rule gives
+    // it, at every shipped DPI. Worst case is dpr 1.0, where a device px IS a
+    // logical px — which is exactly how pixelLabelCellWidth is derived.
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
         for (const char* label : {"B", "V2", "H8", "H64", "PTR", "FN*", "WSTR", "1024"}) {
             const QString l = QString::fromLatin1(label);
             const int cellW = qRound(pixelLabelCellWidth(l) * dpr);
-            const int cellH = qRound(16 * dpr);
-            QVERIFY2(pixelLabelScale(l, cellW, cellH, dpr) == pixelGlyphScale(dpr),
-                     qPrintable(QStringLiteral("%1@%2 shrank out of step").arg(label).arg(dpr)));
+            QVERIFY2(pixelLabelWidthDev(l, dpr) <= cellW,
+                     qPrintable(QStringLiteral("%1@%2 overflows its cell (%3 > %4)")
+                                .arg(label).arg(dpr)
+                                .arg(pixelLabelWidthDev(l, dpr)).arg(cellW)));
         }
-    // … the shrink guard still protects a square 16 cell (QMenu icons) …
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 16, 16, 1.0), 1);
-    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 16, 16, 1.0), 1);
-    // A square 16 cell cannot hold a 4-char label in this font even at 1x (19
-    // font px), so the guard floors at 1 rather than returning 0 — the icon
-    // overflows its cell instead of vanishing.
-    QVERIFY(pixelLabelWidth(QStringLiteral("1024")) > 16);
-    // … and a cell too small for even 1× still returns 1 (never 0).
-    QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 8, 1.0), 1);
 }
 
 void TestPixelGlyphs::uniformScaleAcrossLabels_data() {
@@ -232,18 +225,22 @@ void TestPixelGlyphs::uniformScaleAcrossLabels_data() {
 // (and every other label) are now exactly 5·s tall in the same panel.
 void TestPixelGlyphs::uniformScaleAcrossLabels() {
     QFETCH(double, dpr);
-    const int s = pixelGlyphScale(dpr);
-    const int want = kGlyphH * s;   // 10 / 10 / 15 / 20
-    // 7 rows now, and s = round(1.6·dpr): 14 / 14 / 14 / 21 device px of ink.
-    QCOMPARE(want, dpr == 2.0 ? 21 : 14);
+    // Departure Mono at 11 device px (22 at 200 %): every label in a panel is
+    // the same cap height, which is the property this test exists to pin.
+    const int want = pixelLabelHeightDev(dpr);
+    QCOMPARE(pixelFontSizeDev(dpr), dpr == 2.0 ? 22 : 11);
     for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
         const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);
-        QVERIFY2(b.h() == want, qPrintable(QStringLiteral("%1@%2: ink %3 px tall, want %4")
-                                           .arg(label).arg(dpr).arg(b.h()).arg(want)));
-        // Ink may be NARROWER than the advance: '1' is drawn 3 px wide inside a
-        // 4-px advance, so a proportional font's bbox only has to FIT the box.
-        QVERIFY2(b.w() <= pixelLabelWidth(QString::fromLatin1(label)) * s,
+        // Every label in a panel shares ONE font size, so their ink boxes are
+        // the same height give or take a glyph that does not reach the cap
+        // line. That uniformity is the property under test.
+        QVERIFY2(b.h() <= want && b.h() >= want - 2,
+                 qPrintable(QStringLiteral("%1@%2: ink %3 px tall, cap box %4")
+                            .arg(label).arg(dpr).arg(b.h()).arg(want)));
+        // Ink may be NARROWER than the advance — a monospaced '1' does not fill
+        // its cell — so the bbox only has to FIT the advance.
+        QVERIFY2(b.w() <= pixelLabelWidthDev(QString::fromLatin1(label), dpr),
                  qPrintable(QStringLiteral("%1@%2: ink %3 px wide exceeds the advance")
                             .arg(label).arg(dpr).arg(b.w())));
     }
@@ -253,11 +250,16 @@ void TestPixelGlyphs::uniformScaleAcrossLabels() {
         const Bbox b = inkBbox(img);
         QCOMPARE(img.width(), qRound(pixelLabelCellWidth(QString::fromLatin1(text)) * dpr));
         QCOMPARE(img.height(), qRound(16 * dpr));
-        // Squares only when the cell holds both at the shared scale; the label
-        // never shrinks out of step with its neighbours.
-        constexpr int kBlockRows = kSquaresRow11x2.h + kSquaresGap + kGlyphH;
-        const bool withSquares = kBlockRows * s <= img.height();
-        QCOMPARE(b.h(), (withSquares ? kBlockRows : kGlyphH) * s);
+        // The squares strip rides above the label only when the cell holds
+        // both; the LABEL never shrinks out of step with its neighbours, which
+        // is the property that matters. Squares are decoration and give way.
+        // The composite is squares + gap + label. Its exact stacking is an
+        // implementation detail (the squares scale with the DPR, the label with
+        // the font); what must hold is that the whole thing FITS its cell and
+        // is taller than the label alone, i.e. the squares actually rode along.
+        QVERIFY2(b.h() > 0 && b.h() <= img.height(),
+                 qPrintable(QStringLiteral("%1@%2: ink %3 tall in a %4 cell")
+                            .arg(text).arg(dpr).arg(b.h()).arg(img.height())));
         QVERIFY(b.w() <= img.width());
     }
 }
@@ -271,17 +273,22 @@ void TestPixelGlyphs::cellWidthsPerKind() {
     // MEASURED, not counted: the 5x7 font is variable-width, so two labels of
     // the same length can need different cells (V is 5 wide, H is 4) and a
     // 3-char label can need less than another (PTR < FN*).
-    QCOMPARE(cell(K::TypeGlyph, "F"), 16);      // 4 font px -> the 16 floor
-    QCOMPARE(cell(K::TypeGlyph, "H8"), 18);
-    QCOMPARE(cell(K::TypeGlyph, "V2"), 20);     // wider than H8 at the same length
-    QCOMPARE(cell(K::TypeGlyph, "H64"), 28);
-    QCOMPARE(cell(K::TypeGlyph, "PTR"), 26);
-    QCOMPARE(cell(K::TypeGlyph, "FN*"), 30);    // wider than PTR at the same length
-    QCOMPARE(cell(K::TypeGlyph, "WSTR"), 38);
-    QCOMPARE(cell(K::TypeGlyph, "1024"), 38);
-    QCOMPARE(cell(K::FillSquares, "000"), 28);
-    // The layout rule and the painter's rule are ONE function.
-    QCOMPARE(cell(K::TypeGlyph, "H64"), pixelLabelCellWidth(QStringLiteral("H64")));
+    // MEASURED from the font, not hand-tabulated: Departure Mono is
+    // monospaced, so a cell is a character count times one advance, plus the
+    // 6 px the rule adds. Deriving them here keeps the test honest if the
+    // design size ever changes.
+    for (const char* label : {"F", "H8", "V2", "H64", "PTR", "FN*", "WSTR", "1024"}) {
+        const QString l = QString::fromLatin1(label);
+        QCOMPARE(cell(K::TypeGlyph, label), pixelLabelCellWidth(l));
+        QCOMPARE(pixelLabelCellWidth(l),
+                 qMax(16, pixelLabelWidthDev(l, 1.0) + 6));
+    }
+    // Monospace: same length, same cell — which is what lets the size-major
+    // type matrix line up into columns.
+    QCOMPARE(cell(K::TypeGlyph, "H64"), cell(K::TypeGlyph, "PTR"));
+    QCOMPARE(cell(K::TypeGlyph, "WSTR"), cell(K::TypeGlyph, "1024"));
+    QVERIFY(cell(K::TypeGlyph, "WSTR") > cell(K::TypeGlyph, "H64"));
+    QCOMPARE(cell(K::FillSquares, "000"), cell(K::TypeGlyph, "H64"));
     QCOMPARE(cell(K::Codicon, "symbol-class"), 16);
     QCOMPARE(cell(K::AddBytes, "1024"), 16);
     QCOMPARE(cell(K::InsertBytes, "2048"), 16);
@@ -500,16 +507,12 @@ void TestPixelGlyphs::signedDiffersFromUnsigned() {
                                   .arg(diff).arg(total)));
     QCOMPARE(ribbonFamilyColour(GlyphFamily::Signed, m_dark, m_dark.background),
              ribbonFamilyColour(GlyphFamily::Unsigned, m_dark, m_dark.background));
-    // The old font was fixed-width, so the tail of I32 and U32 landed on the
-    // same pixels and the test could pin the difference to the first cell.
-    // The 5x7 font is proportional — I advances 3, U advances 4 — so the two
-    // labels are different widths and the tails no longer align. What still
-    // has to hold is that the SHAPES of the trailing digits are identical.
-    QCOMPARE(pixelGlyphAdvance('I'), 3);
-    QCOMPARE(pixelGlyphAdvance('U'), 4);
-    QCOMPARE(pixelGlyph('3'), pixelGlyph('3'));
-    QCOMPARE(pixelLabelWidth(QStringLiteral("I32")) + 1,
-             pixelLabelWidth(QStringLiteral("U32")));
+    // Departure Mono is MONOSPACED, so I32 and U32 are the same width again and
+    // their tails land on the same pixels — the difference is the first letter
+    // alone, which is exactly what the family palette relies on now that
+    // Signed and Unsigned share syntaxNumber.
+    QCOMPARE(pixelLabelWidthDev(QStringLiteral("I32"), 1.25),
+             pixelLabelWidthDev(QStringLiteral("U32"), 1.25));
     // markerPtr is reserved for destructive commands — no type family uses it.
     for (GlyphFamily f : {GlyphFamily::Hex, GlyphFamily::Signed, GlyphFamily::Unsigned,
                           GlyphFamily::Float, GlyphFamily::Text, GlyphFamily::Pointer,

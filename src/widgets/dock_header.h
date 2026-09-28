@@ -219,7 +219,7 @@ inline constexpr PixelBitmap kChevronRight4x7{4, 7, {
 inline void drawRailChevron(QPainter& p, const QPointF& centerLogical,
                             const QColor& ink, qreal dpr) {
     const qreal s = dpr > 0 ? dpr : 1.0;
-    const int scale = pixelGlyphScale(s);
+    const int scale = pixelBitmapScale(s);
     const int wDev = kChevronRight4x7.w * scale;
     const int hDev = kChevronRight4x7.h * scale;
     QImage img(wDev, hDev, QImage::Format_ARGB32_Premultiplied);

@@ -11767,6 +11767,12 @@ int main(int argc, char* argv[]) {
         qWarning("Failed to load embedded JetBrains Mono font");
     if (QFontDatabase::addApplicationFont(":/fonts/IBMPlexMono.ttf") == -1)
         qWarning("Failed to load embedded IBM Plex Mono font");
+    // Departure Mono backs the ribbon's type glyphs (H64 / PTR / WSTR …).
+    // rcx::pixelLabelFont() loads it lazily on first use so tests and render
+    // harnesses get it too; this is just the eager path with a warning, so a
+    // missing resource is noisy rather than a silent fallback to Courier.
+    if (QFontDatabase::addApplicationFont(":/fonts/DepartureMono.otf") == -1)
+        qWarning("Failed to load embedded Departure Mono font");
     // Apply saved font preference before creating any editors
     {
         QSettings settings("REECLASS", "REECLASS");

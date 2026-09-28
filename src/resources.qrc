@@ -8,6 +8,11 @@
     <qresource prefix="/fonts">
         <file alias="JetBrainsMono.ttf">fonts/JetBrainsMono.ttf</file>
         <file alias="IBMPlexMono.ttf">fonts/IBMPlexMono.ttf</file>
+        <!-- Departure Mono by Helena Zhang, SIL OFL 1.1 (no Reserved Font
+             Name). The licence text ships beside it in src/fonts/ and must
+             stay with any redistribution. Used ONLY for the ribbon type
+             glyphs, at exact multiples of its 11 px design size. -->
+        <file alias="DepartureMono.otf">fonts/DepartureMono-Regular.otf</file>
     </qresource>
     <qresource prefix="/vsicons">
         <file alias="file.svg">vsicons/file.svg</file>
