@@ -83,8 +83,9 @@ private slots:
     }
 
     void row_nameThatContainsAKeyword() {
-        // The root parsers anchor on the LAST whole-word keyword, so a class
-        // name built from one still reads whole.
+        // The root parsers take the keyword right after the chevron and
+        // nothing later on the row, so a class name built from one still
+        // reads whole.
         for (const QString& name : {QStringLiteral("StructOfClass"), QStringLiteral("my_struct_view"),
                                     QStringLiteral("enum_class_t"), QStringLiteral("_PEB64")}) {
             const QString row = buildCommandRowText(QStringLiteral("struct"), name, false);
@@ -112,22 +113,42 @@ private slots:
         // The MCP status tool writes "[▸] [Claude: text]" onto line 0. With
         // no address cell there is nothing for a parser to anchor on: only
         // the chevron reads, the root spans stay invalid — even when the
-        // text carries the old source-control glyph or a hex number.
+        // text carries the old source-control glyph, a hex number, or a
+        // class keyword (the parser once anchored on the LAST whole-word
+        // keyword anywhere on the row: "renamed class Player" grew a name
+        // span "Player]", tinted, editable, and its commit renamed the
+        // real root struct).
         for (const QString& row : {QStringLiteral("[▸] [Claude: rebased to 0x1000]"),
                                    QStringLiteral("[▸] [Claude: 'game.exe'▾ 0x1000]"),
-                                   QStringLiteral("[▸] [Claude: scanning]")}) {
+                                   QStringLiteral("[▸] [Claude: scanning]"),
+                                   QStringLiteral("[▸] [Claude: renamed class Player]"),
+                                   QStringLiteral("[▸] [Claude: struct Player rebased]"),
+                                   QStringLiteral("[▸] [Claude: enum Color added]")}) {
             QVERIFY2(commandRowChevronSpan(row).valid, qPrintable(row));
             QVERIFY2(!commandRowRootTypeSpan(row).valid, qPrintable(row));
             QVERIFY2(!commandRowRootNameSpan(row).valid, qPrintable(row));
         }
     }
 
-    void span_rootParsersAnchorOnTheLastKeyword() {
-        // Text before the keyword — whatever it is — is not the header's
-        // business: the root spans still find the keyword and the name.
-        const QString row = QStringLiteral("[▸] some text  struct Player {");
+    void span_rootParsersAnchorOnTheChevron() {
+        // The keyword is accepted in ONE place: where buildCommandRowText
+        // puts it, right at the chevron span's end. Text in front of it,
+        // an extra space, or no chevron at all — no root spans. (The
+        // inverse of the retired span_rootParsersAnchorOnTheLastKeyword.)
+        for (const QString& row : {QStringLiteral("[▸] some text  struct Player {"),
+                                   QStringLiteral("[▸]  struct Player {"),
+                                   QStringLiteral("[▸] xstruct Player {"),
+                                   QStringLiteral("struct Player {"),
+                                   QStringLiteral("[▸] struct"),          // keyword without its space
+                                   QStringLiteral("[▸] structPlayer {")}) {
+            QVERIFY2(!commandRowRootTypeSpan(row).valid, qPrintable(row));
+            QVERIFY2(!commandRowRootNameSpan(row).valid, qPrintable(row));
+        }
+        // …and where it is, a keyword later on the row is part of the name.
+        const QString row = QStringLiteral("[▸] struct Player class {");
+        QCOMPARE(commandRowRootTypeSpan(row).start, commandRowChevronSpan(row).end);
         QCOMPARE(spanText(row, commandRowRootTypeSpan(row)), QStringLiteral("struct"));
-        QCOMPARE(spanText(row, commandRowRootNameSpan(row)), QStringLiteral("Player"));
+        QCOMPARE(spanText(row, commandRowRootNameSpan(row)), QStringLiteral("Player class"));
     }
 
     void span_rowWithoutRootPart() {

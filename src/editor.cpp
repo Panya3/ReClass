@@ -2862,7 +2862,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             m_sci->setText(result.text);
             m_sci->setReadOnly(true);
             // Full-replace just rewrote line 0 to compose's literal
-            // "[▸] 0x0  struct Untitled {" placeholder. Invalidate
+            // "[▸] struct Untitled {" placeholder. Invalidate
             // the setCommandRowText skip-cache so the controller's
             // updateCommandRow() that runs next is forced to re-paint
             // line 0 with the proper text.
@@ -3172,7 +3172,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // last so receivers see the final Scintilla state (post-indicator apply).
     //
     // NOT result.text: compose emits a constant placeholder for line 0
-    // ("[▸] 0x0  struct Untitled {") that setCommandRowText
+    // ("[▸] struct Untitled {") that setCommandRowText
     // overwrites in the buffer. Emitting the compose text handed every mirror
     // the placeholder forever — the minimap showed "struct Untitled" for a
     // named, attached class. emitText carries the real command row on the

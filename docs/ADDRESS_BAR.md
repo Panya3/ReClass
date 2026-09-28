@@ -26,16 +26,16 @@ other strip starts on.
 
 | File | Role |
 |---|---|
-| `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the 6-step overflow rule, tooltips, context menus, the two edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
+| `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the overflow rule (six fit steps, then the four narrow-pane steps), tooltips, context menus, the two edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
 | `src/widgets/address_bar_model.h` | Core-only model: `AddressBarState` (the value type pushed per refresh, `operator==` guards the relayout), `siblingFieldsOf` / `rootClassEntries` / `trailPathText` / `resolveDrillPath` over a `NodeTree`, and `AddressBarTreeQueries` (what the menus and the path edit pull on demand). |
 | `src/nav_history.h` | `NavEntry` (a PLACE: view root, trail, base + formula, saved-source index, scroll anchor, label) and `NavHistory` (push dedupes the head, truncates forward, cap 50, `back()` / `forward()` skip stale entries, `forgetSource` / `forgetAllSources` follow the saved-source list). |
 | `src/address_callbacks.h` | `makeAddressCallbacks(Provider*, ptrSize)` — the one `AddressParserCallbacks` block (module lookup, memory read, kernel paging) every evaluator shares. |
 | `src/controller.cpp` | `addressBarState()` / `pushAddressBarState()`, `rebaseTo`, `switchSibling`, `navigateToDrillPath`, `collapseToFocus`, `recordNav` / `goBack` / `goForward` / `goUp` / `jumpToHistory` / `restoreNav`, `containerOf` and the focus-path reconcile. |
 | `src/editor.cpp` | Owns the bar (layout item 0 above `m_sci`), bridges `Callbacks` to signals, routes the shortcuts through its KeyPress switch. Line 0 under it is the class header alone (see below). |
 | `src/paintutil.h` | `kGutter`, the device-exact edge fills (seam, divider, focus ring), `drawPixmapSnapped`, `pressedFill`. |
-| `tools/address_bar_render.cpp` | Harness: `address_bar_render <prefix> [theme]` — 1 / 3 / 6-crumb bars at 300 / 480 / 760 / 1080 / 1920 px, one sheet per width, every cell's rect + dpr on stdout. |
+| `tools/address_bar_render.cpp` | Harness: `address_bar_render <prefix> [theme]` — 1 / 3 / 6-crumb bars at 240 / 300 / 480 / 760 / 1080 / 1920 px, one sheet per width, every cell's rect + dpr on stdout (UTF-8, so `«` and `…` survive a redirect). |
 | `tools/editor_render.cpp drill` | The in-context render (F06 in the book): a real controller + editor, the trail grown by a click, the bar grabbed 4× to `bc_bar_4x.png` and the chip's five liveness states to `bc_bar_states_4x.png`. |
-| `tests/test_breadcrumb.cpp`, `tests/test_address_bar_model.cpp`, `tests/test_hairline_dpr.cpp` | Controller + widget (geometry, pixels, menus, edits, history, keyboard, split panes), the pure model + `NavHistory`, and the focus ring at 100 / 125 %. |
+| `tests/test_breadcrumb.cpp`, `tests/test_address_bar_model.cpp` | Controller + widget (geometry, pixels, menus, edits, history, keyboard, split panes, the narrow-pane invariant, and the focus ring at 100 / 125 % — `testKeyboardFocusRingPixels` / `testKeyboardFocusRingIsOneDeviceRowAt125Percent`), and the pure model + `NavHistory`. |
 
 ## Item ids
 
@@ -44,14 +44,14 @@ Every cell is addressed by a string id — the namespace `itemRect(id)`,
 
 | Id | Cell | Width | Click |
 |---|---|---|---|
-| `back` `fwd` | Back / Forward, `arrow-left/right.svg` 14 px | 22 | one history step; right-click or press-and-hold on `back` opens the history list (so it stays reachable when `hist` is dropped) |
+| `back` `fwd` | Back / Forward, `arrow-left/right.svg` 14 px | 22 | one history step; right-click or press-and-hold on `back` opens the history list (so it stays reachable when `hist` is dropped). The overflow rule drops Forward at step 7d and Back — with the divider — last, at 7e, so the history list keeps an on-bar route until the very end; Alt+Left / Right still work |
 | `hist` | `chevron-down.svg` 12 px | 14 | the history menu: Back entries nearest first, a separator, Forward entries nearest first |
 | `up` | `arrow-up.svg` | 22 | the parent crumb (`collapseToFocus` on the deepest hop) |
 | — | field divider: one device column, `containerBorderColor`, inset 4 px | 6 + 1 + 6 | everything right of it is "the field" |
-| `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source" | 4 + 16 + 4 + text + 2 | the source chooser, anchored under the chip; the chip reads pressed while it is up |
+| `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source". Icon-only in a narrow pane (step 7a): the name lives in the tooltip, `sourceDisplayText()` is empty | 4 + 16 + 4 + text + 2 (icon-only: 4 + 16 + 2) | the source chooser, anchored under the chip; the chip reads pressed while it is up |
 | `src.chev` | `chevron-down` `textFaint` | 14 | same as `src` (one hover group, one keyboard stop) |
-| `root.chev` | `chevron-right`, flips to `chevron-down` on hover | 14 | menu of the root classes → `setViewRootId` |
-| `base` | the formula if set else `0x…`, plus a `textMuted` `→ 0x…` suffix (what the formula resolves to; only beside a formula) | 6 + text + suffix + 6 | the base edit |
+| `root.chev` | `chevron-right`, flips to `chevron-down` on hover; dropped in a narrow pane (step 7b — line 0's chevron still opens the chooser) | 14 | menu of the root classes → `setViewRootId` |
+| `base` | the formula if set else `0x…`, plus a `textMuted` `→ 0x…` suffix (what the formula resolves to; only beside a formula); in a narrow pane (step 7c) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + suffix + 6 | the base edit — always on the FULL formula |
 | `overflow` | `«` in `textDim`, present only when crumbs are folded | 18 | menu of the hidden crumbs, root first → `onCrumb(i)` |
 | `crumb:<i>` | one crumb: `Class.field` for an ancestor, bare `Class` for the deepest | 6 + text + 6 | ancestor → collapse below + scroll (one undo entry, one history entry); the deepest is inert (no fill, no hand) and only scrolls its header up |
 | `chev:<i>` | after crumb *i*, same › → ˅ flip | 14 | menu of the drillable fields of the class at crumb *i*, the trail's hop checked; the trailing one drills further |
@@ -87,12 +87,34 @@ three characters, not half of it).
 4. **Middle-elide the deepest** to 60 px.
 5. **Drop `up` and `hist`** (below ~420 px).
 6. **Drop the trailing chevron.**
+7. **Narrow panes** — the six steps above bottom out near 395 px with a
+   process source and a formula base. Below that the field keeps only what
+   names the place, in this order:
+   - 7a. the chip goes **icon-only**: the icon, its liveness dot and
+     `src.chev` stay, the name moves to the tooltip;
+   - 7b. `root.chev` is dropped (line 0's chevron still opens the class
+     chooser);
+   - 7c. the base shows its **bare literal** — the `0x…` the formula
+     resolves to (or the literal itself), middle-elided to 60 px;
+   - 7d. Forward is dropped (24 px). Back stays: its right-click /
+     press-and-hold is the history list's only on-bar route once `hist`
+     is gone;
+   - 7e. last resort: Back and the divider go; the chip's icon takes the
+     gutter. Alt+Left / Alt+Right and the mouse buttons still navigate.
 
-Best effort after that: the deepest crumb is never dropped, because it is the
-one thing the bar exists to name. With a process source and a formula base
-the floor is about 395 px; narrower than that, the deepest crumb and `recent`
-are laid out past the right edge (the 300-px sheet from the harness shows
-it). The elision is DISPLAY only — `state()` carries the full strings and the
+Folding is width-driven, not a count: the 6-crumb trail in the harness folds
+at 1080 and 760 px too, the 3-crumb one first near 480. **Invariant:** the
+deepest crumb (≥ 60 px, middle-elided) and `recent` are never laid out past
+the right edge — `relayout()` asserts it (debug) and
+`test_breadcrumb::testNarrowPanesKeepTheDeepestCrumbAndRecent` pins it at 480
+/ 300 / 240 px, at the floor, and at every px between the floor and 300
+(Forward always goes before Back). The floor is `AddressBar::kNarrowFloorW`
+(228 px: a 4-px gutter, the icon 22, its chevron 14 plus 4 px of pad, the
+bare base 72, `«` 18, the deepest crumb 72, `recent` 16 and the 6-px margin);
+narrower than that nothing can hold the two and the layout is best effort.
+The deepest crumb is never
+dropped at any width, because it is the one thing the bar exists to name.
+Every elision is DISPLAY only — `state()` carries the full strings and the
 base edit always opens on the full formula (the command row used to feed its
 ellipsis to the parser and silently no-op).
 

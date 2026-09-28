@@ -4382,18 +4382,28 @@ private slots:
     // The MCP status tool writes "[▸] [Claude: text]" onto line 0. With no
     // address cell left there is nothing for a span parser to anchor on:
     // the text is not tinted editable, and a click on it starts nothing —
-    // even when the text carries the old source-control glyph or a hex
-    // number where the address cell used to be.
+    // even when the text carries the old source-control glyph, a hex
+    // number where the address cell used to be, or a class keyword (the
+    // root parsers once took the LAST "class " on the row: "renamed class
+    // Player" grew a teal, editable name span "Player]" whose commit
+    // renamed the real root struct).
     void testStatusRowIsInert() {
         m_editor->applyDocument(m_result);
         auto* sci = m_editor->scintilla();
-        for (const QString& status : {QStringLiteral("[\u25B8] [Claude: rebased to 0x1000]"),
-                                      QStringLiteral("[\u25B8] [Claude: 'game.exe'\u25BE 0x1000]")}) {
-            m_editor->setCommandRowText(status);
+        struct Row { QString text; QString probe; };   // probe: the word the click lands on
+        const Row rows[] = {
+            { QStringLiteral("[\u25B8] [Claude: rebased to 0x1000]"),       QStringLiteral("0x1000") },
+            { QStringLiteral("[\u25B8] [Claude: 'game.exe'\u25BE 0x1000]"), QStringLiteral("0x1000") },
+            { QStringLiteral("[\u25B8] [Claude: renamed class Player]"),    QStringLiteral("Player") },
+            { QStringLiteral("[\u25B8] [Claude: struct Player rebased]"),   QStringLiteral("Player") },
+        };
+        for (const Row& row : rows) {
+            m_editor->setCommandRowText(row.text);
             QApplication::processEvents();
             const QString t = sci->text(0);
+            QVERIFY2(!commandRowRootTypeSpan(t).valid, qPrintable(t));
             QVERIFY2(!commandRowRootNameSpan(t).valid, qPrintable(t));
-            const int addr = t.indexOf(QStringLiteral("0x1000"));
+            const int addr = t.indexOf(row.probe);
             QVERIFY(addr > 0);
             const int textEnd = t.indexOf(QLatin1Char(']'), addr);
             QVERIFY(textEnd > addr);
@@ -4410,6 +4420,11 @@ private slots:
             QApplication::processEvents();
             QVERIFY2(!m_editor->isEditing(), "a click on the status text started an edit");
             QCOMPARE(chooser.count(), 0);
+            // The edit entry point refuses too (F2 / the context menu route
+            // there): no span to edit, no edit — and no rename to commit.
+            QVERIFY2(!m_editor->beginInlineEdit(EditTarget::RootClassName, 0), qPrintable(t));
+            QVERIFY(!m_editor->isEditing());
+            QCOMPARE(sci->text(0), t);
         }
         m_editor->applyDocument(m_result);
     }

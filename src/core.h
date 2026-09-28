@@ -1300,7 +1300,7 @@ struct ValueHistory {
 // ── LineMeta ──
 
 enum class LineKind : uint8_t {
-    CommandRow,   // line 0: source + address + root class type + name
+    CommandRow,   // line 0: chevron + root class keyword + name (the class header alone)
     Blank,        // (unused — kept for enum stability)
     Header, Field, Continuation, Footer, ArrayElementSeparator
 };
@@ -1733,20 +1733,23 @@ inline ColumnSpan commandRowChevronSpan(const QString& lineText) {
 
 // ── CommandRow root-class spans ──
 // The row reads "[▸] struct ClassName {": the keyword follows the chevron
-// directly. The keyword is found by its last whole-word match, so a class
-// name that happens to contain "struct" still parses.
+// directly, and that is the ONLY place it is accepted — anchored on
+// commandRowChevronSpan's end, the one shape buildCommandRowText makes.
+// Anything else on line 0 (the MCP status row "[▸] [Claude: text]") has no
+// root spans, whatever words it carries. The parser once took the LAST
+// whole-word keyword anywhere on the row, so a status saying "renamed
+// class Player" grew a tinted, editable name span "Player]" whose commit
+// renamed the real root struct. A class name that contains a keyword
+// ("StructOfClass", "enum_class_t") still reads whole: only the first
+// word after the chevron is the keyword.
 
 inline int commandRowRootStart(const QString& lineText) {
-    int best = -1;
-    int i;
-    // Match "struct " / "class " / "enum " as whole words before the class name
-    i = lineText.lastIndexOf(QStringLiteral("struct "));
-    if (i > best) best = i;
-    i = lineText.lastIndexOf(QStringLiteral("class "));
-    if (i > best) best = i;
-    i = lineText.lastIndexOf(QStringLiteral("enum "));
-    if (i > best) best = i;
-    return best;
+    const ColumnSpan chev = commandRowChevronSpan(lineText);
+    if (!chev.valid) return -1;
+    const QStringView rest = QStringView(lineText).mid(chev.end);
+    for (const QLatin1String kw : {QLatin1String("struct "), QLatin1String("class "), QLatin1String("enum ")})
+        if (rest.startsWith(kw)) return chev.end;
+    return -1;
 }
 
 inline ColumnSpan commandRowRootTypeSpan(const QString& lineText) {

@@ -1100,6 +1100,161 @@ private slots:
         QVERIFY(!bar.itemRect(QStringLiteral("overflow")).isNull());
     }
 
+    // The narrow-pane steps (7a–7e). Six fit steps bottom out near 395 px
+    // with a process source and a formula base; below that the harness used
+    // to show the deepest crumb and `recent` laid out PAST the right edge —
+    // the widget's own rule says the deepest crumb is never dropped, and a
+    // crumb off the strip is dropped in every way that matters. Now the
+    // chip goes icon-only, root.chev goes, the base shows its bare literal,
+    // Forward goes and, last, Back and the divider go; the deepest crumb
+    // and `recent` end inside the strip down to kNarrowFloorW.
+    void testNarrowPanesKeepTheDeepestCrumbAndRecent() {
+        AddressBar bar;
+        const QString formula = QStringLiteral("<REECLASS.exe>+0x1234");
+        AddressBarState s = stateWith({ crumb(QStringLiteral("RcxEditor.vptr"), 0, 1),
+                                        crumb(QStringLiteral("QWidgetPrivate.parent"), 1, 2),
+                                        crumb(QStringLiteral("QWidget"), 2, 3) });
+        s.baseFormula  = formula;
+        s.resolvedBase = 0x7FF6DEAD1234ULL;
+        s.canBack = true;
+        bar.setState(s);
+        const QFontMetrics fm(bar.font());
+        auto rect   = [&](const char* id) { return bar.itemRect(QLatin1String(id)); };
+        auto inside = [&](const char* id) {
+            const QRect r = rect(id);
+            return !r.isNull() && r.left() >= 0 && r.right() < bar.width();
+        };
+        // The invariant, as one verdict (a QVERIFY inside a lambda would
+        // leave the lambda, not the test): empty = holds, else what broke.
+        auto namesThePlace = [&]() -> QString {
+            if (!inside("crumb:2")) return QStringLiteral("the deepest crumb ran past the right edge");
+            if (!inside("recent"))  return QStringLiteral("`recent` ran past the right edge");
+            if (rect("crumb:2").right() >= rect("recent").left()) return QStringLiteral("deepest crumb under recent");
+            if (!rect("space").isNull() && rect("space").right() >= rect("recent").left())
+                return QStringLiteral("space under recent");
+            if (bar.itemIdAt(rect("crumb:2").center()) != QLatin1String("crumb:2")) return QStringLiteral("crumb:2 not hit-testable");
+            if (bar.itemIdAt(rect("recent").center()) != QLatin1String("recent")) return QStringLiteral("recent not hit-testable");
+            if (bar.segments().last() != QLatin1String("QWidget")) return QStringLiteral("deepest label lost");
+            return QString();
+        };
+        auto holdsAt = [&](int w) {
+            const QString why = namesThePlace();
+            return why.isEmpty() ? QByteArray() : QStringLiteral("%1 at %2 px").arg(why).arg(w).toUtf8();
+        };
+
+        // 480 px: the six fit steps are enough — none of step 7 turns.
+        showBar(bar, 480);
+        QVERIFY2(holdsAt(480).isEmpty(), holdsAt(480).constData());
+        // The chip still names its source — possibly middle-elided already
+        // ("REEC….exe": with three crumbs and a formula base step 2 turns
+        // at 480), but 7a has not: the name is on the chip, not in the tip.
+        QVERIFY2(bar.sourceDisplayText().startsWith(QStringLiteral("REEC")), qPrintable(bar.sourceDisplayText()));
+        QVERIFY(!rect("root.chev").isNull());
+        QVERIFY(!rect("back").isNull());
+        QVERIFY(!rect("fwd").isNull());
+        QVERIFY2(bar.baseDisplayText() != QStringLiteral("0x7FF6DEAD1234"), qPrintable(bar.baseDisplayText()));
+
+        // 300 px: under the ~395-px floor. The chip is icon-only (7a) —
+        // the icon and its dot are still there, the name is the tooltip's.
+        bar.resize(300, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY2(holdsAt(300).isEmpty(), holdsAt(300).constData());
+        QVERIFY2(bar.sourceDisplayText().isEmpty(), qPrintable(bar.sourceDisplayText()));
+        QVERIFY(!bar.sourceIconRect().isNull());
+        QVERIFY(rect("src").contains(bar.sourceIconRect()));
+        QVERIFY(!bar.livenessDotRect().isNull());
+        QVERIFY(!rect("src.chev").isNull());
+        QCOMPARE(rect("src").width(), AddressBar::kChipPad + AddressBar::kChipIconPx + AddressBar::kChipChevGap);
+        hoverAt(bar, rect("src").center());
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("REECLASS.exe")), qPrintable(bar.toolTip()));
+        // Back / Forward survive 300 px (7d / 7e are the last resorts, not this).
+        QVERIFY(!rect("back").isNull());
+        QVERIFY(!rect("fwd").isNull());
+        QVERIFY(rect("up").isNull());       // step 5 went first
+        QVERIFY(rect("chev:2").isNull());   // and step 6
+        QVERIFY(!rect("overflow").isNull());
+        QCOMPARE(bar.state().baseFormula, formula);   // display only: the state keeps the formula
+
+        // 240 px: Forward is gone (7d), the base is its bare literal at
+        // ≤ 60 px (7c), and the deepest crumb still fits. Whether Back
+        // outlives 240 is the font's call — this trail lands within a few
+        // px of it after 7d — so 7e is pinned at the floor below, not here.
+        static_assert(AddressBar::kNarrowFloorW <= 240, "240 px is meant to sit on or above the floor");
+        bar.resize(240, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY2(holdsAt(240).isEmpty(), holdsAt(240).constData());
+        for (const char* id : {"fwd", "hist", "up", "root.chev", "chev:2"})
+            QVERIFY2(rect(id).isNull(), qPrintable(QStringLiteral("%1 laid out at 240 px").arg(QString::fromLatin1(id))));
+        if (rect("back").isNull()) {
+            QCOMPARE(bar.sourceIconRect().left(), kGutter);               // 7e: the icon takes the gutter
+        } else {
+            QVERIFY(rect("back").right() < bar.sourceIconRect().left());  // 7d: Back, the divider, then the icon
+        }
+        QVERIFY(bar.sourceDisplayText().isEmpty());
+        QVERIFY2(bar.baseDisplayText().startsWith(QStringLiteral("0x")), qPrintable(bar.baseDisplayText()));
+        QVERIFY(fm.horizontalAdvance(bar.baseDisplayText()) <= AddressBar::kBaseBareMinW);
+        QCOMPARE(bar.state().baseFormula, formula);
+        hoverAt(bar, rect("base").center());
+        QVERIFY2(bar.toolTip().contains(formula), qPrintable(bar.toolTip()));   // the tooltip keeps it
+        // The deepest crumb sits at its 60-px floor (pads either side).
+        QVERIFY(rect("crumb:2").width() <= 2 * AddressBar::kCrumbPad + AddressBar::kDeepestMinW);
+        QVERIFY(!rect("overflow").isNull());
+        QCOMPARE(bar.overflowMenuLabels(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                                         QStringLiteral("QWidgetPrivate.parent") }));
+        // Keyboard mode walks what is laid out: no Forward stop, the
+        // deepest crumb first.
+        QVERIFY(!bar.traversalIds().contains(QStringLiteral("fwd")));
+        QVERIFY(bar.traversalIds().contains(QStringLiteral("src")));
+        bar.enterKeyboardMode();
+        QCOMPARE(bar.focusId(), QStringLiteral("crumb:2"));
+        bar.leaveKeyboardMode(false);
+
+        // The floor: 7e is certain here (after 7d this trail is still
+        // wider than kNarrowFloorW) — Back and the divider are gone, the
+        // chip's icon is the first ink on the gutter, and the two still
+        // sit inside.
+        bar.resize(AddressBar::kNarrowFloorW, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY2(holdsAt(AddressBar::kNarrowFloorW).isEmpty(), holdsAt(AddressBar::kNarrowFloorW).constData());
+        for (const char* id : {"back", "fwd", "hist", "up", "root.chev", "chev:2"})
+            QVERIFY2(rect(id).isNull(), qPrintable(QStringLiteral("%1 laid out at the floor").arg(QString::fromLatin1(id))));
+        QCOMPARE(bar.sourceIconRect().left(), kGutter);
+        QCOMPARE(bar.traversalIds().first(), QStringLiteral("src"));
+
+        // 7d is its own step, in order: walking the floor..300 band a px at
+        // a time, Forward is never laid out without Back, Back stands alone
+        // somewhere in it (the 24 px Forward frees are a real band), and
+        // once Back goes the icon takes the gutter. Every width keeps the
+        // two inside (the invariant relayout asserts in debug).
+        bool backAlone = false;
+        for (int w = 300; w >= AddressBar::kNarrowFloorW; --w) {
+            bar.resize(w, AddressBar::kAddressBarHeight);
+            QApplication::processEvents();
+            QVERIFY2(holdsAt(w).isEmpty(), holdsAt(w).constData());
+            const bool back = !rect("back").isNull();
+            const bool fwd  = !rect("fwd").isNull();
+            QVERIFY2(back || !fwd, qPrintable(QStringLiteral("Forward without Back at %1 px").arg(w)));
+            if (back && !fwd) backAlone = true;
+            if (!back) { QCOMPARE(bar.sourceIconRect().left(), kGutter); }
+        }
+        QVERIFY(backAlone);
+        for (int w = 300; w <= 480; w += 7) {
+            bar.resize(w, AddressBar::kAddressBarHeight);
+            QApplication::processEvents();
+            QVERIFY2(holdsAt(w).isEmpty(), holdsAt(w).constData());
+        }
+
+        // Wide again: everything comes back.
+        bar.resize(800, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("REECLASS.exe"));
+        QVERIFY(!rect("root.chev").isNull());
+        QVERIFY(!rect("back").isNull());
+        QVERIFY(!rect("up").isNull());
+        QVERIFY(rect("overflow").isNull());
+        QVERIFY2(bar.baseDisplayText().startsWith(QStringLiteral("<REE")), qPrintable(bar.baseDisplayText()));
+    }
+
     void testEqualStatePushAppliesOnce() {
         // The controller pushes every refresh tick; an equal state is free.
         AddressBar bar;

@@ -30,8 +30,14 @@
 // the deepest), middle-elide the deepest to 60 px, drop `up` and `hist`,
 // drop the trailing chevron. Each knob turns only as far as the overshoot
 // needs — a 30-px squeeze costs the base three characters, not half of it.
-// Best effort after that — the deepest crumb is never dropped, because it
-// is the one thing the bar exists to name.
+// Below the ~395 px those six reach with a process source and a formula
+// base, the narrow-pane steps keep only what names the place: the chip
+// goes icon-only (the name moves to its tooltip), root.chev goes, the base
+// shows its bare literal elided to 60 px, Forward goes, and last Back and
+// the divider go too. The deepest crumb and `recent` are never laid out past
+// the right edge down to kNarrowFloorW (~230 px); the deepest crumb is
+// never dropped at any width, because it is the one thing the bar exists
+// to name.
 //
 // Chrome rules: the band is editorPaperColor (it sits inside the document
 // column — paper, not a third chrome strip), the seam under it is one device
@@ -575,9 +581,18 @@ public:
     static constexpr int kRightMargin  = 6;
     static constexpr int kCellTop      = 2;
     static constexpr int kCellH        = 22;
+    static constexpr int kBaseBareMinW = 60;   // the bare literal, narrow-pane step 7c
     static constexpr int kEditMinW     = 180;  // an edit overlay never opens narrower
     static constexpr int kEditPreviewMinW = 48; // room the preview beside the overlay needs to be worth painting
     static constexpr double kDisabledOpacity = 0.40;
+    // Where the narrow-pane steps bottom out with a folded trail: the chip's
+    // icon on the gutter, its chevron, the bare base, «, the deepest crumb
+    // at its floor and `recent`. Down to this width the deepest crumb and
+    // `recent` end inside the strip; narrower, nothing can hold them.
+    static constexpr int kNarrowFloorW =
+        (kGutter - kChipPad) + (kChipPad + kChipIconPx + kChipChevGap) + kChevW + kChipPad
+        + (kBasePad + kBaseBareMinW + kBasePad) + kOverflowW
+        + (kCrumbPad + kDeepestMinW + kCrumbPad) + kRecentW + kRightMargin;
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -948,6 +963,12 @@ private:
         int  deepestMaxW   = 0;   // 0 = never elide the deepest
         bool dropUpHist    = false;
         bool dropTrailChev = false;
+        // The narrow-pane steps (7a–7e), for a strip under ~395 px.
+        bool srcIconOnly   = false;  // the chip keeps icon, dot and chevron; the name is the tooltip's
+        bool dropRootChev  = false;  // line 0's chevron still opens the class chooser
+        bool bareBase      = false;  // the literal the base resolves to, elided to kBaseBareMinW
+        bool dropFwd       = false;  // Forward alone: Back stays, the history list's last on-bar route
+        bool dropNav       = false;  // Back and the divider too; the chip's icon takes the gutter
     };
 
     // ── Layout ──
@@ -972,6 +993,11 @@ private:
     QString baseFullText() const {
         return m_state.baseFormula.isEmpty() ? address_bar_detail::hex(m_state.baseAddress)
                                              : m_state.baseFormula;
+    }
+    // The number the base IS right now: what a formula resolves to, else the
+    // literal. The tooltip's head and the narrow-pane bare display share it.
+    QString baseLiteralText() const {
+        return address_bar_detail::hex(m_state.resolvedBase ? m_state.resolvedBase : m_state.baseAddress);
     }
     // What a formula resolves to right now, one tone down beside it. Only
     // for a formula — beside a literal it would repeat the number.
@@ -1010,40 +1036,57 @@ private:
 
         // Nav cluster. Disabled cells stay laid out (Back/Forward always,
         // history + Up unless the strip is too narrow) so the field never
-        // shifts left when history appears.
-        add(QStringLiteral("back"), Cell::Back, -1, kNavBtnW, m_state.canBack);
-        x += kNavGap;
-        add(QStringLiteral("fwd"), Cell::Fwd, -1, kNavBtnW, m_state.canForward);
-        if (!b.dropUpHist) {
-            x += kNavGap;
-            add(QStringLiteral("hist"), Cell::Hist, -1, kHistW, m_state.canBack || m_state.canForward);
-            x += kNavGap;
-            add(QStringLiteral("up"), Cell::Up, -1, kNavBtnW, m_state.canUp);
-        }
+        // shifts left when history appears. The narrow-pane steps take it
+        // apart from the right: Forward first (7d) — Back outlives it
+        // because its right-click / hold is the history list's only
+        // on-bar route once `hist` is gone — then Back and the divider
+        // (7e): the chip's icon is the first ink then, and it takes the
+        // gutter.
+        if (b.dropNav) {
+            x = kGutter - kChipPad;
+        } else {
+            add(QStringLiteral("back"), Cell::Back, -1, kNavBtnW, m_state.canBack);
+            if (!b.dropFwd) {
+                x += kNavGap;
+                add(QStringLiteral("fwd"), Cell::Fwd, -1, kNavBtnW, m_state.canForward);
+            }
+            if (!b.dropUpHist) {
+                x += kNavGap;
+                add(QStringLiteral("hist"), Cell::Hist, -1, kHistW, m_state.canBack || m_state.canForward);
+                x += kNavGap;
+                add(QStringLiteral("up"), Cell::Up, -1, kNavBtnW, m_state.canUp);
+            }
 
-        // Field divider — everything right of it is "the field".
-        x += kDividerPad;
-        L.dividerX = x;
-        x += 1 + kDividerPad;
+            // Field divider — everything right of it is "the field".
+            x += kDividerPad;
+            L.dividerX = x;
+            x += 1 + kDividerPad;
+        }
 
         // Source chip: icon + name, then its chevron. Two cells (so the
         // chevron can grow its own menu later) painted as ONE hover group.
-        const QString srcText = elide(fm, sourceFullText(), b.srcMaxW);
+        // Icon-only (7a) keeps the icon, its liveness dot and the chevron;
+        // the name is still in the tooltip.
+        const QString srcText = b.srcIconOnly ? QString() : elide(fm, sourceFullText(), b.srcMaxW);
         add(QStringLiteral("src"), Cell::Src, -1,
-            kChipPad + kChipIconPx + kChipTextGap + fm.horizontalAdvance(srcText) + kChipChevGap,
+            kChipPad + kChipIconPx
+                + (srcText.isEmpty() ? 0 : kChipTextGap + fm.horizontalAdvance(srcText))
+                + kChipChevGap,
             true, srcText);
         add(QStringLiteral("src.chev"), Cell::SrcChev, -1, kChevW, true);
         x += kChipPad;
 
-        add(QStringLiteral("root.chev"), Cell::RootChev, -1, kChevW, true);
+        if (!b.dropRootChev) add(QStringLiteral("root.chev"), Cell::RootChev, -1, kChevW, true);
 
         // Base: the formula if one is set, else the literal, then the
         // address the formula resolves to. Elided for DISPLAY only — the
         // state carries the full string and the edit (P3) opens on that,
         // never on the elided text (the command row fed its ellipsis to
-        // the parser and silently no-op'd).
-        const QString baseText   = elide(fm, baseFullText(), b.baseMaxW);
-        const QString baseSuffix = b.showResolved ? baseSuffixText() : QString();
+        // the parser and silently no-op'd). Bare (7c): the literal the
+        // base resolves to, elided to kBaseBareMinW, no suffix.
+        const QString baseText   = b.bareBase ? elide(fm, baseLiteralText(), kBaseBareMinW)
+                                              : elide(fm, baseFullText(), b.baseMaxW);
+        const QString baseSuffix = (b.showResolved && !b.bareBase) ? baseSuffixText() : QString();
         add(QStringLiteral("base"), Cell::Base, -1,
             kBasePad + fm.horizontalAdvance(baseText) + fm.horizontalAdvance(baseSuffix) + kBasePad,
             true, baseText);
@@ -1135,8 +1178,42 @@ private:
         b.dropUpHist = true;
         L = computeLayout(b); if (fits()) { m_layout = L; return; }
         b.dropTrailChev = true;
+        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        // 7. Narrow panes — below the ~395 px the six steps above reach with
+        //    a process source and a formula base. The field keeps only what
+        //    names the place, so the deepest crumb and `recent` stay inside
+        //    the strip instead of running past its right edge:
+        // 7a. the chip goes icon-only (the name is the tooltip's);
+        b.srcIconOnly = true;
+        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        // 7b. root.chev goes (line 0's chevron still opens the chooser);
+        b.dropRootChev = true;
+        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        // 7c. the base shows its bare literal, elided to 60 px — the state
+        //     and the edit keep the full formula;
+        b.bareBase = true;
+        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        // 7d. Forward goes (24 px) — Back stays, so the history list keeps
+        //     its on-bar route (right-click / hold) one step longer;
+        b.dropFwd = true;
+        L = computeLayout(b); if (fits()) { m_layout = L; return; }
+        // 7e. last resort: Back and the divider go.
+        b.dropNav = true;
         L = computeLayout(b);
-        m_layout = L;   // still too wide — best effort
+        m_layout = L;   // narrower than kNarrowFloorW — best effort
+        Q_ASSERT(avail < kNarrowFloorW || namesThePlace(L));
+    }
+
+    // The invariant the narrow-pane steps exist for: the deepest crumb and
+    // `recent` end inside the strip. Holds for every width down to
+    // kNarrowFloorW (relayout asserts it; test_breadcrumb pins it).
+    bool namesThePlace(const Layout& L) const {
+        const int deepestIdx = m_state.crumbs.size() - 1;
+        for (const LaidItem& li : L.items) {
+            const bool named = (li.kind == Cell::Crumb && li.index == deepestIdx) || li.kind == Cell::Recent;
+            if (named && (li.rect.left() < 0 || li.rect.right() >= width())) return false;
+        }
+        return true;
     }
 
     const LaidItem* itemById(const QString& id) const {
@@ -1444,7 +1521,7 @@ private:
         case Cell::RootChev: return QStringLiteral("Other classes");
         case Cell::Base: {
             // The full formula lives here when the segment had to elide it.
-            const QString addr = hex(m_state.resolvedBase ? m_state.resolvedBase : m_state.baseAddress);
+            const QString addr = baseLiteralText();
             const QString head = m_state.baseFormula.isEmpty()
                 ? QStringLiteral("Base address  %1").arg(addr)
                 : QStringLiteral("Base address  %1  \u2192  %2").arg(m_state.baseFormula, addr);

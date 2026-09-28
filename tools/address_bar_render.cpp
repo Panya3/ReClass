@@ -1,13 +1,21 @@
 // Render harness for rcx::AddressBar (the strip above the command row).
 // Builds the bar standalone — no controller, no editor, no NodeTree — feeds
 // it a synthetic AddressBarState of 1, 3 and 6 crumbs, and grabs the three
-// stacked at 300 / 480 / 760 / 1080 / 1920 logical px so the overflow rule
-// (« from 480 down, elided base and source, dropped `up` / `hist` under
-// 420 px), the seam, the chip's liveness dot and the tone ladder can be
-// eyeballed (1080 = the user's ~1080-logical window at 125 %). Needs the
-// "windows" platform (the offscreen plugin isn't installed) — run it on the
-// hidden desktop via tools/run_tests_hidden.py's run_hidden(). Set
-// QT_SCALE_FACTOR for HiDPI.
+// stacked at 240 / 300 / 480 / 760 / 1080 / 1920 logical px so the overflow
+// rule, the seam, the chip's liveness dot and the tone ladder can be
+// eyeballed (1080 = the user's ~1080-logical window at 125 %). Folding is
+// WIDTH-driven, not a fixed threshold: the 6-crumb trail is ~600 px of
+// labels, so its « shows at 1080 and 760 too, while the 3-crumb row first
+// folds near 480. Under ~420 px `up` / `hist` go; under the ~395-px floor
+// the six fit steps reach (process source + formula base) the narrow-pane
+// steps turn — the chip drops its name, then root.chev, then the base
+// shows its bare literal, then Forward, and at the 228-px floor
+// (AddressBar::kNarrowFloorW) Back and the divider go — so the deepest
+// crumb and `recent` stay inside the strip down to that floor (the 240-
+// and 300-px sheets show it).
+// Needs the "windows" platform (the offscreen plugin isn't installed) —
+// run it on the hidden desktop via tools/run_tests_hidden.py's
+// run_hidden(). Set QT_SCALE_FACTOR for HiDPI.
 //
 // Usage: address_bar_render <out-prefix> [themeJsonPath|themeName]
 //   themeName matches the "name" field or the basename of a JSON in
@@ -19,11 +27,12 @@
 // every laid-out id plus the dpr, so a pixel scan of the PNG can crop a
 // cell exactly (multiply by the dpr, add the row's device y offset).
 //
-// The strip's floor is about 395 px with a process source and a formula
-// base (nav 48 + divider 13 + chip 110 + root chevron 14 + base 102 + «
-// 18 + deepest 68 + recent 22): below it the deepest crumb and `recent`
-// are laid out past the right edge — the documented best effort, and what
-// the 300-px sheet shows.
+// The six fit steps bottom out near 395 px with a process source and a
+// formula base (nav 48 + divider 13 + chip 110 + root chevron 14 + base
+// 102 + « 18 + deepest 68 + recent 22); the narrow-pane steps take that
+// down to kNarrowFloorW = 228 (gutter 4 + chip icon 22 + chevron 14 + pad 4
+// + bare base 72 + « 18 + deepest 72 + recent 16 + margin 6). Narrower
+// still is best effort.
 #include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
@@ -34,6 +43,7 @@
 #include <QJsonObject>
 #include <QPainter>
 #include <QPixmap>
+#include <QStringConverter>
 #include <QTextStream>
 
 #include "themes/theme.h"
@@ -147,6 +157,9 @@ int main(int argc, char** argv) {
     QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/IBMPlexMono.ttf"));
 
     QTextStream out(stdout);
+    // The report quotes « and …; the locale codec turned both into '?'
+    // once stdout was a file (the driver redirects it on the hidden desktop).
+    out.setEncoding(QStringConverter::Utf8);
     if (argc < 2) {
         out << "usage: address_bar_render <outPrefix> [themeName|path]\n";
         out.flush();
@@ -171,7 +184,7 @@ int main(int argc, char** argv) {
         << "  height: " << AddressBar::kAddressBarHeight
         << "  font: " << probe.font().family() << " " << probe.font().pointSizeF() << "pt\n";
 
-    for (int w : {300, 480, 760, 1080, 1920}) {
+    for (int w : {240, 300, 480, 760, 1080, 1920}) {
         QVector<QPixmap> rows;
         QStringList reports;
         for (int depth : depths) {
