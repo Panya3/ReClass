@@ -8,18 +8,31 @@
 // synthesized MouseMove, pixels through grab(). Never waits for window
 // exposure (show() + qWait + processEvents is all that's needed), so the
 // whole target runs on the hidden desktop.
+//
+// One hidden-desktop fact the P3 tests lean on: a Qt::Popup (the places
+// QMenu) is closed by the platform at the first event pump after show(),
+// so a menu is inspected and driven synchronously, before any pump. Focus
+// is asserted through the focus chain (window()->focusWidget()), which is
+// kept whether or not the window is active; the focus-out test hands the
+// overlay the event itself if the platform delivered none.
 
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
 #include <QApplication>
 #include <QEvent>
+#include <QFile>
+#include <QFocusEvent>
 #include <QImage>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QLineEdit>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QSettings>
 #include <QSplitter>
 #include <QVBoxLayout>
 #include <QtEndian>
+#include <Qsci/qsciscintilla.h>
 
 #include "address_callbacks.h"
 #include "controller.h"
@@ -90,6 +103,56 @@ void showBar(AddressBar& bar, int width) {
     bar.show();
     QTest::qWait(30);
     QApplication::processEvents();
+}
+
+// A shipped theme by file name (test_ribbon_layout's helper), so a colour
+// rule can be checked under both polarities regardless of what
+// ThemeManager holds in this bare target.
+Theme loadTheme(const QString& baseName) {
+    QFile f(QStringLiteral(RCX_SOURCE_DIR) + QStringLiteral("/src/themes/defaults/") + baseName
+            + QStringLiteral(".json"));
+    if (!f.open(QIODevice::ReadOnly)) return Theme();
+    return Theme::fromJson(QJsonDocument::fromJson(f.readAll()).object());
+}
+
+// The first device column (left → right) holding a pixel that is not the
+// ground, scanning every row but the seam (the bottom device row is the
+// hairline end to end). -1 when nothing is inked.
+int firstInkColumn(const QImage& img, const QColor& bg) {
+    for (int x = 0; x < img.width(); ++x)
+        for (int y = 0; y < img.height() - 1; ++y) {
+            const QRgb px = img.pixel(x, y);
+            if (qAbs(qRed(px) - bg.red()) + qAbs(qGreen(px) - bg.green())
+                + qAbs(qBlue(px) - bg.blue()) >= 12)
+                return x;
+        }
+    return -1;
+}
+
+// The bar's bottom device row under a logical x-range: where the seam and,
+// while editing, the focus ring live.
+QRect seamRowUnder(const QImage& img, const QRect& logical) {
+    const QRect d = devRect(img, logical);
+    return QRect(d.left(), img.height() - 1, d.width(), 1);
+}
+
+QStringList actionTexts(const QMenu* menu) {
+    QStringList out;
+    for (QAction* a : menu->actions()) out << a->text();
+    return out;
+}
+QAction* actionWithText(const QMenu* menu, const QString& text) {
+    for (QAction* a : menu->actions())
+        if (a->text() == text) return a;
+    return nullptr;
+}
+// The bar frees a menu with deleteLater on hide, which a processEvents()
+// at the test's loop level does not run — a hidden predecessor can still
+// be a child. The one that is up is the one that is visible.
+QMenu* visibleMenu(const QWidget* w, const QString& name) {
+    for (QMenu* m : w->findChildren<QMenu*>(name))
+        if (m->isVisible()) return m;
+    return nullptr;
 }
 
 }  // namespace
@@ -779,8 +842,11 @@ private slots:
         showBar(bar, 800);
         QCOMPARE(bar.height(), 26);
         QCOMPARE(bar.height(), PanelSearchField::kFieldHeight);
-        // kGutter spent once: the Back cell is the first ink.
-        QCOMPARE(bar.itemRect(QStringLiteral("back")).left(), kGutter);
+        // kGutter spent once, on the Back glyph's INK (pinned by
+        // testFirstInkLandsOnTheGutter): the cell starts earlier by the
+        // glyph's centring pad and the SVG's inset, like a doc tab's rect.
+        QVERIFY(bar.itemRect(QStringLiteral("back")).left() <= kGutter);
+        QVERIFY(bar.itemRect(QStringLiteral("back")).left() >= 0);
         // Every cell of the anatomy is laid out, left → right, without
         // overlaps, on one 22-px row.
         const QStringList order = {
@@ -807,22 +873,61 @@ private slots:
         // Hit-testing round-trips; the gutter belongs to nobody.
         QCOMPARE(bar.itemIdAt(bar.itemRect(QStringLiteral("crumb:1")).center()), QStringLiteral("crumb:1"));
         QCOMPARE(bar.itemIdAt(bar.itemRect(QStringLiteral("base")).center()), QStringLiteral("base"));
-        QVERIFY(bar.itemIdAt(QPoint(2, 13)).isEmpty());
+        QVERIFY(bar.itemIdAt(QPoint(0, 13)).isEmpty());
         QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+        QVERIFY(!bar.isEditing());
+    }
+
+    void testFirstInkLandsOnTheGutter() {
+        // The bar's leftmost ink — the Back arrow, enabled so it paints in
+        // full — sits on the device column kGutter maps to, the column the
+        // doc-tab title's first ink sits on. The cell pad and the SVG's own
+        // inset used to push it ~5.6 px right of every other strip.
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        AddressBarState s = stateWith(twoLevel());
+        s.canBack = true;
+        bar.setState(s);
+        showBar(bar, 800);
+        const QImage img = grabOf(bar);
+        const int ink = firstInkColumn(img, editorPaperColor(bar.theme()));
+        const qreal dpr = img.devicePixelRatio() > 0 ? img.devicePixelRatio() : 1.0;
+        QVERIFY2(qAbs(ink - qRound(kGutter * dpr)) <= 1,
+                 qPrintable(QStringLiteral("first ink at device column %1, gutter is %2 (dpr %3)")
+                                .arg(ink).arg(qRound(kGutter * dpr)).arg(dpr)));
+        // Still no ink in the gutter itself: nothing hangs off the left edge.
+        QVERIFY(ink >= 1);
     }
 
     void testCrumbClickFiresIndexNotDeepest() {
         drillTwoLevels();   // RcxEditor.vptr › QWidgetPrivate.parent › QWidget
         QApplication::processEvents();
         AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
         QSignalSpy spy(m_editor, &RcxEditor::crumbClicked);
-        // The deepest crumb is inert: you are already there.
+        // The deepest crumb is "you are here": its click fires the index
+        // past the focus path, which collapseToFocus turns into a scroll
+        // to that class's header and nothing else — no collapse, no undo
+        // entry, the trail as it was. Visually it stays inert: no hover
+        // fill, arrow cursor.
         const QRect deep = bar->itemRect(QStringLiteral("crumb:2"));
         QVERIFY(!deep.isNull());
+        const int undoBefore = m_doc->undoStack.count();
+        const bool vptrWas = collapsed(m_id.vptr), parentWas = collapsed(m_id.parent);
+        hoverAt(*bar, deep.center());
+        QImage img = grabOf(*bar);
+        QVERIFY2(countColour(img, devRect(img, deep), t.hover) < 16, "deepest crumb took a hover fill");
+        QVERIFY(bar->cursor().shape() == Qt::ArrowCursor);
         QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, deep.center());
         QApplication::processEvents();
-        QCOMPARE(spy.count(), 0);
-        QCOMPARE(m_ctrl->focusPath().size(), 2);
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 2);                   // n - 1
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QCOMPARE(collapsed(m_id.vptr), vptrWas);
+        QCOMPARE(collapsed(m_id.parent), parentWas);
+        QCOMPARE(segments().size(), 3);
+        spy.clear();
         // Press inside, release outside → no click.
         const QRect r1 = bar->itemRect(QStringLiteral("crumb:1"));
         QVERIFY(!r1.isNull());
@@ -1291,6 +1396,515 @@ private slots:
         QApplication::processEvents();
         QCOMPARE(m_editor->addressBar()->crumbPathText(2),
                  trailPathText(m_doc->tree, m_ctrl->viewRootId(), m_ctrl->focusPath()));
+    }
+
+    // ── P3: the base edit ──
+
+    void testBaseClickOpensOverlayOnFullFormula() {
+        // The regression the overlay exists for: the display elides a long
+        // formula, the EDIT opens on every character of it — never on the
+        // ellipsis the command row used to hand the parser.
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        const QString formula = QStringLiteral("<REECLASS.exe>+0x1234+[0x10]*2");
+        QCOMPARE(formula.size(), 30);
+        s.baseFormula  = formula;
+        s.resolvedBase = 0x7FF6DEAD1234ULL;
+        bar.setState(s);
+        showBar(bar, 800);
+        const QString shown = bar.baseDisplayText();
+        QVERIFY2(shown.size() < formula.size() && shown.contains(QChar(0x2026)), qPrintable(shown));
+        QVERIFY(!bar.isEditing());
+        const QRect base = bar.itemRect(QStringLiteral("base"));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, base.center());
+        QApplication::processEvents();
+        QVERIFY(bar.isEditing());
+        QCOMPARE(bar.editText(), formula);
+        QCOMPARE(bar.editWidget()->selectedText(), formula);      // selectAll: typing replaces
+        QVERIFY(bar.editWidget()->isVisible());
+        QCOMPARE(bar.editWidget()->font(), bar.font());           // the chrome face
+        // Geometry: starts at the base cell, at least kEditMinW wide, inside
+        // the strip, on the cell row.
+        const QRect r = bar.editRect();
+        QCOMPARE(r, bar.editWidget()->geometry());
+        QCOMPARE(r.left(), base.left());
+        QVERIFY(r.width() >= AddressBar::kEditMinW);
+        QVERIFY(bar.rect().contains(r));
+        QCOMPARE(r.top(), AddressBar::kCellTop);
+        QCOMPARE(r.height(), AddressBar::kCellH);
+        // The bar is focusable only while the overlay is up.
+        QCOMPARE(bar.focusPolicy(), Qt::StrongFocus);
+        QCOMPARE(bar.window()->focusWidget(), bar.editWidget());
+        // A second click while open just re-selects; still one overlay.
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, base.center());
+        QVERIFY(bar.isEditing());
+        QCOMPARE(bar.findChildren<QLineEdit*>().size(), 1);
+        // The interior is PanelSearchField's rule set, verbatim.
+        QCOMPARE(bar.editWidget()->styleSheet(), panelFieldInteriorQss(bar.theme()));
+        QVERIFY(bar.editWidget()->styleSheet().contains(QStringLiteral("border-radius: 0px")));
+        QVERIFY(bar.editWidget()->styleSheet().contains(QStringLiteral("border: none")));
+    }
+
+    void testBaseCommitRebasesUndoably() {
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QSignalSpy commit(m_editor, &RcxEditor::baseCommitRequested);
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        const int undoBefore = m_doc->undoStack.count();
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isEditing());
+        QCOMPARE(bar->editText(), QStringLiteral("0x0"));
+        QTest::keyClicks(bar->editWidget(), QStringLiteral("0x1000"));
+        QCOMPARE(bar->editText(), QStringLiteral("0x1000"));
+        // A literal parses: the live preview is the controller's evaluator.
+        QVERIFY(bar->editTextValid());
+        QCOMPARE(bar->editPreviewText(), QStringLiteral("\u2192 0x1000"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QCOMPARE(commit.count(), 1);
+        QCOMPARE(commit.at(0).at(0).toString(), QStringLiteral("0x1000"));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(m_doc->tree.baseAddress, 0x1000ULL);
+        QVERIFY(m_doc->tree.baseAddressFormula.isEmpty());       // bare literal
+        QVERIFY(!bar->isEditing());                              // accepted → closed
+        QVERIFY(!bar->editWidget()->isVisible());
+        QCOMPARE(bar->state().baseAddress, 0x1000ULL);
+        QCOMPARE(bar->baseDisplayText(), QStringLiteral("0x1000"));
+        QCOMPARE(bar->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(m_editor->window()->focusWidget(), m_editor->scintilla());
+        // Undo puts the old base back on the segment through the push.
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(bar->state().baseAddress, 0ULL);
+    }
+
+    void testBaseCommitRefusedKeepsOverlay() {
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
+        QSignalSpy hint(m_ctrl, &RcxController::statusHint);
+        const int undoBefore = m_doc->undoStack.count();
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isEditing());
+        QTest::keyClicks(bar->editWidget(), QStringLiteral("garbage"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);          // nothing pushed
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QVERIFY(!hint.isEmpty());
+        QVERIFY2(hint.last().at(0).toString().startsWith(QStringLiteral("Base: ")),
+                 qPrintable(hint.last().at(0).toString()));
+        QVERIFY(bar->isEditing());                               // refused → stays open
+        QCOMPARE(bar->editText(), QStringLiteral("garbage"));
+        QVERIFY(!bar->editTextValid());
+        QVERIFY(!bar->editPreviewText().isEmpty());              // the parser's words
+        // The seam under the field is markerError, one device row.
+        const QImage img = grabOf(*bar);
+        const QRect seam = seamRowUnder(img, bar->editRect());
+        QVERIFY(countColour(img, seam, t.markerError) > seam.width() / 2);
+        QCOMPARE(countColour(img, seam, t.borderFocused), 0);
+        QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), t.indHoverSpan), 0);
+        // Typing again answers the refusal: the seam follows the new text.
+        QTest::keyClicks(bar->editWidget(), QStringLiteral("\b\b\b\b\b\b\b0x10"));
+        QVERIFY(bar->editTextValid());
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+    }
+
+    void testEditSeamFollowsValidity() {
+        // While typing, the parser's verdict picks the seam colour under
+        // the field, and a parsing formula shows what it resolves to.
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        const Theme& t = bar.theme();
+        AddressBar::Callbacks cb;
+        cb.evaluate = [](const QString& s) { return s == QStringLiteral("0x10") ? QStringLiteral("0x10") : QString(); };
+        bar.setCallbacks(std::move(cb));
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        // At rest: the plain seam, no ring.
+        QImage img = grabOf(bar);
+        QRect seam = seamRowUnder(img, bar.itemRect(QStringLiteral("base")));
+        QCOMPARE(countColour(img, seam, t.borderFocused), 0);
+        QCOMPARE(countColour(img, seam, t.markerError), 0);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isEditing());
+        QTest::keyClicks(bar.editWidget(), QStringLiteral("0x10"));
+        QVERIFY(bar.editTextValid());
+        QCOMPARE(bar.editPreviewText(), QStringLiteral("\u2192 0x10"));
+        img = grabOf(bar);
+        seam = seamRowUnder(img, bar.editRect());
+        QVERIFY(countColour(img, seam, t.borderFocused) > seam.width() / 2);
+        QCOMPARE(countColour(img, seam, t.markerError), 0);
+        // The preview sits right after the overlay in textMuted.
+        const QRect after(bar.editRect().right() + 1, AddressBar::kCellTop,
+                          bar.itemRect(QStringLiteral("recent")).left() - bar.editRect().right() - 1,
+                          AddressBar::kCellH);
+        QVERIFY(countColour(img, devRect(img, after), t.textMuted) > 0);
+        // An unclosed deref does not parse: the ring turns markerError and
+        // the parser's words replace the preview.
+        QTest::keyClicks(bar.editWidget(), QStringLiteral("\b\b\b\b[0x100"));
+        QCOMPARE(bar.editText(), QStringLiteral("[0x100"));
+        QVERIFY(!bar.editTextValid());
+        QVERIFY(!bar.editPreviewText().isEmpty());
+        QVERIFY(!bar.editPreviewText().startsWith(QStringLiteral("\u2192")));
+        img = grabOf(bar);
+        QVERIFY(countColour(img, seam, t.markerError) > seam.width() / 2);
+        QCOMPARE(countColour(img, seam, t.borderFocused), 0);
+    }
+
+    void testEscapeRestoresAndReturnsFocus() {
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        const QString shownBefore = bar->baseDisplayText();
+        QSignalSpy commit(m_editor, &RcxEditor::baseCommitRequested);
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isEditing());
+        QCOMPARE(bar->window()->focusWidget(), bar->editWidget());
+        QTest::keyClicks(bar->editWidget(), QStringLiteral("0x5555"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QApplication::processEvents();
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(commit.count(), 0);
+        QCOMPARE(bar->baseDisplayText(), shownBefore);
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QCOMPARE(bar->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(m_editor->window()->focusWidget(), m_editor->scintilla());
+        QVERIFY(!bar->editWidget()->isVisible());
+    }
+
+    void testFocusOutReverts() {
+        // Click-away is a cancel, never a commit (Explorer / Goto-dialog
+        // semantics): focus moving to a sibling field drops the typed text.
+        QWidget win;
+        auto* lay = new QVBoxLayout(&win);
+        lay->setContentsMargins(0, 0, 0, 0);
+        auto* bar = new AddressBar(&win);
+        QStringList commits;
+        AddressBar::Callbacks cb;
+        cb.onBaseCommit = [&](const QString& s) { commits << s; };
+        bar->setCallbacks(std::move(cb));
+        bar->setState(stateWith(twoLevel()));
+        auto* sibling = new QLineEdit(&win);
+        lay->addWidget(bar);
+        lay->addWidget(sibling);
+        win.resize(800, 80);
+        win.show();
+        QTest::qWait(30);
+        QApplication::processEvents();
+        const QString shownBefore = bar->baseDisplayText();
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isEditing());
+        QCOMPARE(win.focusWidget(), bar->editWidget());
+        QTest::keyClicks(bar->editWidget(), QStringLiteral("0x77"));
+        sibling->setFocus(Qt::MouseFocusReason);
+        QApplication::processEvents();
+        QCOMPARE(win.focusWidget(), sibling);
+        if (bar->isEditing()) {
+            // Not the active window (the hidden desktop): the focus chain
+            // moved but no FocusOut was delivered. Hand the overlay the
+            // event the click would have carried.
+            QFocusEvent out(QEvent::FocusOut, Qt::MouseFocusReason);
+            QApplication::sendEvent(bar->editWidget(), &out);
+        }
+        QVERIFY(!bar->isEditing());
+        QVERIFY(commits.isEmpty());
+        QCOMPARE(bar->baseDisplayText(), shownBefore);
+        QCOMPARE(bar->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(win.focusWidget(), sibling);                    // no focus steal on a click-away
+    }
+
+    void testStatePushDuringEditIsDeferred() {
+        // A live tick mid-edit must never stomp the typed text or move the
+        // overlay: the state is stored, the relayout waits for the edit to
+        // end, and then applies.
+        AddressBar bar;
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isEditing());
+        QTest::keyClicks(bar.editWidget(), QStringLiteral("0x42"));
+        const QRect overlay = bar.editRect();
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:2")).isNull());
+        AddressBarState s = stateWith({ crumb(QStringLiteral("RcxEditor.vptr"), 0),
+                                        crumb(QStringLiteral("QWidgetPrivate.parent"), 1),
+                                        crumb(QStringLiteral("QWidget"), 2) });
+        s.baseAddress = 0x1234; s.resolvedBase = 0x1234;
+        const int n = bar.stateApplyCount();
+        bar.setState(s);
+        QCOMPARE(bar.stateApplyCount(), n + 1);                  // stored…
+        QCOMPARE(bar.state().crumbs.size(), 3);
+        QCOMPARE(bar.editText(), QStringLiteral("0x42"));       // …the text untouched…
+        QCOMPARE(bar.editRect(), overlay);                       // …the overlay where it was…
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:2")).isNull());   // …the layout frozen.
+        QVERIFY(bar.isEditing());
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        QVERIFY(!bar.itemRect(QStringLiteral("crumb:2")).isNull());  // applied now
+        QCOMPARE(bar.baseDisplayText(), QStringLiteral("0x1234"));
+        QCOMPARE(bar.segments().size(), 3);
+    }
+
+    void testStalePushDuringEditKeepsCellsSane() {
+        // The frozen layout can outlive its crumbs: a push with FEWER crumbs
+        // mid-edit leaves cells whose index is past the new trail. Hovering
+        // one must not index out of range — empty tip — and the new state
+        // lands after Escape.
+        AddressBar bar;
+        bar.setState(stateWith({ crumb(QStringLiteral("RcxEditor.vptr"), 0),
+                                 crumb(QStringLiteral("QWidgetPrivate.parent"), 1),
+                                 crumb(QStringLiteral("QWidget"), 2) }));
+        showBar(bar, 900);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isEditing());
+        const QRect stale = bar.itemRect(QStringLiteral("crumb:2"));
+        QVERIFY(!stale.isNull());
+        QVERIFY(stale.left() > bar.editRect().right());          // uncovered, hoverable
+        bar.setState(stateWith({ crumb(QStringLiteral("RcxEditor"), 0) }));
+        QCOMPARE(bar.state().crumbs.size(), 1);
+        hoverAt(bar, stale.center());
+        QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
+        hoverAt(bar, bar.itemRect(QStringLiteral("chev:2")).center());
+        QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
+        grabOf(bar);                                             // paints the stale cells: no crash
+        // A click on a stale crumb cell is a no-op, not an out-of-range pick.
+        // The press lands on the bar (StrongFocus while editing), so it is
+        // also a click-away: the overlay loses focus and the edit reverts,
+        // which applies the lone-crumb state.
+        int picked = -1;
+        AddressBar::Callbacks cb;
+        cb.onCrumb = [&](int i) { picked = i; };
+        bar.setCallbacks(std::move(cb));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("crumb:1")).center());
+        QCOMPARE(picked, -1);
+        QVERIFY(!bar.isEditing());
+        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:2")).isNull());
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:1")).isNull());
+        QCOMPARE(bar.segments(), QStringList{ QStringLiteral("RcxEditor") });
+    }
+
+    void testDownOpensPlacesMenuAndPickInserts() {
+        // Down in the edit lists the Goto recents, the document's bookmarks
+        // and the source's modules, fuzzy-filtered by the typed text; a
+        // pick fills the overlay and does NOT commit. Driven before any
+        // event pump: the hidden desktop closes a popup at the first one.
+        GotoAddressDialog::clearRecent();
+        GotoAddressDialog::pushRecent(QStringLiteral("0x7FF60000"));
+        GotoAddressDialog::pushRecent(QStringLiteral("<REECLASS.exe>+0x40"));   // most recent first
+        Bookmark b; b.name = QStringLiteral("spawn"); b.addressFormula = QStringLiteral("<REECLASS.exe>+0x100");
+        m_doc->tree.bookmarks.append(b);
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QSignalSpy commit(m_editor, &RcxEditor::baseCommitRequested);
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isEditing());
+        QVERIFY(!visibleMenu(bar, QStringLiteral("rcxAddressBarEditMenu")));
+        bar->editWidget()->clear();                              // empty text: unfiltered
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        QMenu* menu = visibleMenu(bar, QStringLiteral("rcxAddressBarEditMenu"));
+        QVERIFY(menu);
+        QVERIFY(menu->isVisible());
+        const QStringList texts = actionTexts(menu);
+        QVERIFY2(texts.contains(QStringLiteral("<REECLASS.exe>+0x40")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("0x7FF60000")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("spawn  <REECLASS.exe>+0x100")), qPrintable(texts.join('|')));
+        // Recent before bookmarks, most recent first.
+        QVERIFY(texts.indexOf(QStringLiteral("<REECLASS.exe>+0x40")) < texts.indexOf(QStringLiteral("0x7FF60000")));
+        QVERIFY(texts.indexOf(QStringLiteral("0x7FF60000")) < texts.indexOf(QStringLiteral("spawn  <REECLASS.exe>+0x100")));
+        QVERIFY(!texts.contains(QStringLiteral("Clear recent")));       // the edit's menu inserts only
+        QAction* pick = actionWithText(menu, QStringLiteral("<REECLASS.exe>+0x40"));
+        QVERIFY(pick);
+        pick->trigger();
+        menu->hide();
+        QTest::qWait(10);                                        // runs the menu's deleteLater
+        QCOMPARE(bar->editText(), QStringLiteral("<REECLASS.exe>+0x40"));
+        QVERIFY(bar->isEditing());                               // inserted, not committed
+        QCOMPARE(commit.count(), 0);
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        // Filtered: a substring of the bookmark's name leaves only it
+        // (rcx::fuzzyScore is the strict matcher: contiguous substring or
+        // word-start initials — "spa" finds "spawn", "spwn" finds nothing).
+        bar->editWidget()->setText(QStringLiteral("spa"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        menu = visibleMenu(bar, QStringLiteral("rcxAddressBarEditMenu"));
+        QVERIFY(menu);
+        QStringList entries;
+        for (QAction* a : menu->actions()) if (!a->isSeparator() && a->data().isValid()) entries << a->text();
+        QCOMPARE(entries, QStringList{ QStringLiteral("spawn  <REECLASS.exe>+0x100") });
+        menu->hide();
+        QTest::qWait(10);
+        // Nothing matches → no menu at all.
+        bar->editWidget()->setText(QStringLiteral("zzzz"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        QVERIFY(!visibleMenu(bar, QStringLiteral("rcxAddressBarEditMenu")));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+    }
+
+    void testLineZeroAddressClickEditsInTheBar() {
+        // One base-edit implementation: a click on the command row's address
+        // span opens the BAR's overlay; no Scintilla inline edit starts.
+        QApplication::processEvents();
+        QsciScintilla* sci = m_editor->scintilla();
+        const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
+        QVERIFY(len > 0);
+        QByteArray buf(len + 1, '\0');
+        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
+        QString line = QString::fromUtf8(buf.constData(), len);
+        while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
+        const ColumnSpan as = commandRowAddrSpan(line);
+        QVERIFY2(as.valid, qPrintable(line));
+        // Character column → byte position (the row holds ▸ and ▾), then to
+        // a viewport point on that glyph's row.
+        const int col = (as.start + as.end) / 2;
+        const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
+                       + line.left(col).toUtf8().size();
+        const int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
+        const int y = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
+        const int lh = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+        AddressBar* bar = m_editor->addressBar();
+        QVERIFY(!bar->isEditing());
+        QTest::mouseClick(sci->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(x + 2, y + lh / 2));
+        QApplication::processEvents();
+        QVERIFY2(bar->isEditing(), "line-0 address click did not open the bar's edit");
+        QVERIFY2(!m_editor->isEditing(), "a Scintilla inline edit started as well");
+        QCOMPARE(bar->editText(), QStringLiteral("0x0"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        QVERIFY(!m_editor->isEditing());
+    }
+
+    void testRecentCellMenuGotoClearAndPickRebases() {
+        // The recent cell: the same places, unfiltered, plus "Go to
+        // address…" and "Clear recent"; a pick rebases through the
+        // controller, undoably.
+        GotoAddressDialog::clearRecent();
+        GotoAddressDialog::pushRecent(QStringLiteral("0x7FF60000"));
+        Bookmark b; b.name = QStringLiteral("spawn"); b.addressFormula = QStringLiteral("0x40");
+        m_doc->tree.bookmarks.append(b);
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
+        QSignalSpy pickSpy(m_editor, &RcxEditor::recentPickRequested);
+        QSignalSpy gotoSpy(m_editor, &RcxEditor::gotoDialogRequested);
+        const int undoBefore = m_doc->undoStack.count();
+        const QRect recent = bar->itemRect(QStringLiteral("recent"));
+        QVERIFY(!recent.isNull());
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
+        QMenu* menu = visibleMenu(bar, QStringLiteral("rcxAddressBarRecentMenu"));
+        QVERIFY(menu);
+        const QStringList texts = actionTexts(menu);
+        QVERIFY2(texts.contains(QStringLiteral("0x7FF60000")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("spawn  0x40")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("Go to address\u2026\tCtrl+G")), qPrintable(texts.join('|')));
+        QVERIFY2(texts.contains(QStringLiteral("Clear recent")), qPrintable(texts.join('|')));
+        QVERIFY(actionWithText(menu, QStringLiteral("Clear recent"))->isEnabled());
+        // The cell reads pressed while its menu is up (grab before the pump).
+        QImage img = bar->grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        QVERIFY2(countColour(img, devRect(img, recent), pressedFill(t)) > 0, "recent cell not pressed while its menu is up");
+        // "Go to address…" is a request the editor forwards; main.cpp wires
+        // it in a later phase, so here only the signal is checked.
+        actionWithText(menu, QStringLiteral("Go to address\u2026\tCtrl+G"))->trigger();
+        QCOMPARE(gotoSpy.count(), 1);
+        // A bookmark pick → recentPickRequested(formula) → rebaseTo.
+        actionWithText(menu, QStringLiteral("spawn  0x40"))->trigger();
+        menu->hide();
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
+        QTest::qWait(10);
+        QCOMPARE(pickSpy.count(), 1);
+        QCOMPARE(pickSpy.at(0).at(0).toString(), QStringLiteral("0x40"));
+        QCOMPARE(m_doc->tree.baseAddress, 0x40ULL);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(bar->state().baseAddress, 0x40ULL);
+        m_doc->undoStack.undo();
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        img = grabOf(*bar);
+        QVERIFY2(countColour(img, devRect(img, recent), pressedFill(t)) < 16, "recent cell stayed pressed after its menu hid");
+        // Clear recent empties the shared list (restored by cleanup()).
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
+        menu = visibleMenu(bar, QStringLiteral("rcxAddressBarRecentMenu"));
+        QVERIFY(menu);
+        actionWithText(menu, QStringLiteral("Clear recent"))->trigger();
+        menu->hide();
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
+        QTest::qWait(10);
+        QVERIFY(GotoAddressDialog::loadRecent().isEmpty());
+    }
+
+    void testUpCellCollapsesOneLevel() {
+        // Up = the parent crumb: one undoable collapse of the deepest hop,
+        // the trail one shorter, the cell disabled again at the root.
+        drillTwoLevels();
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QVERIFY(bar->state().canUp);
+        QSignalSpy spy(m_editor, &RcxEditor::navUpRequested);
+        const int undoBefore = m_doc->undoStack.count();
+        QCOMPARE(segments().size(), 3);
+        const QRect up = bar->itemRect(QStringLiteral("up"));
+        QVERIFY(!up.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, up.center());
+        QApplication::processEvents();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QVERIFY(collapsed(m_id.parent));
+        QVERIFY(!collapsed(m_id.vptr));
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"), QStringLiteral("QWidgetPrivate") }));
+        QVERIFY(bar->state().canUp);
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, up.center());
+        QApplication::processEvents();
+        QVERIFY(m_ctrl->focusPath().isEmpty());
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        QVERIFY(!bar->state().canUp);
+        // Disabled now: the click is ignored.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, up.center());
+        QApplication::processEvents();
+        QCOMPARE(spy.count(), 2);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        // Undo restores the trail through the push.
+        m_doc->undoStack.undo();
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QVERIFY(!collapsed(m_id.parent));
+    }
+
+    void testStaleDotIsNeverTheAccent() {
+        // vs.json shipped without focusGlow, and Theme::fromJson's default
+        // for it is borderFocused — which there IS the accent — so a stale
+        // source's dot painted purple. The theme data now names a warning
+        // amber everywhere; pinned under both polarities.
+        for (const QString& name : { QStringLiteral("tw"), QStringLiteral("vs") }) {
+            const Theme theme = loadTheme(name);
+            QVERIFY2(theme.background.isValid(), qPrintable(name + QStringLiteral(".json not found under RCX_SOURCE_DIR")));
+            QVERIFY2(theme.focusGlow != theme.indHoverSpan, qPrintable(name));
+            AddressBar bar;
+            bar.applyTheme(theme);
+            AddressBarState s = stateWith(twoLevel());
+            s.liveness = liveness::Stale;
+            bar.setState(s);
+            showBar(bar, 800);
+            const QImage img = grabOf(bar);
+            QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), theme.indHoverSpan), 0);
+            QVERIFY2(countColour(img, devRect(img, bar.livenessDotRect()), theme.focusGlow) > 0, qPrintable(name));
+        }
+    }
+
+    void testChipTooltipWithoutSavedKind() {
+        // A live attach with no saved-source entry (self-attach, MCP,
+        // kernel) has no identifier: the tip is the bare name, not
+        // kindLabelFor("")'s "Plugin".
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        s.sourceKindId.clear();
+        bar.setState(s);
+        showBar(bar, 800);
+        hoverAt(bar, bar.itemRect(QStringLiteral("src")).center());
+        const QString tip = bar.toolTip();
+        QVERIFY2(tip.startsWith(QStringLiteral("REECLASS.exe")), qPrintable(tip));
+        QVERIFY2(!tip.contains(QStringLiteral("Plugin")), qPrintable(tip));
+        QVERIFY(tip.contains(QStringLiteral("Live")));
     }
 };
 

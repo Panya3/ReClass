@@ -144,6 +144,33 @@ private slots:
         }
     }
 
+    // Rule 4 — focusGlow is a WARNING tone, never the accent. It marks a
+    // stale source (the status chip's dot, the address bar's chip dot) and
+    // the MCP focus pulse; Theme::fromJson defaults a missing value to
+    // borderFocused, which on vs.json IS indHoverSpan — so a dead source
+    // read as "selected" in purple. Every shipped theme names it, apart
+    // from the accent and readable on the paper.
+    void testFocusGlowIsNotTheAccent() {
+        for (const auto& t : m_themes) {
+            const QColor glow = tokenOf(t.second, "focusGlow");
+            QVERIFY2(glow.isValid(),
+                     qPrintable(QStringLiteral("%1: focusGlow missing (would default to "
+                                               "borderFocused)").arg(t.first)));
+            const QColor accent = tokenOf(t.second, "indHoverSpan");
+            QVERIFY2(glow != accent,
+                     qPrintable(QStringLiteral("%1: focusGlow %2 is the accent")
+                                    .arg(t.first, glow.name())));
+            const QColor bg = tokenOf(t.second, "background");
+            const QColor paper = luminance(bg) >= 0.2 ? QColor(Qt::white) : bg.darker(115);
+            const double a = luminance(glow) + 0.05, b = luminance(paper) + 0.05;
+            const double ratio = a > b ? a / b : b / a;
+            QVERIFY2(ratio >= 2.0,
+                     qPrintable(QStringLiteral("%1: focusGlow %2 is illegible on paper %3 (%4:1)")
+                                    .arg(t.first, glow.name(), paper.name())
+                                    .arg(ratio, 0, 'f', 2)));
+        }
+    }
+
     // textFaint is now furniture INK (braces, "};", fold arrows, the footer's
     // byte-count comment) rather than a whole-row wash, so it has to be
     // legible on the editor paper on its own. Reported, not enforced at the

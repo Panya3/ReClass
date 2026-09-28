@@ -1243,6 +1243,40 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // itself is grown by selection, in handleNodeClick.
     connect(editor, &RcxEditor::crumbClicked, this, &RcxController::collapseToFocus);
 
+    // The bar's base edit: Enter → rebaseTo, and the verdict goes back to
+    // the bar. A success has already pushed the new state through refresh
+    // (the bar stores it while its overlay is up); the verdict closes the
+    // overlay and applies it. A refusal keeps the overlay open with the
+    // parser's words in the field — rebaseTo has put "Base: …" on the
+    // status bar too.
+    connect(editor, &RcxEditor::baseCommitRequested, this, [this, editor](const QString& expr) {
+        QString err;
+        const bool ok = rebaseTo(expr, &err);
+        if (auto* bar = editor->addressBar()) bar->baseCommitFinished(ok, err);
+    });
+    // A recent / bookmark / module pick from the recent cell is a rebase.
+    connect(editor, &RcxEditor::recentPickRequested, this,
+            [this](const QString& formula) { rebaseTo(formula); });
+    // The chip's context-menu Refresh.
+    connect(editor, &RcxEditor::refreshRequested, this, [this] { refresh(); });
+    // Up one level = the parent crumb: collapse the deepest hop, the same
+    // path as clicking that crumb, so it is one undo entry and the sender
+    // pane scrolls (collapseToFocus reads sender()). History joins in P5.
+    connect(editor, &RcxEditor::navUpRequested, this, [this] {
+        if (!m_focusPath.isEmpty()) collapseToFocus(m_focusPath.size() - 1);
+    });
+    // The places menu's bookmarks and modules, pulled when it opens. The
+    // module list is the provider's memoised one — never enumerateModules,
+    // which is a snapshot syscall on a process with hundreds of DLLs.
+    editor->setAddressBarProviders(
+        [this] { return m_doc->tree.bookmarks; },
+        [this] {
+            QStringList names;
+            if (m_doc->provider)
+                for (const auto& m : m_doc->provider->modulesCached()) names << m.name;
+            return names;
+        });
+
     // Source liveness on the bar's chip. The per-refresh state push carries
     // it too, but a source that just died gets no more refresh ticks, so the
     // push alone would leave the dot green: the status signal turns it the

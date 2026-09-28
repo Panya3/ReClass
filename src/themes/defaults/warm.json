@@ -27,5 +27,6 @@
     "indOverlap": "#E05252",
     "markerPtr": "#B85A42",
     "markerCycle": "#AA9565",
-    "markerError": "#3C2121"
+    "markerError": "#3C2121",
+    "focusGlow": "#E0A040"
 }

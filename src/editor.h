@@ -153,6 +153,15 @@ public:
     void setCustomTypeNames(const QStringList& names);
     void setValueHistoryRef(const QHash<uint64_t, ValueHistory>* ref) { m_valueHistory = ref; }
     void setExprEvaluator(std::function<QString(const QString&)> fn) { m_exprEvaluator = std::move(fn); }
+    // What the address bar's places menu lists besides the Goto recents:
+    // the document's bookmarks and the source's cached module names. Set
+    // by the controller; pulled by the bar only when the menu opens. The
+    // evaluator above is shared with the bar's base edit — one evaluator.
+    void setAddressBarProviders(std::function<QVector<Bookmark>()> bookmarks,
+                                std::function<QStringList()> modules) {
+        m_bookmarkProvider = std::move(bookmarks);
+        m_moduleProvider   = std::move(modules);
+    }
     void setProviderRef(const Provider* prov, const Provider* realProv, const NodeTree* tree) {
         m_disasmProvider = prov; m_disasmRealProv = realProv; m_disasmTree = tree;
     }
@@ -253,6 +262,9 @@ signals:
     void navUpRequested();
     void historyJumpRequested(int entry);
     void refreshRequested();                                  // source context menu
+    // The recent menu's "Go to address…": MainWindow owns the Goto dialog,
+    // so this stays unconnected until main.cpp wires it (P6/P7).
+    void gotoDialogRequested();
     // ── Byte-selection actions ──
     // Fired when the user invokes Ctrl+C / Ctrl+V / Delete with an active
     // hex byte selection (`m_byteSel`). Controller reads the selection
@@ -477,6 +489,8 @@ private:
     // ── Value history ref (owned by controller) ──
     const QHash<uint64_t, ValueHistory>* m_valueHistory = nullptr;
     std::function<QString(const QString&)> m_exprEvaluator;
+    std::function<QVector<Bookmark>()>     m_bookmarkProvider;   // address bar places menu
+    std::function<QStringList()>           m_moduleProvider;
     QLabel* m_exprResultLabel = nullptr;
     // The unified hover preview host (HoverPopupHost, file-local in
     // editor.cpp) replaces the old m_disasmPopup + m_structPreviewPopup

@@ -877,6 +877,7 @@ if(BUILD_TESTING)
         src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
         src/resources.qrc)
         target_include_directories(test_breadcrumb PRIVATE src third_party/fadec)
+        target_compile_definitions(test_breadcrumb PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
         target_link_libraries(test_breadcrumb PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
         QScintilla::QScintilla)

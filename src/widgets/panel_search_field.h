@@ -25,6 +25,20 @@
 
 namespace rcx {
 
+// The interior of the house text field, as one QSS rule: editor-paper
+// ground, textDim ink, no box, square corners, a 2-px lead / 6-px trail pad
+// and the theme's selection band. Shared with the address bar's base-edit
+// overlay (src/widgets/address_bar.h), which is a bare QLineEdit wearing
+// this rule so the two fields are one control family; both paint their own
+// device-exact focus seam underneath rather than asking QSS for a border.
+inline QString panelFieldInteriorQss(const Theme& t) {
+    return QStringLiteral(
+        "QLineEdit { background: %1; color: %2; border: none;"
+        " border-radius: 0px; padding: 0px 6px 0px 2px;"
+        " selection-background-color: %3; }")
+        .arg(editorPaperColor(t).name(), t.textDim.name(), t.selection.name());
+}
+
 class PanelSearchField : public QLineEdit {
 public:
     static constexpr int kFieldHeight = 26;
@@ -58,15 +72,11 @@ public:
         // Re-read the chrome face: a font change writes the setting and then
         // re-themes, so this is the one place every panel field picks it up.
         setFont(chromeFont());
-        const QColor paper = editorPaperColor(t);
-        setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: none;"
-            " border-radius: 0px; padding: 0px 6px 0px 2px;"
-            " selection-background-color: %4; }"
-            "QLineEdit QToolButton { padding: 0px 6px; }"
-            "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(paper.name(), t.textDim.name(), t.hover.name(),
-                 t.selection.name()));
+        setStyleSheet(panelFieldInteriorQss(t)
+            + QStringLiteral(
+                  "QLineEdit QToolButton { padding: 0px 6px; }"
+                  "QLineEdit QToolButton:hover { background: %1; }")
+                  .arg(t.hover.name()));
         m_lead->setIcon(themedVsIcon(m_leadIconPath, t.textDim, kLeadIconPx,
                                      devicePixelRatioF()));
         m_clear->setIcon(themedVsIcon(QStringLiteral(":/vsicons/close.svg"),

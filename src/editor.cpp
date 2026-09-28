@@ -1797,12 +1797,29 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     // Always visible: with no drill it names the class in view. Its
     // std::function callbacks are bridged to signals here; the controller
     // connects those (crumbClicked → collapseToFocus, sourcePopupRequested
-    // → showSourcePopup; the rest as the phases behind P2b land).
+    // → showSourcePopup, baseCommitRequested / recentPickRequested →
+    // rebaseTo, refreshRequested → refresh, navUpRequested → one crumb
+    // back; the rest as the phases behind P3 land).
     m_addressBar = new AddressBar(this);
     {
         AddressBar::Callbacks cb;
         cb.onCrumb       = [this](int i) { emit crumbClicked(i); };
+        // The deepest crumb: crumbClicked(n-1) → collapseToFocus(n-1), which
+        // collapses nothing (the index is past the focus path) and only
+        // scrolls that class's header to the top — the non-mutating click
+        // the design keeps for "you are here".
+        cb.onCurrentCrumb = [this] { emit crumbClicked(m_addressBar->state().crumbs.size() - 1); };
         cb.onSourceClick = [this](QPoint g) { emit sourcePopupRequested(g); };
+        cb.onGotoDialog  = [this] { emit gotoDialogRequested(); };
+        // The document takes focus back after a keyboard-ended edit; the
+        // bar itself is NoFocus at rest and must not keep it.
+        cb.onFocusReturn = [this] { if (m_sci) m_sci->setFocus(); };
+        // ONE evaluator: the controller's, installed through
+        // setExprEvaluator for the Scintilla inline edit, read here at
+        // call time so the order of installation does not matter.
+        cb.evaluate      = [this](const QString& s) { return m_exprEvaluator ? m_exprEvaluator(s) : QString(); };
+        cb.bookmarks     = [this] { return m_bookmarkProvider ? m_bookmarkProvider() : QVector<Bookmark>(); };
+        cb.modules       = [this] { return m_moduleProvider ? m_moduleProvider() : QStringList(); };
         cb.onSiblingPick = [this](int level, uint64_t id) { emit siblingPickRequested(level, id); };
         cb.onRootPick    = [this](uint64_t id) { emit rootPickRequested(id); };
         cb.onBaseCommit  = [this](QString s) { emit baseCommitRequested(s); };
@@ -5682,6 +5699,13 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                     if (t == EditTarget::TypeSelector)
                         emit typeSelectorRequested();
+                    else if (t == EditTarget::BaseAddress && m_addressBar)
+                        // One base-edit implementation: the bar's overlay
+                        // (never scrolls away, validates live, has the
+                        // places menu). The Scintilla path stays reachable
+                        // through beginInlineEdit() for its API and tests
+                        // until P7 demotes line 0.
+                        m_addressBar->beginBaseEdit();
                     else
                         beginInlineEdit(t, tLine, tCol);
                 }
