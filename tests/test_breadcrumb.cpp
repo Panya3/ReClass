@@ -8,8 +8,10 @@
 #include <QtTest/QSignalSpy>
 #include <QApplication>
 #include <QSettings>
+#include <QLabel>
 #include <QSplitter>
 #include <QToolButton>
+#include <QtEndian>
 
 #include "address_callbacks.h"
 #include "controller.h"
@@ -48,6 +50,18 @@ static Ids buildChain(NodeTree& tree) {
     return id;
 }
 
+// Crumbs in the production dotted shape (pushBreadcrumb): "Class.field"
+// ancestors, a bare "Class" deepest, rootId = crumb index. classId is any
+// non-zero id — the widget only reads label and index.
+static Crumb crumb(const QString& label, uint64_t index, uint64_t classId = 1) {
+    Crumb c; c.label = label; c.rootId = index; c.classId = classId;
+    return c;
+}
+static QVector<Crumb> twoLevel() {
+    return { crumb(QStringLiteral("RcxEditor.vptr"), 0, 1),
+             crumb(QStringLiteral("QWidgetPrivate"), 1, 2) };
+}
+
 class TestBreadcrumb : public QObject {
     Q_OBJECT
 private:
@@ -72,6 +86,22 @@ private:
         for (int i = 0; i < m.size(); ++i)
             if (m[i].nodeId == id && m[i].lineKind != LineKind::Footer) return i;
         return -1;
+    }
+    QVector<Crumb> crumbs() const { return m_editor->breadcrumbBar()->crumbs(); }
+    // Bytes holding real little-endian pointers for buildChain at base 0,
+    // pointerSize 8: RcxEditor@0 .vptr = 0x20 → QWidgetPrivate@0x20 .parent
+    // = 0x30 → QWidget@0x30. 64 bytes, so every target is readable.
+    static QByteArray chainBytes() {
+        QByteArray b(64, '\0');
+        qToLittleEndian<quint64>(0x20, b.data() + 0x00);
+        qToLittleEndian<quint64>(0x30, b.data() + 0x20);
+        return b;
+    }
+    void drillTwoLevels() {
+        expand(m_id.vptr);
+        expand(m_id.parent);
+        m_ctrl->handleNodeClick(m_editor, lineOf(m_id.parent), m_id.parent, Qt::NoModifier);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
     }
 
 private slots:
@@ -390,55 +420,215 @@ private slots:
         QVERIFY(ok);
     }
 
+    // ── Crumb payload: class id, entry hop, address, keyword ──
+
+    void testCrumbAddressesFollowPointerValues() {
+        // Real pointer values in the buffer: the address of the class at
+        // crumb i+1 is what compose dereferenced for hop i (LineMeta::ptrBase
+        // on the first row rendered inside it). QWidget gets one field so its
+        // expansion renders a row to carry the base.
+        m_doc->provider = std::make_unique<BufferProvider>(chainBytes());
+        Node fl; fl.kind = NodeKind::UInt32; fl.name = "flags"; fl.parentId = m_id.widget; fl.offset = 0;
+        m_doc->tree.addNode(fl);
+        drillTwoLevels();
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        QCOMPARE(c[0].address, 0x00ULL);
+        QCOMPARE(c[1].address, 0x20ULL);
+        QCOMPARE(c[2].address, 0x30ULL);
+
+        // Null / unreadable pointers: the frame is unknown, not "0x0 + offset".
+        m_doc->provider = std::make_unique<BufferProvider>(QByteArray(64, '\0'));
+        m_ctrl->refresh();
+        c = crumbs();
+        QCOMPARE(c.size(), 3);                         // the trail itself survives
+        QCOMPARE(c[0].address, 0x00ULL);
+        QCOMPARE(c[1].address, 0x00ULL);
+        QCOMPARE(c[2].address, 0x00ULL);
+    }
+
+    void testCrumbAddressOfEmbeddedStructIsItsRow() {
+        // An embedded struct is its own hop and sits at base + its offset —
+        // compose's ptrBase does not change for it (it is not a pointer), so
+        // the crumb takes the row's own absolute address instead.
+        Node st; st.kind = NodeKind::Struct; st.name = "stats"; st.structTypeName = "Stats";
+        st.parentId = m_id.editor; st.offset = 24; st.collapsed = false;
+        const uint64_t statsId = m_doc->tree.nodes[m_doc->tree.addNode(st)].id;
+        Node hp; hp.kind = NodeKind::UInt32; hp.name = "hp"; hp.parentId = statsId; hp.offset = 0;
+        const uint64_t hpId = m_doc->tree.nodes[m_doc->tree.addNode(hp)].id;
+        m_ctrl->refresh();
+        m_ctrl->handleNodeClick(m_editor, lineOf(hpId), hpId, Qt::NoModifier);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ statsId }));
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 2);
+        QCOMPARE(c[0].address, 0ULL);
+        QCOMPARE(c[1].address, 24ULL);
+        QCOMPARE(c[1].classId, statsId);
+        QCOMPARE(c[1].pointerId, statsId);              // its own hop
+        QCOMPARE(c[1].label, QStringLiteral("Stats"));
+        // A rebase moves every crumb with it (the focus path is kept).
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x100")));
+        c = crumbs();
+        QCOMPARE(c.size(), 2);
+        QCOMPARE(c[0].address, 0x100ULL);
+        QCOMPARE(c[1].address, 0x118ULL);
+    }
+
+    void testCrumbPointerIdsAndClassIds() {
+        drillTwoLevels();
+        const QVector<uint64_t>& fp = m_ctrl->focusPath();
+        const QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        // pointerId = the hop crumb i was entered through = focusPath[i-1].
+        QCOMPARE(c[0].pointerId, 0ULL);
+        QCOMPARE(c[1].pointerId, fp[0]);
+        QCOMPARE(c[2].pointerId, fp[1]);
+        // classId = the container at each depth.
+        QCOMPARE(c[0].classId, m_id.editor);
+        QCOMPARE(c[1].classId, m_id.priv);
+        QCOMPARE(c[2].classId, m_id.widget);
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(c[i].rootId, uint64_t(i));
+            QCOMPARE(c[i].keyword, QStringLiteral("struct"));   // resolved default
+        }
+        // The keyword follows the class node's resolved keyword.
+        m_doc->tree.nodes[idx(m_id.widget)].classKeyword = QStringLiteral("class");
+        m_doc->tree.nodes[idx(m_id.priv)].classKeyword = QStringLiteral("union");
+        m_ctrl->refresh();
+        QCOMPARE(crumbs()[2].keyword, QStringLiteral("class"));
+        QCOMPARE(crumbs()[1].keyword, QStringLiteral("union"));
+        QCOMPARE(crumbs()[0].keyword, QStringLiteral("struct"));
+    }
+
+    void testProductionCrumbsHaveNoConnector() {
+        drillTwoLevels();
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        for (int i = 0; i < c.size(); ++i) {
+            QVERIFY(!c[i].label.isEmpty());
+            QVERIFY(c[i].classId != 0);
+            // Ancestors are dotted ("Class.field"); the deepest is bare.
+            QCOMPARE(c[i].label.contains(QLatin1Char('.')), i < c.size() - 1);
+        }
+        // The widget echoes exactly the labels with one separator between
+        // them — no italic field connector is ever rendered.
+        QCOMPARE(m_editor->breadcrumbBar()->segments(),
+                 (QStringList{ QStringLiteral("RcxEditor.vptr"), QStringLiteral("›"),
+                               QStringLiteral("QWidgetPrivate.parent"), QStringLiteral("›"),
+                               QStringLiteral("QWidget") }));
+        // Lone root: one undotted crumb naming the view root.
+        m_ctrl->clearSelection();
+        c = crumbs();
+        QCOMPARE(c.size(), 1);
+        QVERIFY(!c[0].label.contains(QLatin1Char('.')));
+        QCOMPARE(c[0].classId, m_id.editor);
+        QCOMPARE(c[0].pointerId, 0ULL);
+    }
+
+    // ── rebaseTo announces itself: documentChanged once, refresh not thrice ──
+
+    void testGotoRebaseEmitsDocumentChanged() {
+        // The bookmarks dock, the doc-tab source icon and the MCP bridge all
+        // listen to documentChanged; a Goto / bookmark / scanner rebase must
+        // reach them like the old navigateToFormula did.
+        QSignalSpy changed(m_doc, &RcxDocument::documentChanged);
+        QVERIFY(m_ctrl->navigateToFormula(QStringLiteral("0x40")));
+        QCOMPARE(changed.count(), 1);
+        // Same base again: nothing changed, nothing announced.
+        QVERIFY(m_ctrl->navigateToFormula(QStringLiteral("0x40")));
+        QCOMPARE(changed.count(), 1);
+        // A refused formula announces nothing.
+        QVERIFY(!m_ctrl->navigateToFormula(QStringLiteral("[0x1")));
+        QCOMPARE(changed.count(), 1);
+        // Undo / redo go through the undo stack, which never emits it.
+        m_doc->undoStack.undo();
+        m_doc->undoStack.redo();
+        QCOMPARE(changed.count(), 1);
+    }
+
+    void testInlineBaseCommitAddsNoExtraRefresh() {
+        // refresh() always reaches applyDocument, which always emits
+        // documentApplied, so the spy counts recomposes. The inline command
+        // row edit must cost exactly what a direct rebaseTo costs — it used
+        // to add a third refresh after rebaseTo's own — and a refused edit
+        // exactly one (the canonical text restored over the typed text).
+        // Only RELATIVE counts are meaningful: a refresh whose command-row
+        // text changed emits documentApplied twice (applyDocument, then the
+        // mirror re-emit in setCommandRowText), so a direct rebase reads 3
+        // for its two refreshes (command apply + documentChanged).
+        QSignalSpy applied(m_editor, &RcxEditor::documentApplied);
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));
+        const int direct = applied.count();
+        QVERIFY(direct >= 1);
+
+        applied.clear();
+        emit m_editor->inlineEditCommitted(-1, 0, EditTarget::BaseAddress, QStringLiteral("0x50"), 0);
+        QCOMPARE(applied.count(), direct);
+        QCOMPARE(m_doc->tree.baseAddress, 0x50ULL);
+
+        applied.clear();
+        emit m_editor->inlineEditCommitted(-1, 0, EditTarget::BaseAddress, QStringLiteral("[0x1"), 0);
+        QCOMPARE(applied.count(), 1);
+        QCOMPARE(m_doc->tree.baseAddress, 0x50ULL);
+
+        // Same value re-committed: no command, one refresh (canonical text).
+        applied.clear();
+        const int n = m_doc->undoStack.count();
+        emit m_editor->inlineEditCommitted(-1, 0, EditTarget::BaseAddress, QStringLiteral("0x50"), 0);
+        QCOMPARE(applied.count(), 1);
+        QCOMPARE(m_doc->undoStack.count(), n);
+    }
+
     // ── BreadcrumbBar widget ──
+    // Fed the production dotted shape (see crumb()/twoLevel() above): the
+    // field is part of the ancestor's label; there is no connector segment.
 
     void testBarAlwaysVisibleForSingleClass() {
         BreadcrumbBar bar;
-        bar.setCrumbs({ { QStringLiteral("RcxEditor"), 0, false } });
+        bar.setCrumbs({ crumb(QStringLiteral("RcxEditor"), 0) });
         QVERIFY(bar.barVisible());
     }
 
     void testBarRendersTrailAndSeparators() {
         BreadcrumbBar bar;
-        bar.setCrumbs({
-            { QStringLiteral("RcxEditor"),      0, false },
-            { QStringLiteral("vptr"),           0, true  },
-            { QStringLiteral("QWidgetPrivate"), 1, false },
-        });
+        bar.setCrumbs(twoLevel());
         QVERIFY(bar.barVisible());
-        const QStringList seg = bar.segments();
-        QVERIFY(seg.contains(QStringLiteral("RcxEditor")));
-        QVERIFY(seg.contains(QStringLiteral("vptr")));
-        QVERIFY(seg.contains(QStringLiteral("QWidgetPrivate")));
-        QVERIFY(seg.contains(QStringLiteral("›")));
+        // Exactly the labels with one separator between them.
+        QCOMPARE(bar.segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                               QStringLiteral("›"),
+                                               QStringLiteral("QWidgetPrivate") }));
+        QCOMPARE(bar.findChildren<QToolButton*>().size(), 2);
+        const auto labels = bar.findChildren<QLabel*>();
+        QCOMPARE(labels.size(), 1);                     // the one '›'
+        QCOMPARE(labels[0]->text(), QStringLiteral("›"));
     }
 
     void testBarClickFiresCrumbIndex() {
         BreadcrumbBar bar;
         int clicked = -1;
         bar.setOnCrumb([&](uint64_t i) { clicked = (int)i; });
-        bar.setCrumbs({
-            { QStringLiteral("RcxEditor"),      0, false },
-            { QStringLiteral("vptr"),           0, true  },
-            { QStringLiteral("QWidgetPrivate"), 1, false },
-        });
+        bar.setCrumbs(twoLevel());
         QToolButton* rootBtn = nullptr;
-        for (auto* b : bar.findChildren<QToolButton*>())
-            if (b->text() == QStringLiteral("RcxEditor")) rootBtn = b;
-        QVERIFY(rootBtn != nullptr);
+        QToolButton* deepBtn = nullptr;
+        for (auto* b : bar.findChildren<QToolButton*>()) {
+            if (b->text() == QStringLiteral("RcxEditor.vptr")) rootBtn = b;
+            if (b->text() == QStringLiteral("QWidgetPrivate")) deepBtn = b;
+        }
+        QVERIFY(rootBtn != nullptr && deepBtn != nullptr);
         rootBtn->click();
         QCOMPARE(clicked, 0);
+        deepBtn->click();                               // deepest reports its index too
+        QCOMPARE(clicked, 1);
     }
 
     void testBarHasNoBackButton() {
         BreadcrumbBar bar;
-        bar.setCrumbs({
-            { QStringLiteral("A"), 0, false },
-            { QStringLiteral("f"), 0, true  },
-            { QStringLiteral("B"), 1, false },
-        });
+        bar.setCrumbs({ crumb(QStringLiteral("A.f"), 0, 1), crumb(QStringLiteral("B"), 1, 2) });
         for (auto* b : bar.findChildren<QToolButton*>())
             QVERIFY(b->text() != QStringLiteral("↩"));
+        // ...and no connector label either: every QLabel is a separator.
+        for (auto* l : bar.findChildren<QLabel*>())
+            QCOMPARE(l->text(), QStringLiteral("›"));
     }
 
     // ── Tone ladder (the band is paper, not a third chrome strip) ──
@@ -447,7 +637,7 @@ private slots:
     void testDepth1CrumbIsDimAndRegular() {
         BreadcrumbBar bar;
         bar.applyTheme(ThemeManager::instance().current());
-        bar.setCrumbs({ { QStringLiteral("RcxEditor"), 0, false } });
+        bar.setCrumbs({ crumb(QStringLiteral("RcxEditor"), 0) });
         const auto& t = ThemeManager::instance().current();
         QToolButton* only = nullptr;
         for (auto* b : bar.findChildren<QToolButton*>()) only = b;
@@ -462,15 +652,11 @@ private slots:
     void testDeepestCrumbIsTextDemiBold() {
         BreadcrumbBar bar;
         bar.applyTheme(ThemeManager::instance().current());
-        bar.setCrumbs({
-            { QStringLiteral("RcxEditor"),      0, false },
-            { QStringLiteral("vptr"),           0, true  },
-            { QStringLiteral("QWidgetPrivate"), 1, false },
-        });
+        bar.setCrumbs(twoLevel());
         const auto& t = ThemeManager::instance().current();
         QString rootQss, deepQss;
         for (auto* b : bar.findChildren<QToolButton*>()) {
-            if (b->text() == QStringLiteral("RcxEditor"))      rootQss = b->styleSheet();
+            if (b->text() == QStringLiteral("RcxEditor.vptr")) rootQss = b->styleSheet();
             if (b->text() == QStringLiteral("QWidgetPrivate")) deepQss = b->styleSheet();
         }
         QVERIFY(!rootQss.isEmpty() && !deepQss.isEmpty());
@@ -501,17 +687,14 @@ private slots:
         // The controller pushes the trail every refresh tick; an equal
         // trail must leave the existing buttons alone (no teardown/rebuild).
         BreadcrumbBar bar;
-        const QVector<Crumb> trail = {
-            { QStringLiteral("RcxEditor.vptr"), 0, false },
-            { QStringLiteral("QWidgetPrivate"), 1, false },
-        };
+        const QVector<Crumb> trail = twoLevel();
         bar.setCrumbs(trail);
         const auto before = bar.findChildren<QToolButton*>();
         QCOMPARE(before.size(), 2);
         bar.setCrumbs(trail);
         const auto after = bar.findChildren<QToolButton*>();
         QCOMPARE(after, before);            // same widget objects
-        bar.setCrumbs({ { QStringLiteral("RcxEditor"), 0, false } });
+        bar.setCrumbs({ crumb(QStringLiteral("RcxEditor"), 0) });
         // The old buttons are deleteLater'd; plain processEvents() skips
         // deferred deletes outside an event loop, so flush them explicitly.
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
@@ -520,17 +703,23 @@ private slots:
 
     void testBarCollapsesDeepTrailToEllipsis() {
         BreadcrumbBar bar;
-        QVector<Crumb> crumbs;
-        for (int i = 0; i < 6; ++i) {
-            crumbs.push_back({ QStringLiteral("C%1").arg(i), uint64_t(i), false });
-            if (i < 5) crumbs.push_back({ QStringLiteral("f%1").arg(i), 0, true });
-        }
-        bar.setCrumbs(crumbs);
+        QVector<Crumb> trail;
+        for (int i = 0; i < 6; ++i)
+            trail.push_back(crumb(i < 5 ? QStringLiteral("C%1.f%1").arg(i) : QStringLiteral("C5"),
+                                  uint64_t(i), uint64_t(i + 1)));
+        bar.setCrumbs(trail);
         const QStringList seg = bar.segments();
         QVERIFY(seg.contains(QStringLiteral("…")));
-        QVERIFY(seg.contains(QStringLiteral("C0")));
+        QVERIFY(seg.contains(QStringLiteral("C0.f0")));
         QVERIFY(seg.contains(QStringLiteral("C5")));
-        QVERIFY(!seg.contains(QStringLiteral("C2")));
+        QVERIFY(!seg.contains(QStringLiteral("C2.f2")));
+        // The gap's tooltip lists the hidden crumbs, already dotted, joined
+        // by the separator only.
+        QLabel* ell = nullptr;
+        for (auto* l : bar.findChildren<QLabel*>())
+            if (l->text() == QStringLiteral("…")) ell = l;
+        QVERIFY(ell != nullptr);
+        QCOMPARE(ell->toolTip(), QStringLiteral("C1.f1 › C2.f2"));
     }
 };
 

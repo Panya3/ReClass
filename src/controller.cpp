@@ -1,6 +1,7 @@
 #include "controller.h"
 #include "addressparser.h"
 #include "address_callbacks.h"
+#include "widgets/address_bar_model.h"
 #include "symbolstore.h"
 #include "profiler.h"
 #include "typeselectorpopup.h"
@@ -422,6 +423,15 @@ void RcxCommand::redo() {
 }
 
 // ── RcxController ──
+
+// The address bar model mirrors SourceStatus by numeric value (it is
+// Core-only and cannot include this header); a reorder here must fail here.
+static_assert(int(RcxController::SourceStatus::None)         == liveness::None
+           && int(RcxController::SourceStatus::Static)       == liveness::Static
+           && int(RcxController::SourceStatus::Live)         == liveness::Live
+           && int(RcxController::SourceStatus::Stale)        == liveness::Stale
+           && int(RcxController::SourceStatus::Disconnected) == liveness::Disconnected,
+              "AddressBarState::liveness must mirror RcxController::SourceStatus");
 
 RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     : QObject(parent), m_doc(doc)
@@ -1671,8 +1681,12 @@ void RcxController::connectEditor(RcxEditor* editor) {
         case EditTarget::BaseAddress: {
             // One rebase implementation for every entry point (this edit,
             // Goto, bookmarks, scanner, MCP): evaluate, undoable ChangeBase,
-            // recent list, error to the status bar.
-            rebaseTo(text);
+            // recent list, error to the status bar. A successful rebase has
+            // already refreshed (command apply + documentChanged), so the
+            // trailing refresh below would be a third recompose; a refused
+            // edit still needs it to put the canonical row back over the
+            // typed text.
+            if (rebaseTo(text)) return;
             break;
         }
         case EditTarget::Source:
@@ -1809,54 +1823,6 @@ uint64_t RcxController::resolveDefinitionTarget(int nodeIdx) const {
     return drillTargetId(m_doc->tree.nodes[nodeIdx]);
 }
 
-uint64_t RcxController::rootStructOf(uint64_t nodeId) const {
-    int idx = m_doc->tree.indexOfId(nodeId);
-    int guard = 0;
-    while (idx >= 0 && m_doc->tree.nodes[idx].parentId != 0 && guard++ < 4096)
-        idx = m_doc->tree.indexOfId(m_doc->tree.nodes[idx].parentId);
-    return idx >= 0 ? m_doc->tree.nodes[idx].id : 0;
-}
-
-uint64_t RcxController::containerOf(uint64_t nodeId) const {
-    // Nearest enclosing DRILL FRAME: a top-level root, or an embedded struct
-    // expanded in place (drillTargetId(n) == n.id — it is its own hop).
-    // rootStructOf walks THROUGH embedded structs to the top, which is right
-    // for "which root owns this byte" but wrong for the focus path: with it,
-    // `Player.stats.hp` sits in `Player`, so a trail through `stats` failed
-    // reconcileFocusPath's container check while pushBreadcrumb labelled the
-    // frame from refId (0 → the first root class). Every focus-path consumer
-    // must agree on one notion of "container"; this is it.
-    int idx = m_doc->tree.indexOfId(nodeId);
-    if (idx < 0) return 0;
-    uint64_t cur = m_doc->tree.nodes[idx].parentId;
-    int guard = 0;
-    while (cur != 0 && guard++ < 4096) {
-        int ci = m_doc->tree.indexOfId(cur);
-        if (ci < 0) return 0;   // dangling parentId: orphan
-        const Node& c = m_doc->tree.nodes[ci];
-        if (c.parentId == 0 || drillTargetId(c) == c.id) return c.id;
-        cur = c.parentId;
-    }
-    return 0;
-}
-
-uint64_t RcxController::expandedHopInto(uint64_t containerId) const {
-    // The expanded hop that put `containerId`'s rows on screen. An embedded
-    // struct is its own hop; a root class was opened by the first expanded
-    // drillable pointer whose refId names it. First match wins (deterministic;
-    // ambiguous only when one class is referenced by 2+ expanded pointers).
-    int ci = m_doc->tree.indexOfId(containerId);
-    if (ci < 0) return 0;
-    const Node& c = m_doc->tree.nodes[ci];
-    if (c.parentId != 0)
-        return (!c.collapsed && drillTargetId(c) == c.id) ? c.id : 0;
-    for (const Node& nd : m_doc->tree.nodes) {
-        if (nd.refId == containerId && !nd.collapsed && drillTargetId(nd) != 0)
-            return nd.id;
-    }
-    return 0;
-}
-
 void RcxController::reconcileFocusPath() {
     // Walk the chain: each focus hop must still exist, be drillable, be
     // expanded, and sit inside the frame the previous hop opened. Trim at the
@@ -1868,7 +1834,7 @@ void RcxController::reconcileFocusPath() {
         if (pi < 0) break;
         const Node& p = m_doc->tree.nodes[pi];
         if (drillTargetId(p) == 0 || p.collapsed) break;
-        if (expectedContainer != 0 && containerOf(p.id) != expectedContainer) break;
+        if (expectedContainer != 0 && containerOf(m_doc->tree, p.id) != expectedContainer) break;
         expectedContainer = drillTargetId(p);  // refId class, or the embedded struct itself
         valid = i + 1;
     }
@@ -1882,14 +1848,14 @@ QVector<uint64_t> RcxController::focusChainTo(uint64_t pid) const {
     while (cur != 0 && !seen.contains(cur)) {
         seen.insert(cur);
         chain.prepend(cur);
-        uint64_t container = containerOf(cur);
+        uint64_t container = containerOf(m_doc->tree, cur);
         if (container == 0) return {};                  // orphan
         if (container == m_viewRootId) return chain;    // reached the view root
         if (m_viewRootId == 0) {                        // show-all: any ROOT is a base
             int ci = m_doc->tree.indexOfId(container);  // (an embedded frame is not)
             if (ci >= 0 && m_doc->tree.nodes[ci].parentId == 0) return chain;
         }
-        cur = expandedHopInto(container);
+        cur = expandedHopInto(m_doc->tree, container);
     }
     return {};  // no expanded chain reaches the view root
 }
@@ -1907,9 +1873,9 @@ QVector<uint64_t> RcxController::focusChainToNode(uint64_t nodeId) const {
     // embedded struct expanded in place — return that hop's chain, so
     // selecting inside a NewClass* adds NewClass and inside Player.stats adds
     // stats.
-    uint64_t container = containerOf(nodeId);
+    uint64_t container = containerOf(m_doc->tree, nodeId);
     if (container == 0 || container == m_viewRootId) return {};
-    const uint64_t hop = expandedHopInto(container);
+    const uint64_t hop = expandedHopInto(m_doc->tree, container);
     return hop ? focusChainTo(hop) : QVector<uint64_t>{};
 }
 
@@ -1950,6 +1916,72 @@ QString RcxController::classLabelOf(uint64_t id) const {
 
 void RcxController::pushBreadcrumb() {
     reconcileFocusPath();
+    const NodeTree& tree = m_doc->tree;
+    const auto& meta = m_lastResult.meta;
+
+    // The class id a crumb names. classLabelOf(0) (show-all, no single view
+    // root) names the first root struct; carry that node's id for the same
+    // case so a crumb never says one class and points at another.
+    auto classIdFor = [&](uint64_t container) -> uint64_t {
+        if (container != 0 && tree.indexOfId(container) >= 0) return container;
+        for (const Node& n : tree.nodes)
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) return n.id;
+        return 0;
+    };
+    auto keywordFor = [&](uint64_t classId) -> QString {
+        const int ci = classId ? tree.indexOfId(classId) : -1;
+        return ci >= 0 ? tree.nodes[ci].resolvedClassKeyword() : QString();
+    };
+
+    // Per-crumb addresses come from the last compose, which already stamped
+    // every row inside a pointer expansion with the dereferenced target
+    // (LineMeta::ptrBase) and every row with its own absolute address
+    // (offsetAddr). Map each focus hop to its rendered line with ONE forward
+    // scan whose cursor only advances: hop i sits inside hop i-1's expansion,
+    // so its row is below hop i-1's, and searching from there also picks the
+    // right instance when one class is expanded under two pointers (the
+    // same `parent` node renders twice; only the one under our hop counts).
+    // The editor's node→line index is private to it, and this runs once per
+    // refresh on a path that is 0-3 hops deep, so a scan is cheaper than
+    // plumbing an accessor; setCrumbs' change guard makes an equal result
+    // free downstream.
+    QVector<int> hopLine(m_focusPath.size(), -1);
+    for (int i = 0, cursor = 0; i < m_focusPath.size(); ++i) {
+        for (int j = cursor; j < meta.size(); ++j) {
+            if (meta[j].nodeId != m_focusPath[i]) continue;
+            if (meta[j].lineKind == LineKind::Footer || meta[j].lineKind == LineKind::CommandRow)
+                continue;
+            hopLine[i] = j;
+            cursor = j + 1;
+            break;
+        }
+        if (hopLine[i] < 0) break;   // nothing rendered for it: deeper hops are unknown too
+    }
+    // The address of the frame hop i opens. An embedded struct IS its row;
+    // a pointer's target is the ptrBase compose stamped on the first row
+    // rendered INSIDE it (deeper than the pointer's own row — its
+    // continuation rows share its depth and its nodeId). 0 when the hop has
+    // no row, the expansion is empty, or the pointer was null / unreadable
+    // (compose zero-fills those under a NullProvider with pBase = 0).
+    auto frameAddress = [&](int i, const Node& hop) -> uint64_t {
+        const int line = hopLine[i];
+        if (line < 0) return 0;
+        if (drillTargetId(hop) == hop.id) return meta[line].offsetAddr;
+        const int hopDepth = meta[line].depth;
+        for (int j = line + 1; j < meta.size(); ++j) {
+            if (meta[j].depth > hopDepth) return meta[j].ptrBase;
+            if (meta[j].nodeId != hop.id) break;   // left the pointer's rows without going deeper
+        }
+        return 0;
+    };
+    // The view root's own address: compose places a root at
+    // baseAddress + offset (its absOffsets seed), and the root header row is
+    // suppressed (the command row carries it), so compute rather than scan.
+    auto rootAddress = [&](uint64_t classId) -> uint64_t {
+        const int ci = classId ? tree.indexOfId(classId) : -1;
+        const int off = ci >= 0 ? tree.nodes[ci].offset : 0;
+        return tree.baseAddress + (off > 0 ? uint64_t(off) : 0);
+    };
 
     // Dotted "class.field" crumbs: each crumb is the class you were IN plus the
     // field you followed OUT of it (focusPath[i] is the pointer left via);
@@ -1958,22 +1990,39 @@ void RcxController::pushBreadcrumb() {
     // redundant-looking "field › class" pair on auto-named pointers.
     QVector<Crumb> crumbs;
     uint64_t container = m_viewRootId;  // depth 0 container = the view root
+    uint64_t address   = rootAddress(classIdFor(container));
     for (int i = 0; i < m_focusPath.size(); ++i) {
-        int pi = m_doc->tree.indexOfId(m_focusPath[i]);
+        int pi = tree.indexOfId(m_focusPath[i]);
         if (pi < 0) break;
-        const Node& p = m_doc->tree.nodes[pi];
+        const Node& p = tree.nodes[pi];
         QString field = p.name.isEmpty() ? fmt::typeNameRaw(p.kind) : p.name;
-        crumbs.push_back({ classLabelOf(container) + QStringLiteral(".") + field,
-                           (uint64_t)i, /*isField=*/false });
+        Crumb c;
+        c.label     = classLabelOf(container) + QStringLiteral(".") + field;
+        c.rootId    = (uint64_t)i;
+        c.classId   = classIdFor(container);
+        c.pointerId = i > 0 ? m_focusPath[i - 1] : 0;
+        c.address   = address;
+        c.keyword   = keywordFor(c.classId);
+        crumbs.push_back(c);
         // Next depth's container = the frame this hop opens: the pointer's
         // refId class, or the embedded struct itself (refId is 0 there, and
         // classLabelOf(0) would name the first root class instead).
         container = drillTargetId(p);
+        address   = frameAddress(i, p);
     }
     // Current (deepest) class — `container` is the frame the last hop opens, or
     // the view root when nothing is drilled.
-    crumbs.push_back({ classLabelOf(container), (uint64_t)m_focusPath.size(),
-                       /*isField=*/false });
+    {
+        const int n = crumbs.size();   // == the number of hops that resolved
+        Crumb c;
+        c.label     = classLabelOf(container);
+        c.rootId    = (uint64_t)n;
+        c.classId   = classIdFor(container);
+        c.pointerId = n > 0 ? m_focusPath[n - 1] : 0;
+        c.address   = address;
+        c.keyword   = keywordFor(c.classId);
+        crumbs.push_back(c);
+    }
 
     for (auto* editor : m_editors)
         editor->setBreadcrumb(crumbs);
@@ -8910,9 +8959,7 @@ bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHisto
     // Preserve the typed expression as the formula unless it is a bare
     // hex/decimal literal that round-trips identically through the canonical
     // "0xHEX" display — a literal formula would only shadow the number.
-    static const QRegularExpression literalRx(
-        QStringLiteral("^\\s*(?:0[xX][0-9A-Fa-f]+|\\d+)\\s*$"));
-    const QString newFormula = literalRx.match(s).hasMatch() ? QString() : s;
+    const QString newFormula = isBareAddressLiteral(s) ? QString() : s;
     const uint64_t oldBase = m_doc->tree.baseAddress;
     const QString oldFormula = m_doc->tree.baseAddressFormula;
     if (result.value != oldBase || newFormula != oldFormula) {
@@ -8922,11 +8969,22 @@ bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHisto
         resetChangeTracking();
         m_doc->undoStack.push(new RcxCommand(this,
             cmd::ChangeBase{oldBase, result.value, oldFormula, newFormula}));
+        // The command's apply recomposed but announced nothing (undo-stack
+        // pushes never emit documentChanged). The bookmarks dock, the doc-tab
+        // source icon and the MCP bridge listen to documentChanged — and so
+        // does this controller (→ refresh), which makes this the canonical
+        // post-rebase refresh for every entry point, the pair the old
+        // navigateToFormula fired. Emitted once; the inline edit's own
+        // trailing refresh is skipped on success.
+        emit m_doc->documentChanged();
+    } else {
+        // Same base, same formula: nothing to record or announce. The inline
+        // edit still needs its typed text replaced by the canonical row.
+        refresh();
     }
     // m_focusPath is deliberately kept: the expanded chain is still on
     // screen, and reconcileFocusPath keeps it structurally honest.
     GotoAddressDialog::pushRecent(s);
-    refresh();
     return true;
 }
 

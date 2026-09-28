@@ -3,7 +3,19 @@
 #include "providers/provider.h"
 #include "symbolstore.h"
 
+#include <QRegularExpression>
+
 namespace rcx {
+
+// A bare hex / decimal literal — an expression that round-trips identically
+// through the canonical "0xHEX" display, so keeping it as the formula would
+// only shadow the number. rebaseTo clears the formula for these, and the MCP
+// change_base op knows one evaluates with no source attached.
+inline bool isBareAddressLiteral(const QString& expr) {
+    static const QRegularExpression rx(
+        QStringLiteral("^\\s*(?:0[xX][0-9A-Fa-f]+|\\d+)\\s*$"));
+    return rx.match(expr).hasMatch();
+}
 
 // The one AddressParserCallbacks builder.
 //

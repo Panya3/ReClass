@@ -2,6 +2,7 @@
 #include "addressparser.h"
 #include "core.h"
 #include "controller.h"
+#include "address_callbacks.h"
 #include "generator.h"
 #include "mainwindow.h"
 #include "scanner.h"
@@ -1630,15 +1631,21 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
         }
         else if (opType == "change_base") {
             // Through rebaseTo so an MCP rebase is undoable and lands in the
-            // recent list like every other rebase. A formula that cannot be
-            // evaluated yet (no provider attached — the documented
-            // "auto-resolve on provider attach" use) keeps the old contract:
-            // store the literal base plus the formula verbatim.
+            // recent list like every other rebase — when it can be evaluated
+            // here: a bare literal always can, a formula needs an attached
+            // source. Otherwise (the documented "auto-resolve on provider
+            // attach" use) the old contract applies directly — store the
+            // literal base plus the formula verbatim — without first bouncing
+            // off rebaseTo, whose refusal would flash "Base: …" in the status
+            // bar for an op that is applied anyway.
             const QString formula = op.value("formula").toString().trimmed();
             const QString baseStr = op.value("baseAddress").toString().trimmed();
             const QString expr = formula.isEmpty() ? baseStr : formula;
+            const bool haveSource = doc->provider && doc->provider->isValid();
+            const bool canEvaluate = !expr.isEmpty()
+                                  && (haveSource || isBareAddressLiteral(expr));
             QString err;
-            if (expr.isEmpty() || !ctrl->rebaseTo(expr, &err)) {
+            if (!canEvaluate || !ctrl->rebaseTo(expr, &err)) {
                 uint64_t newBase = baseStr.toULongLong(nullptr, 16);
                 doc->undoStack.push(new RcxCommand(ctrl,
                     cmd::ChangeBase{tree.baseAddress, newBase, tree.baseAddressFormula, formula}));

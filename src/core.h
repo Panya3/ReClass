@@ -582,17 +582,31 @@ inline QString nodeClassLabel(const Node& n) {
 }
 
 // One rendered breadcrumb segment. The controller flattens its focus path
-// (root class + the chain of expanded pointers) into a Crumb list — class
-// names plus the field followed between them — and hands it to each editor's
-// BreadcrumbBar. `isField` segments are the inert "› fieldName" connectors;
-// class segments carry their crumb INDEX (0 = root) for collapse-to-on-click.
+// (view root + the chain of expanded hops) into a Crumb list, one crumb per
+// class you stood in, in the dotted shape the bar renders verbatim:
+//   "RcxEditor.vptr" › "QWidgetPrivate.parent" › "QWidget"
+// Every ancestor crumb names the class you were IN plus the field you left
+// it through; the deepest crumb is the bare class you are standing in. There
+// is no separate field segment — the field lives in the ancestor's label.
+// rootId is the crumb INDEX (0 = root), the collapse-to target on click; the
+// other fields let a widget answer "where is this class in memory", "which
+// hop got me here" and "what kind of class is it" without re-walking the
+// tree on every paint.
 struct Crumb {
     QString  label;
-    uint64_t rootId  = 0;      // crumb index for class segments (0 for field segments)
-    bool     isField = false;  // true = inert field connector, false = clickable class
+    uint64_t rootId    = 0;  // crumb index (0 = root); collapseToFocus(index) on click
+    uint64_t classId   = 0;  // node id of the class this crumb names
+    uint64_t pointerId = 0;  // the focus hop (pointer or embedded struct) this
+                             // crumb was entered through; 0 for the root crumb
+    uint64_t address   = 0;  // absolute address of that class; 0 = unknown /
+                             // unreadable (null or unmapped pointer target)
+    QString  keyword;        // resolved class keyword: struct/class/union/enum;
+                             // "" when the class node could not be resolved
 
     bool operator==(const Crumb& o) const {
-        return label == o.label && rootId == o.rootId && isField == o.isField;
+        return label == o.label && rootId == o.rootId && classId == o.classId
+            && pointerId == o.pointerId && address == o.address
+            && keyword == o.keyword;
     }
     bool operator!=(const Crumb& o) const { return !(*this == o); }
 };
@@ -1177,6 +1191,50 @@ inline QStringList rootClassNames(const NodeTree& tree) {
     }
     if (out.isEmpty()) out.append(QStringLiteral("Untitled"));
     return out;
+}
+
+// ── Drill frames (shared by the focus path and the address bar model) ──
+
+// Nearest enclosing drill FRAME of a node: a top-level root, or an embedded
+// struct expanded in place (drillTargetId(n) == n.id — it is its own hop).
+// Walking parentId all the way up is right for "which root owns this byte"
+// but wrong for the focus path: with it, `Player.stats.hp` sits in `Player`,
+// so a trail through `stats` failed the container check while the breadcrumb
+// labelled the frame from refId (0 → the first root class). Every focus-path
+// consumer — reconcile / chain / breadcrumb / sibling lists / path
+// resolution — must agree on one notion of "container"; this is it. 0 for
+// roots and orphans (a dangling parentId).
+inline uint64_t containerOf(const NodeTree& tree, uint64_t nodeId) {
+    int idx = tree.indexOfId(nodeId);
+    if (idx < 0) return 0;
+    uint64_t cur = tree.nodes[idx].parentId;
+    int guard = 0;
+    while (cur != 0 && guard++ < 4096) {
+        int ci = tree.indexOfId(cur);
+        if (ci < 0) return 0;   // dangling parentId: orphan
+        const Node& c = tree.nodes[ci];
+        if (c.parentId == 0 || drillTargetId(c) == c.id) return c.id;
+        cur = c.parentId;
+    }
+    return 0;
+}
+
+// The expanded hop that put `containerId`'s rows on screen: an embedded
+// struct is its own hop; a root class was opened by the first expanded
+// drillable pointer whose refId names it. First match wins (deterministic;
+// ambiguous only when one class is referenced by 2+ expanded pointers). 0
+// when nothing expanded opens it.
+inline uint64_t expandedHopInto(const NodeTree& tree, uint64_t containerId) {
+    int ci = tree.indexOfId(containerId);
+    if (ci < 0) return 0;
+    const Node& c = tree.nodes[ci];
+    if (c.parentId != 0)
+        return (!c.collapsed && drillTargetId(c) == c.id) ? c.id : 0;
+    for (const Node& nd : tree.nodes) {
+        if (nd.refId == containerId && !nd.collapsed && drillTargetId(nd) != 0)
+            return nd.id;
+    }
+    return 0;
 }
 
 // ── Value History (ring buffer for heatmap) ──

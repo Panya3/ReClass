@@ -561,6 +561,16 @@ if(BUILD_TESTING)
     target_link_libraries(test_command_row PRIVATE ${QT}::Core ${QT}::Test)
     add_test(NAME test_command_row COMMAND test_command_row)
 
+    # ── Address bar model + nav history: pure headers over NodeTree ──
+    # Core + Test only (format.cpp for fmt::typeNameRaw, which core.h declares).
+    # Deliberately NO controller / editor / widgets: the model must stay
+    # buildable without a QWidget so the bar never grows tree logic of its own.
+    add_executable(test_address_bar_model tests/test_address_bar_model.cpp
+        src/format.cpp src/addressparser.cpp)
+    target_include_directories(test_address_bar_model PRIVATE src)
+    target_link_libraries(test_address_bar_model PRIVATE ${QT}::Core ${QT}::Test)
+    add_test(NAME test_address_bar_model COMMAND test_address_bar_model)
+
     add_executable(test_generator tests/test_generator.cpp
         src/generator.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/symbolstore.cpp)
     target_include_directories(test_generator PRIVATE src)

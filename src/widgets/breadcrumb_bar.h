@@ -18,16 +18,16 @@ namespace rcx {
 
 // BreadcrumbBar — compact, clickable drill-down trail shown above the command
 // row in RcxEditor. ALWAYS visible while a class is in view; reflects the
-// inline-expansion focus path (the chain of expanded typed pointers from the
-// root class down to the deepest drilled one), e.g. `RcxEditor › __vptr ›
-// QWidgetVTable`. The controller flattens its focus path into a Crumb list:
-// clickable CLASS crumbs (isField=false; rootId carries the crumb INDEX — 0 =
-// root, i = the class shown by focus pointer i-1) separated by inert FIELD
-// connectors (isField=true). Clicking a class crumb fires onCrumb(index); the
-// editor re-emits it as crumbClicked so the controller collapses everything
-// below that class and scrolls to it. There is NO back button (clicking a
-// crumb is the back affordance). Deep trails collapse the middle to an
-// ellipsis: Head › field › … › field › Tail-1 › field › Tail.
+// inline-expansion focus path (the chain of expanded hops from the root class
+// down to the deepest drilled one) in the dotted shape the controller emits:
+// `RcxEditor.vptr › QWidgetPrivate.parent › QWidget` — each ancestor crumb is
+// the class you were in plus the field you left it through, the deepest is
+// the bare class you are standing in. Every crumb is a class crumb; rootId
+// carries the crumb INDEX (0 = root, i = the class opened by focus hop i-1).
+// Clicking one fires onCrumb(index); the editor re-emits it as crumbClicked
+// so the controller collapses everything below that class and scrolls to it.
+// There is NO back button (clicking a crumb is the back affordance). Deep
+// trails collapse the middle to an ellipsis: Head › … › Tail-1 › Tail.
 //
 // Intentionally no Q_OBJECT (mirrors EnumPickerPopup) — a std::function
 // callback avoids dragging this header into every test target's AUTOMOC. It is
@@ -57,9 +57,8 @@ public:
 //TODO-DELETE(setMaxClassCrumbs)     // Beyond this many class crumbs the middle collapses to an ellipsis.
 //    void setMaxClassCrumbs(int n) { m_maxClassCrumbs = qMax(2, n); rebuild(); }
 
-    // Replace the rendered trail. Interleaves clickable class crumbs
-    // (isField=false, rootId = crumb index) and inert "fieldName" connectors
-    // (isField=true). Always shown when there is ≥1 class crumb.
+    // Replace the rendered trail: one clickable crumb per entry, rootId =
+    // crumb index. Always shown when there is ≥1 crumb.
     void setCrumbs(const QVector<Crumb>& crumbs) {
         // The controller pushes the trail on EVERY refresh tick (live memory
         // recomposes several times a second); an unchanged trail must not
@@ -100,13 +99,13 @@ protected:
 public:
     // ── Test accessors ──
     bool barVisible() const { return isVisible(); }
-    // Rendered tokens left→right: class names, "›" separators, field
-    // connectors, and "…" for a collapsed gap.
+    // Rendered tokens left→right: crumb labels, "›" separators, and "…" for
+    // a collapsed gap.
     QStringList segments() const { return m_segments; }
+    // The trail as pushed (labels plus the per-crumb class / hop / address).
+    const QVector<Crumb>& crumbs() const { return m_crumbs; }
 
 private:
-    struct Item { QString cls; uint64_t index = 0; QString incoming; };
-
     void clearLayout() {
         QLayoutItem* it;
         while ((it = m_layout->takeAt(0)) != nullptr) {
@@ -175,24 +174,17 @@ private:
         if (!m_layout) return;
         clearLayout();
 
-        // Flatten Crumb list → class items carrying their incoming field label.
-        QVector<Item> items;
-        QString pendingField;
-        for (const Crumb& c : m_crumbs) {
-            if (c.isField) { pendingField = c.label; }
-            else { items.push_back({ c.label, c.rootId, pendingField }); pendingField.clear(); }
-        }
+        const int n = m_crumbs.size();
+        if (n == 0) { setVisible(false); return; }
 
-        if (items.isEmpty()) { setVisible(false); return; }
-
-        // Which items render in full; -1 = the collapsed ellipsis gap.
+        // Which crumbs render in full; -1 = the collapsed ellipsis gap.
         QVector<int> show;
-        if (items.size() <= m_maxClassCrumbs) {
-            for (int i = 0; i < items.size(); ++i) show.push_back(i);
+        if (n <= m_maxClassCrumbs) {
+            for (int i = 0; i < n; ++i) show.push_back(i);
         } else {
             show.push_back(0);
             show.push_back(-1);
-            for (int i = items.size() - (m_maxClassCrumbs - 1); i < items.size(); ++i)
+            for (int i = n - (m_maxClassCrumbs - 1); i < n; ++i)
                 show.push_back(i);
         }
 
@@ -201,27 +193,24 @@ private:
             if (idx < 0) {  // ellipsis gap
                 if (!first) addSep();
                 auto* ell = addLabel(QStringLiteral("…"), m_theme.textMuted, false, false);
+                // The hidden crumbs are already dotted ("Class.field"), so the
+                // tooltip only needs the separator between them.
                 QStringList hidden;
-                for (int h = 1; h < items.size() - (m_maxClassCrumbs - 1); ++h)
-                    hidden << items[h].cls;
+                for (int h = 1; h < n - (m_maxClassCrumbs - 1); ++h)
+                    hidden << m_crumbs[h].label;
                 ell->setToolTip(hidden.join(QStringLiteral(" › ")));
                 m_segments.push_back(QStringLiteral("…"));
                 first = false;
                 continue;
             }
-            const Item& item = items[idx];
+            const Crumb& c = m_crumbs[idx];
             if (!first) addSep();
-            if (!item.incoming.isEmpty() && idx != 0) {
-                addLabel(item.incoming, m_theme.textMuted, true, false);
-                m_segments.push_back(item.incoming);
-                addSep();
-            }
-            const bool isCurrent = (idx == items.size() - 1);
-            // Every class crumb is clickable (collapse-to + scroll). The
+            const bool isCurrent = (idx == n - 1);
+            // Every crumb is clickable (collapse-to + scroll). The
             // current/deepest one just scrolls (nothing deeper to collapse);
             // it carries the weight step that marks "you are here".
-            makeClickable(item.cls, item.index, isCurrent, items.size() == 1);
-            m_segments.push_back(item.cls);
+            makeClickable(c.label, c.rootId, isCurrent, n == 1);
+            m_segments.push_back(c.label);
             first = false;
         }
 

@@ -618,22 +618,9 @@ private:
     // Drill target for a node — the struct id following it navigates to
     // (drillTargetId on the resolved node). 0 = nothing to follow.
     uint64_t resolveDefinitionTarget(int nodeIdx) const;
-    // Top-most struct of a node's parentId chain (the root that contains it).
-    // Used to place a drilled pointer at the right focus depth, since a
-    // virtually-expanded member's parentId points at its struct root, NOT the
-    // pointer that expanded it (the refId hop isn't in the parentId chain).
-    uint64_t rootStructOf(uint64_t nodeId) const;
-    // Nearest enclosing drill FRAME of a node: a top-level root, or an
-    // embedded struct expanded in place (drillTargetId(n) == n.id). This —
-    // not rootStructOf — is the container notion every focus-path consumer
-    // (reconcile / chain / breadcrumb) shares, so a trail through
-    // `Player.stats` is neither trimmed by one nor mislabelled. 0 for roots
-    // and orphans.
-    uint64_t containerOf(uint64_t nodeId) const;
-    // The expanded hop that put `containerId`'s rows on screen: the embedded
-    // struct itself, or the first expanded drillable pointer whose refId is
-    // the root. 0 when nothing expanded opens it.
-    uint64_t expandedHopInto(uint64_t containerId) const;
+    // The container notion every focus-path consumer shares — containerOf()
+    // and expandedHopInto() — lives in core.h as free functions over the
+    // NodeTree so the address bar model can use it without a controller.
     // Reconstruct the chain of expanded hops from the view root down to
     // `pid` (inclusive) by following containerOf/expandedHopInto — so
     // ancestors expanded via the fold margin (which never grew m_focusPath)
@@ -647,8 +634,9 @@ private:
     // Display label for a class id (structTypeName / name / fallback). For
     // id 0 / show-all, the first root struct name.
     QString classLabelOf(uint64_t id) const;
-    // Build the dotted "class.field" Crumb list from m_focusPath and push to
-    // every editor's breadcrumb.
+    // Build the dotted "class.field" Crumb list from m_focusPath — with each
+    // crumb's class id, entry hop, address and keyword — and push it to every
+    // editor's breadcrumb.
     void pushBreadcrumb();
 
     // ── Class creation (one canonical scheme, shared by every creator) ──
