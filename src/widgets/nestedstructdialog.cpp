@@ -155,7 +155,7 @@ NestedStructDialog::NestedStructDialog(int defaultOffset, QWidget* parent)
     setModal(true);
     resize(640, 460);
 
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QFont font(s.value("font", "JetBrains Mono").toString(), 10);
     font.setFixedPitch(true);
 

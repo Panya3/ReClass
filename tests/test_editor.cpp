@@ -1541,7 +1541,7 @@ private slots:
         // Count IND_HOVER_SPAN-painted positions across the whole document.
         // Scanning (rather than probing one computed column) is robust to the
         // char-column vs byte-position skew on field lines, which carry
-        // multi-byte tree-connector glyphs (├ │ └) ahead of the value.
+        // multi-byte glyphs (the ▸/▾ fold arrows) ahead of the value.
         auto hoverSpanCount = [&]() {
             long docLen = sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
             int c = 0;
@@ -2325,6 +2325,7 @@ private slots:
         ComposeResult cr = compose(tree, prov);
         m_editor->applyDocument(cr);
         m_editor->setProviderRef(&prov, nullptr, &tree);
+        m_editor->setValuePopupsEnabled(true);   // off by default; this test is about them
         QApplication::processEvents();
 
         // Find the pointer line (should be a Pointer64 with foldCollapsed=true)
@@ -2820,7 +2821,7 @@ private slots:
 
         auto* btnGroup = new QButtonGroup(&win);
         btnGroup->setExclusive(true);
-        auto* btnR = new VTB("REECLASS");
+        auto* btnR = new VTB("RC");
         auto* btnC = new VTB("C/C++");
         setColors(btnR); setColors(btnC);
         btnR->setChecked(true);
@@ -3287,6 +3288,7 @@ private slots:
         ComposeResult cr = compose(tree, prov);
         m_editor->applyDocument(cr);
         m_editor->setProviderRef(&prov, nullptr, &tree);
+        m_editor->setValuePopupsEnabled(true);   // off by default; this test is about them
         QApplication::processEvents();
 
         // Find the FuncPtr line
@@ -3389,6 +3391,9 @@ private slots:
         m_editor->applyDocument(cr);
         m_editor->setProviderRef(&prov, nullptr, &tree);
         QApplication::processEvents();
+        // Popups are off unless asked for (View ▸ Value Popups); this test is
+        // about the H key turning them back off.
+        m_editor->setValuePopupsEnabled(true);
         QVERIFY(m_editor->valuePopupsEnabled());
 
         int fpLine = -1;
@@ -3436,8 +3441,8 @@ private slots:
         QVERIFY2(!m_editor->valuePopupsEnabled(),
                  "H must disable value popups (until View ▸ Value Popups)");
 
-        // Restore for subsequent tests.
-        m_editor->setValuePopupsEnabled(true);
+        // Back to the default for subsequent tests.
+        m_editor->setValuePopupsEnabled(false);
         m_editor->setProviderRef(nullptr, nullptr, nullptr);
         m_editor->applyDocument(m_result);
     }
@@ -4551,6 +4556,8 @@ private slots:
         QVERIFY(line >= 0);
         const QString ft = sci->text(line);
         scrollLineIntoView(sci, line);
+        // A struct footer carries the short ladder ("+1 +10h"); the wider
+        // +100h/+1000h steps belong to the pointer fold's footer only.
         QVERIFY(!ft.contains(QStringLiteral("+100h")));
         QVERIFY(!ft.contains(QStringLiteral("+1000h")));
         for (const char* token : { " +1 ", "+10h", "Trim", "Top" }) {

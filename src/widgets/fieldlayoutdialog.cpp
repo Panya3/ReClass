@@ -18,7 +18,7 @@ FieldLayoutDialog::FieldLayoutDialog(Mode mode, int defaultOffset,
     setModal(true);
     resize(440, (m_mode == InsertField || m_mode == CreateField) ? 250 : 170);
 
-    QSettings s("REECLASS", "REECLASS");
+    QSettings s("RC", "RC");
     QFont font(s.value("font", "JetBrains Mono").toString(), 10);
     font.setFixedPitch(true);
 

@@ -17,7 +17,7 @@ ThemeManager::ThemeManager() {
     loadBuiltInThemes();
     loadUserThemes();
 
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     QString fallback;
     for (const auto& t : m_builtIn) {
         if (t.name.contains("VS2022", Qt::CaseInsensitive)) { fallback = t.name; break; }
@@ -75,26 +75,32 @@ const Theme& ThemeManager::current() const {
     return empty;
 }
 
+// Which half of the light/dark toggle a theme belongs to. Local to the
+// toggle (the only thing that classifies themes this way), not a Theme member.
+static bool isDarkTheme(const Theme& t) {
+    return t.background.lightnessF() < 0.5;
+}
+
 void ThemeManager::setCurrent(int index) {
     auto all = themes();
     if (index < 0 || index >= all.size()) return;
     m_currentIdx = index;
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     settings.setValue("theme", all[index].name);
-    settings.setValue(all[index].isDark() ? "darkTheme" : "lightTheme", all[index].name);
+    settings.setValue(isDarkTheme(all[index]) ? "darkTheme" : "lightTheme", all[index].name);
     emit themeChanged(current());
 }
 
 void ThemeManager::setDarkMode(bool dark) {
-    if (current().isDark() == dark) return;
-    QSettings settings("REECLASS", "REECLASS");
-    settings.setValue(current().isDark() ? "darkTheme" : "lightTheme", current().name);
+    if (isDarkTheme(current()) == dark) return;
+    QSettings settings("RC", "RC");
+    settings.setValue(isDarkTheme(current()) ? "darkTheme" : "lightTheme", current().name);
     const QString saved = settings.value(dark ? "darkTheme" : "lightTheme",
         dark ? "VS2022 Dark" : "Light").toString();
     const auto all = themes();
     int fallback = -1;
     for (int i = 0; i < all.size(); ++i) {
-        if (all[i].isDark() != dark) continue;
+        if (isDarkTheme(all[i]) != dark) continue;
         if (all[i].name == saved) { setCurrent(i); return; }
         if (fallback < 0) fallback = i;
     }
@@ -118,7 +124,7 @@ void ThemeManager::updateTheme(int index, const Theme& theme) {
             m_user[ui] = theme;
     }
     saveUserThemes();
-    QSettings settings("REECLASS", "REECLASS");
+    QSettings settings("RC", "RC");
     settings.setValue("theme", current().name);
     emit themeChanged(current());
 }
@@ -147,7 +153,7 @@ QString ThemeManager::userDir() const {
     // test executable instead — tests always run from the build tree, so
     // scratch stays in the tree regardless of how the exe was launched
     // (ctest, the test runner, or a bare run). The real app (test mode off)
-    // keeps using %APPDATA%\REECLASS\themes as before.
+    // keeps using %APPDATA%\RC\themes as before.
     QString base;
     if (QStandardPaths::isTestModeEnabled()) {
         base = QCoreApplication::applicationDirPath()

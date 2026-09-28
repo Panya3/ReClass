@@ -90,14 +90,12 @@ struct ComposeState {
     int                offsetHexDigits = 8;     // hex digit tier for offset margin
     bool               baseEmitted = false;     // only first root struct shows base address
     bool               compactColumns = false;  // compact column mode: cap type width, overflow long types
-    bool               treeLines      = false;  // draw Unicode tree connectors in indentation
     bool               braceWrap      = false;  // opening brace on its own line
     bool               typeHints      = false;  // show TypeHint chips on hex nodes ("[ptr64]")
     bool               showComments   = true;   // show Comment chips ("/ note") + PDB symbol annotations
     bool               showRtti       = true;   // show Rtti chips ("{RTTI: ClassName}")
-    bool               showEnumChips  = true;   // show Enum chips ("(MEMBER)") on int fields with enum refId
+    bool               showEnumChips  = true;   // retired: an enum-typed field always reads as its enum
     SymbolLookupFn     symbolLookup;             // optional PDB symbol lookup callback
-    QVector<bool>      siblingStack;             // per-depth: true = more siblings follow at this level
     uint64_t           currentPtrBase = 0;      // absolute addr of current pointer expansion target
 
     // ── RTTI auto-detect cache (per compose pass) ──
@@ -134,51 +132,24 @@ struct ComposeState {
         return scopeNameW.value(scopeId, nameW);
     }
 
-    // Set sibling-continuation flag for children at the given depth.
-    // childDepth is the depth of the children being iterated.
-    void setTreeSibling(int childDepth, bool hasMoreSiblings) {
-        if (!treeLines) return;
-        int d = childDepth - 1;
-        while (siblingStack.size() <= d) siblingStack.append(false);
-        siblingStack[d] = hasMoreSiblings;
-    }
-
     void emitLine(const QString& lineText, LineMeta&& lm) {
         // Record this line's char offset in text + the global '\n' if any.
         if (currentLine > 0) text += '\n';
         lineStarts.append(text.size());
         int lineStartChars = text.size();
-        // 3-char fold indicator column: " - " expanded, " + " collapsed, "   " other
-        // CommandRow has no fold prefix (flush left)
+        // A kFoldCol-wide gutter before the indent. Fold boxes are drawn by the
+        // editor on the tree (treeguides.h), never written into the text.
+        // CommandRow and the root footer have none (flush left).
         if (lm.lineKind == LineKind::CommandRow
             || (lm.lineKind == LineKind::Footer && lm.isRootHeader)) {
             // no prefix — flush left
-        } else if (lm.foldHead)
-            text += lm.foldCollapsed ? QStringLiteral(" \u25B8 ") : QStringLiteral(" \u25BE ");
-        else
-            text += QStringLiteral("   ");
-
-        // Replace leading indent spaces with Unicode tree connectors
-        if (treeLines && lm.depth > 0) {
-            QString treeIndent;
-            int D = lm.depth;
-            bool isFooter = (lm.lineKind == LineKind::Footer);
-            for (int d = 0; d < D; d++) {
-                bool active = (d < siblingStack.size() && siblingStack[d]);
-                if (isFooter || d < D - 1) {
-                    // Ancestor continuation or footer's own level
-                    treeIndent += active ? QStringLiteral("\u2502 ")
-                                        : QStringLiteral("  ");
-                } else {
-                    // This node's own connector (non-footer only)
-                    treeIndent += active ? QStringLiteral("\u251C ")
-                                        : QStringLiteral("\u2514 ");
-                }
-            }
-            text += treeIndent + lineText.mid(D * kTreeIndent);
         } else {
-            text += lineText;
+            text += QString(kFoldCol, QLatin1Char(' '));
         }
+
+        // The indent stays spaces: tree lines are drawn by the editor over
+        // it (treeguides.h), so the text is the same with them on or off.
+        text += lineText;
 
         // Auto-detect trailing '{' for braceCol (avoids per-char IPC scan in editor).
         // Stored in Scintilla document-column space — LineGeometry handles the
@@ -343,6 +314,47 @@ static const RttiInfo& rttiForVtable(ComposeState& state, const Provider& prov,
     return state.rttiCache.insert(candidateAddr, info).value();
 }
 
+// The members of an enum, sorted by value, one "name = value" row each at
+// `childDepth` — under an enum's own definition, and under an int field typed as
+// that enum (owner = the field). A field's rows carry the enum's id and each
+// member's value, and the member the field holds right now is marked "◀".
+static void emitEnumMembers(ComposeState& state, const Node& enumDef, int ownerIdx,
+                            uint64_t ownerId, int childDepth, uint64_t addr,
+                            uint64_t enumRefId, bool hasCurrent, int64_t current) {
+    int maxNameLen = 4;
+    for (const auto& m : enumDef.enumMembers)
+        maxNameLen = qMax(maxNameLen, (int)m.first.size());
+
+    QVector<int> order(enumDef.enumMembers.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+        return enumDef.enumMembers[a].second < enumDef.enumMembers[b].second;
+    });
+
+    for (int mi : order) {
+        const auto& m = enumDef.enumMembers[mi];
+        LineMeta lm;
+        lm.nodeIdx      = ownerIdx;
+        lm.nodeId       = ownerId;
+        lm.subLine      = mi;
+        lm.depth        = childDepth;
+        lm.lineKind     = LineKind::Field;
+        lm.isMemberLine = true;
+        lm.nodeKind     = NodeKind::UInt32;
+        lm.foldLevel    = computeFoldLevel(childDepth, false);
+        lm.markerMask   = 0;
+        lm.offsetText   = fmt::fmtOffsetMargin(addr, true, state.offsetHexDigits);
+        lm.offsetAddr   = addr;
+        lm.ptrBase      = state.currentPtrBase;
+        lm.enumRefId    = enumRefId;
+        lm.enumValue    = m.second;
+        QString text = fmt::fmtEnumMember(m.first, m.second, childDepth, maxNameLen);
+        if (hasCurrent && m.second == current)
+            text += QStringLiteral("  ") + QChar(0x25C0);   // ◀ the member the field holds
+        state.emitLine(text, std::move(lm));
+    }
+}
+
 void composeLeaf(ComposeState& state, const NodeTree& tree,
                  const Provider& prov, int nodeIdx,
                  int depth, uint64_t absAddr, uint64_t scopeId) {
@@ -391,6 +403,25 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         // with no hint the RVA flag took.
         if (node.isRelative)
             ptrTypeOverride += QStringLiteral(" rva");
+    }
+
+    // An int field typed as an enum reads as that enum, never as a number: the
+    // type column names the enum, the value is the member it holds, and it folds
+    // open to list the members with that one marked.
+    const Node* enumDef = enumTypeOf(tree, node);
+    bool enumReadable = false;
+    int64_t enumRaw = 0;
+    QString enumValueText;
+    if (enumDef) {
+        const QString enumName = resolvePointerTarget(tree, node.refId);
+        if (!enumName.isEmpty()) ptrTypeOverride = enumName;
+        enumReadable = prov.isReadable(absAddr, node.byteSize());
+        if (enumReadable) {
+            enumRaw = fmt::readEnumRaw(prov, node.kind, absAddr, node.bigEndian);
+            enumValueText = fmt::enumMemberName(*enumDef, enumRaw);
+            if (enumValueText.isEmpty())   // no member holds it: say which number it is
+                enumValueText = QString::number(enumRaw);
+        }
     }
 
     // Detect type overflow in compact mode (for effectiveTypeW)
@@ -444,6 +475,16 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         lm.effectiveNameW  = nameW;
         lm.pointerTargetName = ptrTargetName;
 
+        QString valueOverride;
+        if (enumDef && sub == 0) {
+            lm.foldHead      = true;
+            lm.foldCollapsed = node.collapsed;
+            lm.foldLevel     = computeFoldLevel(depth, true);
+            lm.enumRefId     = node.refId;
+            lm.enumValue     = enumRaw;
+            valueOverride    = enumValueText;
+        }
+
         // Set byte count for hex preview lines (used for per-byte change highlighting)
         if (isHexPreview(node.kind)) {
             lm.lineByteCount = sizeForKind(node.kind);
@@ -451,7 +492,16 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
 
         QString lineText = fmt::fmtNodeLine(node, prov, absAddr, depth, sub,
                                             /*comment=*/{}, typeW, nameW, ptrTypeOverride,
-                                            state.compactColumns);
+                                            state.compactColumns, valueOverride);
+
+        // An open enum field's members follow in braces, like an embedded
+        // struct's: "BallState  state  Bouncing {". Brace-wrap puts the "{" on
+        // its own row, emitted after this one.
+        if (enumDef && sub == 0 && !node.collapsed && !state.braceWrap) {
+            while (lineText.endsWith(QLatin1Char(' '))) lineText.chop(1);
+            lineText += QStringLiteral(" {");
+            lm.braceCol = LineGeometry::forLine(lm).documentColumn(lineText.size() - 1);
+        }
 
         // ── Chip block: Enum, TypeHint, Rtti, Comment ──
         // Each chip appends "  <text>" to lineText and records its
@@ -511,99 +561,8 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
                 lm.chips.push_back(std::move(c));
             };
 
-            // 1. Enum — int field whose refId points at a top-level enum.
-            if (state.showEnumChips
-                && node.refId != 0
-                && (node.kind == NodeKind::UInt8 || node.kind == NodeKind::UInt16
-                 || node.kind == NodeKind::UInt32 || node.kind == NodeKind::UInt64
-                 || node.kind == NodeKind::Int8  || node.kind == NodeKind::Int16
-                 || node.kind == NodeKind::Int32 || node.kind == NodeKind::Int64)
-                && prov.isReadable(absAddr, node.byteSize())) {
-                int refIdx = tree.indexOfId(node.refId);
-                if (refIdx >= 0) {
-                    const Node& refNode = tree.nodes[refIdx];
-                    if (refNode.isEnum() && !refNode.enumMembers.isEmpty()) {
-                        // Read the value exactly as the value column renders
-                        // it (readValueImpl honors node.bigEndian) so a match
-                        // can never contradict the displayed number.
-                        const bool be = node.bigEndian;
-                        auto rU16 = [&](uint64_t a) { uint16_t v = prov.readU16(a); return be ? qbswap(v) : v; };
-                        auto rU32 = [&](uint64_t a) { uint32_t v = prov.readU32(a); return be ? qbswap(v) : v; };
-                        auto rU64 = [&](uint64_t a) { uint64_t v = prov.readU64(a); return be ? qbswap(v) : v; };
-                        int64_t v = 0;
-                        switch (node.kind) {
-                        case NodeKind::UInt8:  v = (int64_t)prov.readU8 (absAddr); break;
-                        case NodeKind::UInt16: v = (int64_t)rU16(absAddr); break;
-                        case NodeKind::UInt32: v = (int64_t)rU32(absAddr); break;
-                        case NodeKind::UInt64: v = (int64_t)rU64(absAddr); break;
-                        case NodeKind::Int8:   v = (int8_t) prov.readU8 (absAddr); break;
-                        case NodeKind::Int16:  v = (int16_t)rU16(absAddr); break;
-                        case NodeKind::Int32:  v = (int32_t)rU32(absAddr); break;
-                        case NodeKind::Int64:  v = (int64_t)rU64(absAddr); break;
-                        default: break;
-                        }
-                        QString memberName;
-                        for (const auto& m : refNode.enumMembers) {
-                            if (m.second == v) { memberName = m.first; break; }
-                        }
-                        if (!memberName.isEmpty()) {
-                            // Match → the value column shows the member NAME
-                            // instead of the raw number, with the decimal
-                            // value in parens, all as ONE clickable pill:
-                            //   `RUNNING (1)`  (was: value `1` + `(RUNNING)`
-                            //   chip). The number is always non-negative —
-                            // signed fields display their unsigned
-                            // reinterpretation (Int32 -1 → 4294967295). No
-                            // match → the number renders as plain value,
-                            // no pill.
-                            quint64 unsignedV = (quint64)v;
-                            switch (node.kind) {
-                            case NodeKind::Int8:  unsignedV = (quint8) v; break;
-                            case NodeKind::Int16: unsignedV = (quint16)v; break;
-                            case NodeKind::Int32: unsignedV = (quint32)v; break;
-                            default: break;  // UInt kinds / Int64 already unsigned-widened
-                            }
-                            // Remove the numeric value from lineText (the
-                            // trailing non-space run — fmtNodeLine appends
-                            // the fitted value at the end; compose passes
-                            // carry no comment suffix) so the pill replaces
-                            // the number instead of duplicating it.
-                            int segEnd = lineText.size();
-                            while (segEnd > 0 && lineText.at(segEnd - 1) == QLatin1Char(' '))
-                                --segEnd;
-                            int segStart = segEnd;
-                            while (segStart > 0 && lineText.at(segStart - 1) != QLatin1Char(' '))
-                                --segStart;
-                            lineText = lineText.left(segStart);
-
-                            QString chipText = sanitizeChip(memberName
-                                             + QStringLiteral(" (")
-                                             + QString::number(unsignedV)
-                                             + QStringLiteral(")"));
-                            // Append the pill DIRECTLY after the retained
-                            // value-column padding (the name keeps its
-                            // column width + separator). pushChip would
-                            // trim that padding and glue the pill to the
-                            // name, leaving the value column visually
-                            // blank — the row would read as "no value"
-                            // instead of showing the name where the number
-                            // used to be. Appending in place keeps the
-                            // pill aligned with sibling rows' values.
-                            lineText += chipText;
-                            LineChip c;
-                            c.kind = ChipKind::Enum;
-                            c.text = chipText;
-                            c.startCol = LineGeometry::forLine(lm)
-                                             .documentColumn(lineText.size() - chipText.size());
-                            c.endCol   = LineGeometry::forLine(lm)
-                                             .documentColumn(lineText.size());
-                            c.enumCurrentValue = v;
-                            c.enumRefNodeId    = node.refId;
-                            lm.chips.push_back(std::move(c));
-                        }
-                    }
-                }
-            }
+            // (The Enum "(MEMBER)" chip is gone: an enum-typed field shows the
+            // member as its value, above. ChipKind::Enum stays in the enum.)
 
             // (TypeHint chips were removed — the inline "[ptr64]" /
             // "[int32_t×2]" annotations on hex rows competed with the
@@ -615,7 +574,7 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
             // 3. RTTI / Symbol — annotation chips.
             //    Priority (per user: "RTTI always more accurate"):
             //      1. RTTI resolved  → overlay chip with demangled name only,
-            //                          NO "REECLASS.exe+0x..." symbol suffix.
+            //                          NO "RC.exe+0x..." symbol suffix.
             //                          Click → create class of that name.
             //      2. Pointer with value 0 → overlay "(Name class…)" CTA chip.
             //                          Click → rename current tab's root struct.
@@ -773,6 +732,29 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
         state.emitLine(lineText, std::move(lm));
     }
 
+    // An open enum field: its members (the held one marked), then "}".
+    if (enumDef && !node.collapsed) {
+        if (state.braceWrap) {
+            LineMeta braceLm;
+            braceLm.nodeIdx   = nodeIdx;
+            braceLm.nodeId    = node.id;
+            braceLm.depth     = depth;
+            braceLm.lineKind  = LineKind::Footer;   // tree lines treat it like the closing }
+            braceLm.foldLevel = computeFoldLevel(depth, true);
+            state.emitLine(fmt::indent(depth) + QStringLiteral("{"), std::move(braceLm));
+        }
+        emitEnumMembers(state, *enumDef, nodeIdx, node.id, depth + 1, absAddr,
+                        node.refId, enumReadable, enumRaw);
+        LineMeta footer;
+        footer.nodeIdx   = nodeIdx;
+        footer.nodeId    = node.id;
+        footer.depth     = depth;
+        footer.lineKind  = LineKind::Footer;
+        footer.nodeKind  = node.kind;
+        footer.foldLevel = computeFoldLevel(depth, false);
+        state.emitLine(fmt::indent(depth) + QStringLiteral("}"), std::move(footer));
+    }
+
     // ── Machine code: one row per decoded instruction ──
     //
     // Emitted directly, the way enum and bitfield members are, rather than
@@ -817,7 +799,6 @@ void composeLeaf(ComposeState& state, const NodeTree& tree,
 
             for (int i = 0; i < ins.size(); i++) {
                 const Instruction& in = ins[i];
-                state.setTreeSibling(childDepth, i < ins.size() - 1);
                 const uint64_t rowAddr = absAddr + (uint64_t)in.offset;
                 LineMeta lm;
                 lm.nodeIdx      = nodeIdx;
@@ -977,7 +958,9 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             // All structs (root and nested) use the same header format
             QString rawType = fmt::structTypeName(node);
             bool overflow = state.compactColumns && rawType.size() > typeW;
-            lm.effectiveTypeW = overflow ? rawType.size() : typeW;
+            // An anonymous struct's type is written unpadded straight before its
+            // brace (fmtStructHeader), so its type column is exactly the type.
+            lm.effectiveTypeW = (overflow || node.name.isEmpty()) ? rawType.size() : typeW;
             lm.effectiveNameW = nameW;
             // Enum pick leaf: always render the header without the trailing
             // '{' — the row is a flat variable, not an expandable container.
@@ -1111,37 +1094,8 @@ void composeParent(ComposeState& state, const NodeTree& tree,
     if (!isEnumPickLeaf && (!node.collapsed || isArrayChild || isRootHeader)) {
         // Enum with members: render name = value lines instead of offset-based fields
         if (node.isEnum() && !node.enumMembers.isEmpty()) {
-            int childDepth = depth + 1;
-            int maxNameLen = 4;
-            for (const auto& m : node.enumMembers)
-                maxNameLen = qMax(maxNameLen, (int)m.first.size());
-
-            // Build display order sorted by value
-            QVector<int> order(node.enumMembers.size());
-            std::iota(order.begin(), order.end(), 0);
-            std::sort(order.begin(), order.end(), [&](int a, int b) {
-                return node.enumMembers[a].second < node.enumMembers[b].second;
-            });
-
-            for (int oi = 0; oi < order.size(); oi++) {
-                state.setTreeSibling(childDepth, oi < order.size() - 1);
-                int mi = order[oi];
-                const auto& m = node.enumMembers[mi];
-                LineMeta lm;
-                lm.nodeIdx    = nodeIdx;
-                lm.nodeId     = node.id;
-                lm.subLine    = mi;
-                lm.depth      = childDepth;
-                lm.lineKind   = LineKind::Field;
-                lm.isMemberLine = true;
-                lm.nodeKind   = NodeKind::UInt32;
-                lm.foldLevel  = computeFoldLevel(childDepth, false);
-                lm.markerMask = 0;
-                lm.offsetText = fmt::fmtOffsetMargin(absAddr, true, state.offsetHexDigits);
-                lm.offsetAddr = absAddr;
-                lm.ptrBase    = state.currentPtrBase;
-                state.emitLine(fmt::fmtEnumMember(m.first, m.second, childDepth, maxNameLen), std::move(lm));
-            }
+            emitEnumMembers(state, node, nodeIdx, node.id, depth + 1, absAddr,
+                            /*enumRefId=*/0, /*hasCurrent=*/false, 0);
 
             // Footer
             if (!isArrayChild) {
@@ -1173,7 +1127,6 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 maxNameLen = qMax(maxNameLen, (int)m.name.size());
 
             for (int mi = 0; mi < node.bitfieldMembers.size(); mi++) {
-                state.setTreeSibling(childDepth, mi < node.bitfieldMembers.size() - 1);
                 const auto& m = node.bitfieldMembers[mi];
                 uint64_t bitVal = fmt::extractBits(prov, absAddr, node.elementKind,
                                                    m.bitOffset, m.bitWidth);
@@ -1228,7 +1181,6 @@ void composeParent(ComposeState& state, const NodeTree& tree,
             int eTW = state.effectiveTypeW(node.id);
             int eNW = state.effectiveNameW(node.id);
             for (int i = 0; i < node.arrayLen; i++) {
-                state.setTreeSibling(childDepth, i < node.arrayLen - 1);
                 uint64_t elemAddr = absAddr + (uint64_t)i * elemSize;
 
                 // Type override: "float[0]", "uint32_t[1]", etc.
@@ -1275,7 +1227,6 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 int elemSize = tree.structSpan(node.refId, &state.childMap);
                 if (elemSize <= 0) elemSize = 1;
                 for (int i = 0; i < node.arrayLen; i++) {
-                    state.setTreeSibling(childDepth, i < node.arrayLen - 1);
                     uint64_t elemBase = absAddr + (uint64_t)i * elemSize;
                     // Use base offset that maps refStruct's children to the right provider address
                     composeParent(state, tree, prov, refIdx, childDepth, elemBase, node.refId,
@@ -1294,7 +1245,6 @@ void composeParent(ComposeState& state, const NodeTree& tree,
                 uint64_t refScopeId = node.refId;
                 for (int rci = 0; rci < refChildren.size(); rci++) {
                     int childIdx = refChildren[rci];
-                    state.setTreeSibling(childDepth, rci < refChildren.size() - 1);
                     const Node& child = tree.nodes[childIdx];
                     // Self-referential child → show as collapsed struct (non-expandable)
                     if (state.visiting.contains(child.id)) {
@@ -1334,8 +1284,6 @@ void composeParent(ComposeState& state, const NodeTree& tree,
         int elementIdx = 0;
         for (int ri = 0; ri < regular.size(); ri++) {
             int childIdx = regular[ri];
-            bool hasMore = (ri < regular.size() - 1);
-            state.setTreeSibling(childDepth, hasMore);
             // Pass this container's id as the scope for children (for per-scope widths)
             // For array elements, also pass the element index for [N] separator
             composeNode(state, tree, prov, childIdx, childDepth, base, rootId,
@@ -1619,7 +1567,6 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                 // These are real tree nodes with independent state — use rootId
                 // so resolveAddr computes offsets relative to the pointer target.
                 for (int pci = 0; pci < ptrChildren.size(); pci++) {
-                    state.setTreeSibling(depth + 1, pci < ptrChildren.size() - 1);
                     composeNode(state, tree, childProv, ptrChildren[pci], depth + 1,
                                 pBase, node.id, false, node.id);
                 }
@@ -1710,7 +1657,6 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     PROFILE_SCOPE("compose");
     ComposeState state;
     state.compactColumns = compactColumns;
-    state.treeLines = treeLines;
     state.braceWrap = braceWrap;
     state.typeHints = typeHints;
     state.showComments = showComments;
@@ -1807,6 +1753,8 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
             return fmt::structTypeName(n);
         if (n.kind == NodeKind::Pointer32 || n.kind == NodeKind::Pointer64)
             return fmt::pointerTypeName(n.kind, resolvePointerTarget(tree, n.refId));
+        if (enumTypeOf(tree, n))   // an enum-typed int shows the enum's name
+            return resolvePointerTarget(tree, n.refId);
         return fmt::typeNameRaw(n.kind);
     };
 
