@@ -274,7 +274,7 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
             codicon("home.panels.bookmarks", "Bookmarks", "Open the bookmarks (Ctrl+Shift+K)",
                     "bookmark", GF::Plain, SZ::Small, true),
             codicon("home.panels.console", "Console", "Show the console", "console"),
-            codicon("home.panels.split", "Split Below", "Split the editor below (Ctrl+\)", "split-vertical"),
+            codicon("home.panels.split", "Split Below", "Split the editor below (Ctrl+\\)", "split-vertical"),
         };
         tab.panels.append(panels);
 

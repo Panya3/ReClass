@@ -753,7 +753,10 @@ void TestRibbonLayout::doubleClickWhileMinimizedRestoresOnce() {
 }
 
 void TestRibbonLayout::lightThemeStillPaints() {
-    // tw.json: text == textDim == textMuted; disabled must still dim via opacity.
+    // tw.json is the one light theme, so it is the only place a dim tone has
+    // to read as DARKER than the paper rather than lighter. Its ladder is a
+    // real one (13.7:1 body text down to 3:1 faint against #D4D0C8); disabled
+    // still dims via opacity on top of that.
     const Theme light = loadTheme(QStringLiteral("tw"));
     QVERIFY(light.background.isValid());
     RibbonBar bar;
