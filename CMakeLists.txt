@@ -917,7 +917,7 @@ if(BUILD_TESTING)
         add_test(NAME test_new_class_selfattach COMMAND test_new_class_selfattach)
 
         # ── Byte-selection ↔ controller integration ──
-        add_executable(test_byte_selection_controller tests/test_byte_selection_controller.cpp
+        add_executable(test_byte_selection_controller tests/test_byte_selection_controller.cpp src/resources.qrc
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp

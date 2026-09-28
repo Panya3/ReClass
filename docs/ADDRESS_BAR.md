@@ -26,7 +26,7 @@ other strip starts on.
 
 | File | Role |
 |---|---|
-| `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the overflow rule (six fit steps, then the four narrow-pane steps), tooltips, context menus, the two edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
+| `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the overflow rule (six fit steps, then the five narrow-pane steps), tooltips, context menus, the two edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
 | `src/widgets/address_bar_model.h` | Core-only model: `AddressBarState` (the value type pushed per refresh, `operator==` guards the relayout), `siblingFieldsOf` / `rootClassEntries` / `trailPathText` / `resolveDrillPath` over a `NodeTree`, and `AddressBarTreeQueries` (what the menus and the path edit pull on demand). |
 | `src/nav_history.h` | `NavEntry` (a PLACE: view root, trail, base + formula, saved-source index, scroll anchor, label) and `NavHistory` (push dedupes the head, truncates forward, cap 50, `back()` / `forward()` skip stale entries, `forgetSource` / `forgetAllSources` follow the saved-source list). |
 | `src/address_callbacks.h` | `makeAddressCallbacks(Provider*, ptrSize)` — the one `AddressParserCallbacks` block (module lookup, memory read, kernel paging) every evaluator shares. |
@@ -109,7 +109,7 @@ the right edge — `relayout()` asserts it (debug) and
 `test_breadcrumb::testNarrowPanesKeepTheDeepestCrumbAndRecent` pins it at 480
 / 300 / 240 px, at the floor, and at every px between the floor and 300
 (Forward always goes before Back). The floor is `AddressBar::kNarrowFloorW`
-(228 px: a 4-px gutter, the icon 22, its chevron 14 plus 4 px of pad, the
+(228 px: the chip cell's 4-px left edge (its icon ink lands on kGutter), the icon 22, its chevron 14 plus 4 px of pad, the
 bare base 72, `«` 18, the deepest crumb 72, `recent` 16 and the 6-px margin);
 narrower than that nothing can hold the two and the layout is best effort.
 The deepest crumb is never

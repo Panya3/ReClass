@@ -52,6 +52,7 @@ src/*.png
 /*_stderr.txt
 /*.out
 *.log
+__pycache__/
 *.patch
 
 # ── Agent-skill local docs & scratch (per-user, never committed) ──

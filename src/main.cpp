@@ -2525,7 +2525,7 @@ protected:
                                          : palette().color(QPalette::WindowText);
             // The whole label is a click target (Goto Address), so on hover the
             // MAIN segment says so: brighter + underlined, the same link cue
-            // the breadcrumb uses. The dim detail and the separator stay put.
+            // the address bar uses. The dim detail and the separator stay put.
             QFont mainFont = font();
             if (m_hover) {
                 if (colHover.isValid()) c = colHover;
@@ -3150,6 +3150,11 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // TypeHint overlay chip → commit the inferred kind to the field.
     // For uniform splits (int32×2), the controller's batch path
     // applies the kind across the whole hex run.
+    // The address bar's places menu and base context menu offer "Go to
+    // address..."; the dialog lives on the main window, so the editor only
+    // asks for it.
+    connect(pane.editor, &RcxEditor::gotoDialogRequested, this, &MainWindow::showGotoAddressDialog);
+
     connect(pane.editor, &RcxEditor::typeHintChipClicked, this,
             [this](int nodeIdx, QVector<NodeKind> kinds) {
         if (kinds.isEmpty()) return;
@@ -5308,9 +5313,9 @@ void MainWindow::selfTest() {
     // plugin being missing at runtime (user deleted the DLL, custom build
     // without it, etc.) — without the check, attachViaPlugin pops a
     // "Provider Unavailable" dialog mid-tutorial which derails the flow.
-    // Silent skip is fine; the cmd row falls back to the "source▾"
-    // placeholder and the tutorial still demonstrates the layout, just
-    // with empty bytes instead of live ones.
+    // Silent skip is fine; the address bar's chip just reads "Select
+    // source" and the tutorial still demonstrates the layout, just with
+    // empty bytes instead of live ones.
     if (ProviderRegistry::instance().findProvider(QStringLiteral("processmemory"))) {
         DWORD pid = GetCurrentProcessId();
         QString target = QString("%1:REECLASS.exe").arg(pid);
@@ -11431,7 +11436,7 @@ MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint local
             // Identify region + compute tight rect
             if (lm->lineKind == LineKind::CommandRow) {
                 r.region = QStringLiteral("editor.commandRow");
-                r.description = QStringLiteral("Command row — source, address, root type");
+                r.description = QStringLiteral("Command row — chevron, root type, class name");
                 r.globalRect = lineRect(line);
             } else if (lm->lineKind == LineKind::Footer) {
                 r.region = QStringLiteral("editor.footer");
@@ -11777,7 +11782,8 @@ int main(int argc, char* argv[]) {
         QString savedFont = settings.value("font", "JetBrains Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
         // One chrome font for the whole app: the menu bar, menu popups, every
-        // QLabel/QToolButton, the breadcrumb and the rail inherit mono 10 pt
+        // QLabel/QToolButton and the rail inherit mono 10 pt (the address bar
+        // sets chromeFont() itself)
         // instead of each re-deriving it (or silently falling back to the
         // system UI font at a different size). The per-widget 10-pt setFont
         // calls scattered through MainWindow become no-ops.
