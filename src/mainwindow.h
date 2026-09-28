@@ -105,6 +105,7 @@ public:
     // X-button path (the bug where the X stopped working after closing a
     // sibling). Used by `--screenshot <png> closetest`.
     void previewCloseViaX();
+    void previewSymbolsDock();   // --screenshot symbols: Symbols dock at 270 px
 
     // Pin the bottom-right resize grip + the edge/corner resize zones to the
     // current window size. Called from resizeEvent AND explicitly after the

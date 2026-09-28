@@ -51,8 +51,24 @@ protected:
     }
 };
 
-bool isRed(QRgb px)  { return qRed(px) > 200 && qGreen(px) < 60 && qBlue(px) < 60; }
-bool isBlue(QRgb px) { return qBlue(px) > 200 && qRed(px) < 60 && qGreen(px) < 60; }
+// 2-row accent underline (ribbon active tab / checked button): bottom or top
+// N device rows of the widget rect in ONE fill.
+class TwoRowW : public QWidget {
+public:
+    bool top = false;
+    explicit TwoRowW(QWidget* parent) : QWidget(parent) {}
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(255, 255, 255));
+        if (top) rcx::fillTopDeviceRowsOfRect(p, QRectF(rect()), 2, QColor(0, 255, 0));
+        else     rcx::fillBottomDeviceRowsOfRect(p, QRectF(rect()), 2, QColor(0, 255, 0));
+    }
+};
+
+bool isRed(QRgb px)   { return qRed(px) > 200 && qGreen(px) < 60 && qBlue(px) < 60; }
+bool isBlue(QRgb px)  { return qBlue(px) > 200 && qRed(px) < 60 && qGreen(px) < 60; }
+bool isGreen(QRgb px) { return qGreen(px) > 200 && qRed(px) < 60 && qBlue(px) < 60; }
 
 } // namespace
 
@@ -69,11 +85,15 @@ class TestHairlineDpr : public QObject {
     const QList<int> m_rightWidths  = {180, 181, 182, 183};  // right-col fills
     static constexpr int kRightX = 120, kRightY0 = 130, kRowH = 20, kRowGap = 6;
     static constexpr int kLeftY0 = 130, kLeftW = 80;
+    // 2-row sweep: eight heights (20 … 27) / eight y offsets so the bottom
+    // (resp. top) device edge lands on every .0/.25/.5/.75 phase twice.
+    static constexpr int kTwoRowN = 8, kTwoRowY0 = 270, kTwoRowW = 90;
+    static constexpr int kBottomX = 10, kTopX = 120;
 
 private slots:
     void initTestCase() {
         m_win.setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint);
-        m_win.setFixedSize(360, 260);
+        m_win.setFixedSize(360, 540);
         m_win.setStyleSheet(QStringLiteral("background:#ffffff;"));
 
         for (int y : m_hairlineYs) {
@@ -89,6 +109,14 @@ private slots:
             auto* p = new SidePanel(&m_win);
             p->setGeometry(kRightX, kRightY0 + i * (kRowH + kRowGap),
                            m_rightWidths[i], kRowH);
+        }
+
+        for (int i = 0; i < kTwoRowN; ++i) {
+            auto* b = new TwoRowW(&m_win);
+            b->setGeometry(kBottomX, kTwoRowY0 + i * 32, kTwoRowW, 20 + i);
+            auto* t = new TwoRowW(&m_win);
+            t->top = true;
+            t->setGeometry(kTopX, kTwoRowY0 + i * 33, kTwoRowW, 20);
         }
 
         m_win.move(80, 80);
@@ -131,6 +159,40 @@ private slots:
             QVERIFY2(cols == 1, qPrintable(QStringLiteral(
                 "left panel at x=%1 (devLeft %2) painted %3 border cols, want exactly 1")
                 .arg(m_leftXs[i]).arg(m_leftXs[i] * m_dpr).arg(cols)));
+        }
+    }
+
+    // A 2-row underline must be exactly two CONTIGUOUS device rows in every
+    // phase — two 1-row fills 1 logical px apart skip a row at 1.25.
+    void twoBottomRowsAreContiguousInEveryPhase() {
+        const int xDev = int((kBottomX + kTwoRowW / 2) * m_dpr);
+        for (int i = 0; i < kTwoRowN; ++i) {
+            const int y = kTwoRowY0 + i * 32, h = 20 + i;
+            const int lo = int(y * m_dpr) - 2, hi = int((y + h) * m_dpr) + 3;
+            int rows = 0, first = -1, last = -1;
+            for (int ry = lo; ry <= hi; ++ry)
+                if (isGreen(m_img.pixel(xDev, ry))) { ++rows; if (first < 0) first = ry; last = ry; }
+            QVERIFY2(rows == 2 && last == first + 1, qPrintable(QStringLiteral(
+                "bottom 2-row fill y=%1 h=%2 (devBottom %3): %4 green rows (%5..%6), want 2 contiguous")
+                .arg(y).arg(h).arg((y + h) * m_dpr).arg(rows).arg(first).arg(last)));
+            // … and the pair ends on the row the 1-row helper would pick, so a
+            // 2-row underline replaces a 1-row hairline from the same rect.
+            QCOMPARE(last, int(qFloor((y + h) * m_dpr - 0.5)));
+        }
+    }
+
+    void twoTopRowsAreContiguousInEveryPhase() {
+        const int xDev = int((kTopX + kTwoRowW / 2) * m_dpr);
+        for (int i = 0; i < kTwoRowN; ++i) {
+            const int y = kTwoRowY0 + i * 33, h = 20;
+            const int lo = int(y * m_dpr) - 3, hi = int((y + h) * m_dpr) + 2;
+            int rows = 0, first = -1, last = -1;
+            for (int ry = lo; ry <= hi; ++ry)
+                if (isGreen(m_img.pixel(xDev, ry))) { ++rows; if (first < 0) first = ry; last = ry; }
+            QVERIFY2(rows == 2 && last == first + 1, qPrintable(QStringLiteral(
+                "top 2-row fill y=%1 (devTop %2): %3 green rows (%4..%5), want 2 contiguous")
+                .arg(y).arg(y * m_dpr).arg(rows).arg(first).arg(last)));
+            QCOMPARE(first, int(qFloor(y * m_dpr + 0.5)));
         }
     }
 

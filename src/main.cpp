@@ -3495,6 +3495,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         else if (index == 1) p->viewMode = VM_Rendered;
         else if (index == 3) p->viewMode = VM_Both;
         else                 p->viewMode = VM_Debug;
+        if (p == findActiveSplitPane()) syncViewButtons(p->viewMode);
 
         // Sync status bar buttons if this is the active pane
         auto* tab = activeTab();
@@ -3936,15 +3937,20 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
                         QString rname = rn.structTypeName.isEmpty() ? rn.name : rn.structTypeName;
                         if (rn.isEnum()) {
                             int memberCount = rn.enumMembers.size();
-                            dimPart += QStringLiteral("%1: %2 members")
+                            // Divider before the class segment - without it the
+                            // key hints ran straight into the name ("U=uintFoo: 0x88").
+                            if (!dimPart.isEmpty()) dimPart += QStringLiteral("  ·");
+                            dimPart += QStringLiteral("  %1: %2 members")
                                 .arg(rname).arg(memberCount);
                         } else {
                             int structSz = ctrl->document()->tree.structSpan(sizeRootId);
-                            if (structSz > 0)
-                                dimPart += QStringLiteral("%1: 0x%2 (%3)")
+                            if (structSz > 0) {
+                                if (!dimPart.isEmpty()) dimPart += QStringLiteral("  ·");
+                                dimPart += QStringLiteral("  %1: 0x%2 (%3)")
                                     .arg(rname)
                                     .arg(QString::number(structSz, 16).toUpper())
                                     .arg(structSz);
+                            }
                         }
                     }
                 }
@@ -5287,6 +5293,16 @@ void MainWindow::previewCodeView() {
     tab->panes.first().tabWidget->setCurrentIndex(1);  // select the "Code" view
 }
 
+// --screenshot symbols: open the Symbols dock at the narrow width the header
+// chips / sort row have to survive (the user's dock is ~270 px).
+void MainWindow::previewSymbolsDock() {
+    createSymbolsDock();
+    if (!m_symbolsDock) return;
+    m_symbolsDock->show();
+    m_symbolsDock->raise();
+    resizeDocks({m_symbolsDock}, {270}, Qt::Horizontal);
+}
+
 void MainWindow::previewCloseViaX() {
     // The --screenshot handler already opened one tab; add two more so there
     // are three (UnnamedClass0/1/2). Then close two of them via the REAL
@@ -6385,9 +6401,11 @@ void MainWindow::createRibbon() {
 
     // View-mode buttons have no menu equivalent today.
     m_actCodeView = new QAction(QStringLiteral("Code"), this);
+    m_actCodeView->setCheckable(true);   // checked state = the ribbon's underline
     m_actCodeView->setToolTip(QStringLiteral("Show the generated C++ for the active class"));
     connect(m_actCodeView, &QAction::triggered, this, [this]() { setViewMode(VM_Rendered); });
     m_actBothView = new QAction(QStringLiteral("Both"), this);
+    m_actBothView->setCheckable(true);
     m_actBothView->setToolTip(QStringLiteral("Structure and generated code side by side"));
     connect(m_actBothView, &QAction::triggered, this, [this]() { setViewMode(VM_Both); });
     bind("home.code.codeview", m_actCodeView);
@@ -6406,6 +6424,9 @@ void MainWindow::syncRibbonController() {
     const bool hasTab = (c != nullptr);
     if (m_actCodeView) m_actCodeView->setEnabled(hasTab);
     if (m_actBothView) m_actBothView->setEnabled(hasTab);
+    // Mirror the active pane's view mode into the checkable Code / Both pair.
+    auto* pane = hasTab ? findActiveSplitPane() : nullptr;
+    syncViewButtons(pane ? pane->viewMode : VM_Reclass);
 }
 
 void MainWindow::setActiveDocDock(QDockWidget* dock) {
@@ -6629,8 +6650,12 @@ void MainWindow::setViewMode(ViewMode mode) {
     syncViewButtons(mode);
 }
 
-void MainWindow::syncViewButtons(ViewMode /*mode*/) {
-    // View toggle is now per-pane via QTabWidget tab bar — nothing to sync globally
+void MainWindow::syncViewButtons(ViewMode mode) {
+    // The per-pane view toggle lives in the pane's QTabWidget tab bar; the
+    // only global mirror is the ribbon's Code / Both pair, whose checked
+    // state paints the accent underline.
+    if (m_actCodeView) m_actCodeView->setChecked(mode == VM_Rendered);
+    if (m_actBothView) m_actBothView->setChecked(mode == VM_Both);
 }
 
 // ── Find the root-level struct ancestor for a node ──
@@ -11802,7 +11827,9 @@ int main(int argc, char* argv[]) {
                                  && args[ssIdx + 2] == "code");
             bool showSplash = (ssIdx + 2 < args.size()
                                  && args[ssIdx + 2] == "splash");
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash]() {
+            bool showSymbols = (ssIdx + 2 < args.size()
+                                 && args[ssIdx + 2] == "symbols");
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols]() {
                 if (showSplash) {
                     // Capture the start page itself — skip project_new so it
                     // shows the no-tabs landing.
@@ -11819,6 +11846,8 @@ int main(int argc, char* argv[]) {
                         window.previewCodeView();
                     if (closeTest)
                         window.previewCloseViaX();
+                    if (showSymbols)
+                        window.previewSymbolsDock();
                 }
                 // Defer the grab so the dock layout settles + the panel
                 // paints its initial state before we capture.

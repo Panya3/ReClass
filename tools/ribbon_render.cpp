@@ -1,7 +1,7 @@
 // Render harness for the ReClassEx-style ribbon. Builds a RibbonBar, applies
-// a theme, and grabs BOTH tabs at 760 / 1350 / 1920 logical px to PNGs so the
-// panel / caption / column metrics and the pixel-glyph icons can be eyeballed
-// against the ReClassEx reference. Needs the "windows" platform (the offscreen
+// a theme, and grabs BOTH tabs at 760 / 1080 / 1350 / 1920 logical px to PNGs
+// so the panel / caption / column metrics and the pixel-glyph icons can be
+// eyeballed (1080 = the user's ~1080-logical window at 125 %). Needs the "windows" platform (the offscreen
 // plugin isn't installed) — run it on the hidden desktop via
 // tools/run_tests_hidden.py's run_hidden(). Set QT_SCALE_FACTOR for HiDPI.
 //
@@ -93,7 +93,7 @@ int main(int argc, char** argv) {
     bar.show();
     for (const QString& tab : {QStringLiteral("modify"), QStringLiteral("home")}) {
         bar.setCurrentTab(tab);
-        for (int w : {760, 1350, 1920}) {
+        for (int w : {760, 1080, 1350, 1920}) {
             bar.resize(w, bar.preferredHeight());
             app.processEvents();
             app.processEvents();
@@ -102,6 +102,24 @@ int main(int argc, char** argv) {
             out << path << "  natural=" << bar.naturalWidth()
                 << "  overflow=[" << bar.overflowedPanelIds().join(QLatin1Char(',')) << "]"
                 << "  typeLabels=" << (bar.itemLabelShown(QStringLiteral("type.hex64")) ? 1 : 0)
+                << "\n";
+            // Logical rects of a few probes so a pixel scan of the PNG can crop
+            // exactly (multiply by the dpr printed above).
+            out << "  rects:";
+            for (const char* id : {"type.hex64", "type.float", "type.utf16", "sel.zero", "add.1024",
+                                   "home.project.newclass", "home.tools.scanner", "home.code.codeview",
+                                   "home.tools.console", "edit.undo"}) {
+                const QRect r = bar.itemRect(QLatin1String(id));
+                if (!r.isNull())
+                    out << " " << id << "=" << r.x() << "," << r.y() << "," << r.width() << "," << r.height();
+            }
+            for (const QString& pid : {QStringLiteral("edit"), QStringLiteral("add"), QStringLiteral("project"), QStringLiteral("tools")}) {
+                const QRect r = bar.panelRect(pid);
+                if (!r.isNull())
+                    out << " panel:" << pid << "=" << r.x() << "," << r.y() << "," << r.width() << "," << r.height();
+            }
+            out << " tab:modify=" << bar.tabRect(QStringLiteral("modify")).x() << "," << bar.tabRect(QStringLiteral("modify")).width()
+                << " tab:home=" << bar.tabRect(QStringLiteral("home")).x() << "," << bar.tabRect(QStringLiteral("home")).width()
                 << "\n";
         }
     }

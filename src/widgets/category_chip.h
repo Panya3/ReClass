@@ -23,8 +23,11 @@ public:
         setMouseTracking(true);
     }
 
-    void setCount(int n) { m_count = n; m_totalCount = -1; update(); }
-    void setCount(int visible, int total) { m_count = visible; m_totalCount = total; update(); }
+    void setCount(int n) { m_count = n; m_totalCount = -1; countChanged(); }
+    void setCount(int visible, int total) { m_count = visible; m_totalCount = total; countChanged(); }
+    // Narrow hosts (the ~270 px Symbols dock) drop the count from the label;
+    // the full text stays in the tooltip.
+    void setShowCount(bool on) { if (m_showCount == on) return; m_showCount = on; countChanged(); }
     void setGroupColor(const QColor& c) { m_groupColor = c; update(); }
 //TODO-DELETE(CategoryChip::setLabel)     void setLabel(const QString& s) { m_label = s; update(); }
 
@@ -34,7 +37,12 @@ public:
         return QSize(5 + 4 + fm.horizontalAdvance(text) + 16, fm.height() + 4);
     }
 
-    QSize minimumSizeHint() const override { return sizeHint(); }
+    // Chips may shrink below their text width (the text elides) but never
+    // below pip + ellipsis, so a row of them can't overlap.
+    QSize minimumSizeHint() const override {
+        QFontMetrics fm(font());
+        return QSize(5 + 4 + fm.horizontalAdvance(QStringLiteral("\u2026")) + 16, fm.height() + 4);
+    }
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -50,9 +58,13 @@ protected:
         const int pipSz = 5;
         const int gap   = 4;
         QFontMetrics fm(font());
-        int textW  = fm.horizontalAdvance(chipText());
+        // Elide instead of overflowing: a block wider than the widget used to
+        // centre off both edges and read as overlapping neighbours.
+        const int avail = qMax(0, width() - pipSz - gap - 16);
+        const QString text = fm.elidedText(chipText(), Qt::ElideRight, avail);
+        int textW  = fm.horizontalAdvance(text);
         int blockW = pipSz + gap + textW;
-        int x      = (width() - blockW) / 2;
+        int x      = qMax(8, (width() - blockW) / 2);
         int baseline = (height() + fm.ascent() - fm.descent()) / 2;
 
         p.fillRect(x, (height() - pipSz) / 2, pipSz, pipSz, chk ? gc : t.textFaint);
@@ -60,14 +72,20 @@ protected:
 
         p.setPen(chk ? gc : t.textMuted);
         p.setFont(font());
-        p.drawText(x, baseline, chipText());
+        p.drawText(x, baseline, text);
     }
 
     void enterEvent(QEnterEvent*) override { update(); }
     void leaveEvent(QEvent*) override { update(); }
 
 private:
-    QString chipText() const {
+    void countChanged() {
+        setToolTip(fullText());
+        updateGeometry();
+        update();
+    }
+    QString chipText() const { return m_showCount ? fullText() : m_label; }
+    QString fullText() const {
         if (m_count < 0) return m_label;
         if (m_totalCount >= 0 && m_totalCount != m_count)
             return QStringLiteral("%1 (%2/%3)").arg(m_label).arg(m_count).arg(m_totalCount);
@@ -77,6 +95,7 @@ private:
     QString m_label;
     int m_count = -1;
     int m_totalCount = -1;
+    bool m_showCount = true;
     QColor m_groupColor;
 };
 

@@ -12,6 +12,7 @@
 #include <QString>
 #include <QStringView>
 #include <QtGlobal>
+#include <QtMath>
 #include <cstdint>
 
 namespace rcx {
@@ -129,11 +130,13 @@ inline constexpr PixelBitmap kCross7x7{7, 7, {
     ".#...#.",
     "#.....#"}};
 
-// Row of three byte "cells" above the fill label (000 / FFF / ???).
-inline constexpr PixelBitmap kSquaresRow11x3{11, 3, {
-    "###.###.###",
+// Row of three byte "cells" above the fill label (000 / FFF / ???). Two rows
+// + a 1-row gap + the 5-row label = 8 font rows, so the block is 8·s tall and
+// fits a 16-device cell at 100 % (s = 2) — a 3-row band overflowed it.
+inline constexpr PixelBitmap kSquaresRow11x2{11, 2, {
     "###.###.###",
     "###.###.###"}};
+inline constexpr int kSquaresGap = 1;   // rows between the squares and the label
 
 // The red "*" that turns the class glyph into "pointer to class" (ReClassEx C*).
 inline constexpr PixelBitmap kStar5x5{5, 5, {
@@ -149,16 +152,26 @@ inline int pixelLabelWidth(QStringView label) {
     return n <= 0 ? 0 : n * kGlyphW + (n - 1) * kGlyphGap;
 }
 
-// Largest whole-device-pixel scale for `label` inside a cellDev×cellDev cell:
-// starts at k·2 for 1–2-char labels (F, D, B, V2 …) and k for longer ones
-// (H64, 1024, WSTR), k = max(1, round(dpr)), then shrinks until both the label
-// width and the 5-row height fit. Never below 1.
-inline int pixelLabelScale(QStringView label, int cellDev, qreal dpr) {
-    const int k = qMax(1, qRound(dpr));
+// ONE scale per DPR for every label: s = ceil(1.6·dpr) → 1.0: 2, 1.25: 2,
+// 1.5: 3, 2.0: 4 (ink 10 / 10 / 15 / 20 device px). "H64" and "F" are the
+// same height in the same panel; the per-length seed (2× for 1–2 chars, 1×
+// for longer) made 3-char labels half the size of their neighbours at 125 %.
+inline int pixelGlyphScale(qreal dpr) {
+    return qMax(1, qCeil(1.6 * dpr - 1e-6));
+}
+
+// The uniform scale, shrunk until both the label width and the 5-row height
+// fit a cellWDev × cellHDev cell (the guard never fires for the ribbon's
+// 8·max(2, len)-wide cells; it does for the 16×16 QMenu icons). Never below 1.
+inline int pixelLabelScale(QStringView label, int cellWDev, int cellHDev, qreal dpr) {
     const int w = pixelLabelWidth(label);
-    int s = k * (label.size() <= 2 ? 2 : 1);
-    while (s > 1 && (w * s > cellDev || kGlyphH * s > cellDev)) --s;
+    int s = pixelGlyphScale(dpr);
+    while (s > 1 && (w * s > cellWDev || kGlyphH * s > cellHDev)) --s;
     return qMax(1, s);
+}
+
+inline int pixelLabelScale(QStringView label, int cellDev, qreal dpr) {
+    return pixelLabelScale(label, cellDev, cellDev, dpr);
 }
 
 // Paints one bitmap at device position (xDev, yDev), each set bit as an s×s block.

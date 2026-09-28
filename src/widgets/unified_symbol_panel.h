@@ -24,6 +24,8 @@
 #include <QSet>
 #include <QSettings>
 #include <QKeyEvent>
+#include <QResizeEvent>
+#include <QGridLayout>
 #include <QHelpEvent>
 #include <QToolTip>
 #include <QMimeData>
@@ -437,7 +439,7 @@ public:
         const QString sortSheet = QStringLiteral(
             "QToolButton { color: %1; background: transparent;"
             " border: none; border-right: 1px solid %4;"
-            " padding: 0 8px; }"
+            " padding: 0 5px; }"
             "QToolButton:last-child { border-right: none; }"
             "QToolButton:checked { color: %2; background: %3; }"
             "QToolButton:hover   { color: %2; }")
@@ -641,14 +643,13 @@ private:
         // [3,4] Chip row with equalized widths + right-aligned status label.
         m_chipRowHost = new QWidget(this);
         m_chipRowHost->setFixedHeight(24);
-        m_chipRow = new QHBoxLayout(m_chipRowHost);
+        m_chipRow = new QGridLayout(m_chipRowHost);
         m_chipRow->setContentsMargins(2, 2, 2, 2);
         m_chipRow->setSpacing(2);
-        m_chipRow->addStretch();
         m_statusLabel = new QLabel(m_chipRowHost);
         m_statusLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_statusLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-        m_chipRow->addWidget(m_statusLabel);
+        relayoutChips();
         outer->addWidget(m_chipRowHost);
     }
 
@@ -827,18 +828,22 @@ private:
                     savePersistedState();
                     refilter();
                 });
-                m_chipRow->insertWidget(insertAt, chip);
-                m_providerChips.append(chip);
+                m_providerChips.insert(qMin(insertAt, m_providerChips.size()), chip);
             }
             insertAt++;
         }
         // [3] Equalize chip widths so the row reads as a single strip
         // (type chooser line 1671-1682 technique).
+        // Cap (not pin) at the widest chip: a fixed width made four ~170 px
+        // chips overlap inside a 270 px dock; capped chips shrink and elide.
         int maxW = 0;
         for (auto* c : m_providerChips)
             maxW = qMax(maxW, c->sizeHint().width());
-        for (auto* c : m_providerChips)
-            c->setFixedWidth(maxW);
+        for (auto* c : m_providerChips) {
+            c->setMaximumWidth(maxW);
+            c->setShowCount(!m_narrowChips);
+        }
+        relayoutChips();
 
         QHash<QString, int> perProv;
         for (const auto& e : m_allEntries) perProv[e.source]++;
@@ -1008,12 +1013,47 @@ private:
             "↑↓ navigate · Enter activate · Ctrl+F filter · drag to editor"));
     }
 
+    // Below ~300 px the chip row can't carry "Name (count)" x4: drop the
+    // counts (tooltips keep them). Re-evaluated on every resize.
+    void resizeEvent(QResizeEvent* e) override {
+        QWidget::resizeEvent(e);
+        const bool narrow = width() < 300;
+        if (narrow == m_narrowChips) return;
+        m_narrowChips = narrow;
+        for (auto* c : m_providerChips) c->setShowCount(!narrow);
+        relayoutChips();
+    }
+
+    // One row of chips (+ right-aligned status) when there is room; two
+    // columns of chips when the dock is narrow, where the status label hides
+    // (each chip's tooltip carries its count). Widgets survive the re-flow.
+    void relayoutChips() {
+        if (!m_chipRow || !m_statusLabel) return;
+        while (QLayoutItem* it = m_chipRow->takeAt(0)) delete it;
+        for (int c = 0; c < m_chipRow->columnCount(); ++c) m_chipRow->setColumnStretch(c, 0);
+        const int n = m_providerChips.size();
+        if (!m_narrowChips) {
+            for (int i = 0; i < n; ++i) m_chipRow->addWidget(m_providerChips[i], 0, i);
+            m_chipRow->setColumnStretch(n, 1);
+            m_chipRow->addWidget(m_statusLabel, 0, n + 1);
+            m_statusLabel->setVisible(true);
+            m_chipRowHost->setFixedHeight(24);
+        } else {
+            for (int i = 0; i < n; ++i) m_chipRow->addWidget(m_providerChips[i], i / 2, i % 2);
+            m_chipRow->setColumnStretch(0, 1);
+            m_chipRow->setColumnStretch(1, 1);
+            m_statusLabel->setVisible(false);
+            const int rows = qMax(1, (n + 1) / 2);
+            m_chipRowHost->setFixedHeight(rows * 22 + 2);
+        }
+    }
+
     void refreshSortLabels() {
         static const char* labels[] = {"name", "address", "kind"};
         for (int i = 0; i < m_sortBtns.size(); i++) {
             QString s = QString::fromLatin1(labels[i]);
             if (i == m_sort)
-                s += (m_sortDir == 1 ? QStringLiteral(" ↑") : QStringLiteral(" ↓"));
+                s += (m_sortDir == 1 ? QStringLiteral("↑") : QStringLiteral("↓"));
             m_sortBtns[i]->setText(s);
         }
     }
@@ -1235,11 +1275,12 @@ private:
     QLineEdit*                  m_search = nullptr;
     QTimer*                     m_searchTimer = nullptr;
     QWidget*                    m_chipRowHost = nullptr;
-    QHBoxLayout*                m_chipRow = nullptr;
+    QGridLayout*                m_chipRow = nullptr;
     QLabel*                     m_statusLabel = nullptr;
     QWidget*                    m_sortRow = nullptr;
     QList<CategoryChip*>        m_providerChips;
     QList<QToolButton*>         m_sortBtns;
+    bool                        m_narrowChips = false;
     QList<QToolButton*>         m_densityBtns;
     UnifiedSymbolModel*         m_model = nullptr;
     UnifiedSymbolDelegate*      m_delegate = nullptr;

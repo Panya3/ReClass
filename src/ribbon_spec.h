@@ -32,6 +32,7 @@ struct RibbonIconSpec {
     Kind        kind   = Kind::Codicon;
     QString     arg;
     GlyphFamily family = GlyphFamily::Plain;
+    bool        mirrorH = false;   // Codicon flipped left↔right (redo = mirrored discard)
 };
 
 struct RibbonItemSpec {
@@ -43,17 +44,20 @@ struct RibbonItemSpec {
     bool           columnBreakBefore = false;  // `|`  — start a new column
     bool           separatorBefore   = false;  // `||` — new column + hairline
     bool           iconOnly          = false;  // label used only for the tooltip
+    bool           destructive       = false;  // icon + label in markerPtr in every state (Delete)
     QVariant       data;
 };
 
 struct RibbonPanelSpec {
     QString id;
     QString caption;
-    // Narrow-width behaviour. Stage 1 drops labels highest dropPriority first;
-    // stage 2 hides whole panels lowest dropPriority first, skipping neverHide.
-    // glyphLabels marks panels whose icons already read as labels (Type, Edit):
-    // their labels are the first to go even in LabelMode::All.
-    int  dropPriority = 0;
+    // Narrow-width behaviour (RibbonBar::relayout).
+    // Stage 1 drops labels: glyphLabels panels first (their icons already read
+    // as labels — Type — so they go even in LabelMode::All), then in Auto by
+    // labelDrop, HIGHER first; panels with equal labelDrop drop together.
+    // Stage 2 hides whole panels by hideOrder, LOWER first, never `neverHide`.
+    int  labelDrop    = 0;
+    int  hideOrder    = 0;
     bool neverHide    = false;
     bool glyphLabels  = false;
     QVector<RibbonItemSpec> items;

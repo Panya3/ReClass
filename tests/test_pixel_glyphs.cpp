@@ -3,7 +3,11 @@
 //   - crispness: every ink pixel is fully opaque at dpr 1.0 / 1.25 / 2.0
 //     (painted in device pixels, dpr stamped after painting)
 //   - the ink bounding box is exactly pixelLabelWidth·s × 5·s and fits the cell
-//   - the scale rule ("B" → 2×, "H64" → 1×, "1024" fits 16 px)
+//   - ONE scale per DPR (pixelGlyphScale: 2 / 2 / 3 / 4 at 1.0 / 1.25 / 1.5 /
+//     2.0): "H64" and "F" are the same height; cells are 8·max(2, len) wide
+//   - the square (wide = false) QMenu path never exceeds 16×16
+//   - every ribbon Codicon has a 16-unit viewBox (24-unit icons mis-weight)
+//   - Codicons render at integer multiples of the 16 grid (16 / 32 / 48)
 //   - the ink colour is exactly the requested family colour
 //   - I32 and U32 (signed vs unsigned) are visibly different
 //   - family colours clear WCAG 3.0 against the body background on every
@@ -17,6 +21,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QPixmap>
+#include <QRegularExpression>
 
 #include "pixelglyphs.h"
 #include "ribbon_icons.h"
@@ -83,6 +88,13 @@ private slots:
     void glyphsAreCrispAndBounded_data();
     void glyphsAreCrispAndBounded();
     void scaleRule();
+    void uniformScaleAcrossLabels_data();
+    void uniformScaleAcrossLabels();
+    void cellWidthsPerKind();
+    void squarePathFitsSixteen();
+    void codiconsOnTheSixteenGrid();
+    void mirrorHIsAFlipAndKeyed();
+    void everyRibbonCodiconIsSixteenUnit();
     void inkColourIsExact();
     void signedDiffersFromUnsigned();
     void compositesFitAndAreCrisp();
@@ -136,7 +148,7 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded_data() {
     QTest::addColumn<int>("family");
     QTest::addColumn<double>("dpr");
     for (const auto& l : m_labels)
-        for (double dpr : {1.0, 1.25, 2.0})
+        for (double dpr : {1.0, 1.25, 1.5, 2.0})
             QTest::newRow(qPrintable(QStringLiteral("%1@%2").arg(l.first).arg(dpr)))
                 << l.first << int(l.second) << dpr;
 }
@@ -149,8 +161,10 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded() {
     const QPixmap pm = typeGlyphIcon(label, GlyphFamily(family), logical, dpr, m_dark);
     QCOMPARE(pm.devicePixelRatio(), dpr);
     const QImage img = straight(pm);
+    const int cellW = 8 * qMax(2, int(label.size()));   // ribbonIconCellWidth
+    const int cellWDev = qRound(cellW * dpr);
     const int cellDev = qRound(logical * dpr);
-    QCOMPARE(img.width(), cellDev);
+    QCOMPARE(img.width(), cellWDev);
     QCOMPARE(img.height(), cellDev);
 
     // Crisp: no partial alpha anywhere.
@@ -161,33 +175,264 @@ void TestPixelGlyphs::glyphsAreCrispAndBounded() {
                 .arg(label).arg(dpr).arg(a).arg(x).arg(y)));
         }
 
-    const int s = pixelLabelScale(label, cellDev, dpr);
+    const int s = pixelLabelScale(label, cellWDev, cellDev, dpr);
+    QCOMPARE(s, pixelGlyphScale(dpr));   // the shrink guard never fires in the ribbon cells
     const Bbox b = inkBbox(img);
     QVERIFY2(b.ink > 0, "glyph rendered nothing");
     QCOMPARE(b.w(), pixelLabelWidth(label) * s);
     QCOMPARE(b.h(), kGlyphH * s);
-    QVERIFY(b.minX >= 0 && b.maxX < cellDev && b.minY >= 0 && b.maxY < cellDev);
+    QVERIFY(b.minX >= 0 && b.maxX < cellWDev && b.minY >= 0 && b.maxY < cellDev);
     // Ink count is a whole multiple of s·s (every bit is a solid s×s block).
     QCOMPARE(b.ink % (s * s), 0);
 }
 
 void TestPixelGlyphs::scaleRule() {
-    // 1–2 chars start at 2·k, 3+ at k; shrunk until they fit.
-    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 16, 1.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("V2"), 16, 1.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 16, 1.0), 1);
-    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 16, 1.0), 1);
+    // ONE scale per DPR: ceil(1.6·dpr) → 2 / 2 / 3 / 4.
+    QCOMPARE(pixelGlyphScale(1.0), 2);
+    QCOMPARE(pixelGlyphScale(1.25), 2);
+    QCOMPARE(pixelGlyphScale(1.5), 3);
+    QCOMPARE(pixelGlyphScale(2.0), 4);
+    // Every label in its 8·max(2, len)-wide cell keeps the uniform scale …
+    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 16, 16, 1.0), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("V2"), 16, 16, 1.0), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 24, 16, 1.0), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 32, 16, 1.0), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 20, 20, 1.25), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 30, 20, 1.25), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 40, 20, 1.25), 2);
+    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 36, 24, 1.5), 3);
+    QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 48, 24, 1.5), 3);
+    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 32, 32, 2.0), 4);
+    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 48, 32, 2.0), 4);
+    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 64, 32, 2.0), 4);
+    // … the shrink guard still protects a square 16 cell (QMenu icons) …
+    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 16, 16, 1.0), 1);
+    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 16, 16, 1.0), 1);
     QVERIFY(pixelLabelWidth(QStringLiteral("1024")) * 1 <= 16);
-    // 125 %: k stays 1 (round(1.25)), the cell is 20 device px.
-    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 20, 1.25), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 20, 1.25), 1);
-    QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 20, 1.25), 1);
-    // 200 %: k = 2 → 4× for short labels, 2× for long ones.
-    QCOMPARE(pixelLabelScale(QStringLiteral("B"), 32, 2.0), 4);
-    QCOMPARE(pixelLabelScale(QStringLiteral("H64"), 32, 2.0), 2);
-    QCOMPARE(pixelLabelScale(QStringLiteral("1024"), 32, 2.0), 2);
-    // A cell too small for even 1× still returns 1 (never 0).
+    // … and a cell too small for even 1× still returns 1 (never 0).
     QCOMPARE(pixelLabelScale(QStringLiteral("WSTR"), 8, 1.0), 1);
+}
+
+void TestPixelGlyphs::uniformScaleAcrossLabels_data() {
+    QTest::addColumn<double>("dpr");
+    for (double dpr : {1.0, 1.25, 1.5, 2.0})
+        QTest::newRow(qPrintable(QStringLiteral("dpr %1").arg(dpr))) << dpr;
+}
+
+// Defect C: "H64" was 5 device px tall next to a 10-px "F" at 125 %. Both
+// (and every other label) are now exactly 5·s tall in the same panel.
+void TestPixelGlyphs::uniformScaleAcrossLabels() {
+    QFETCH(double, dpr);
+    const int s = pixelGlyphScale(dpr);
+    const int want = kGlyphH * s;   // 10 / 10 / 15 / 20
+    QCOMPARE(want, dpr == 1.5 ? 15 : dpr == 2.0 ? 20 : 10);
+    for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
+        const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
+        const Bbox b = inkBbox(img);
+        QVERIFY2(b.h() == want, qPrintable(QStringLiteral("%1@%2: ink %3 px tall, want %4")
+                                           .arg(label).arg(dpr).arg(b.h()).arg(want)));
+        QVERIFY2(b.w() == pixelLabelWidth(QString::fromLatin1(label)) * s,
+                 qPrintable(QStringLiteral("%1@%2: ink %3 px wide").arg(label).arg(dpr).arg(b.w())));
+    }
+    // The fill composites share the scale (block 8·s tall in the 16-tall cell).
+    for (const char* text : {"000", "FFF", "???"}) {
+        const QImage img = straight(fillIcon(QString::fromLatin1(text), GlyphFamily::Hex, 16, dpr, m_dark));
+        const Bbox b = inkBbox(img);
+        QCOMPARE(img.width(), qRound(24 * dpr));
+        QCOMPARE(img.height(), qRound(16 * dpr));
+        QCOMPARE(b.h(), (kSquaresRow11x2.h + kSquaresGap + kGlyphH) * s);
+        QVERIFY(b.w() <= img.width());
+    }
+}
+
+void TestPixelGlyphs::cellWidthsPerKind() {
+    using K = RibbonIconSpec::Kind;
+    auto cell = [](K kind, const char* arg) {
+        RibbonIconSpec sp; sp.kind = kind; sp.arg = QString::fromLatin1(arg);
+        return ribbonIconCellWidth(sp);
+    };
+    QCOMPARE(cell(K::TypeGlyph, "F"), 16);
+    QCOMPARE(cell(K::TypeGlyph, "H8"), 16);
+    QCOMPARE(cell(K::TypeGlyph, "V2"), 16);
+    QCOMPARE(cell(K::TypeGlyph, "H64"), 24);
+    QCOMPARE(cell(K::TypeGlyph, "PTR"), 24);
+    QCOMPARE(cell(K::TypeGlyph, "FN*"), 24);
+    QCOMPARE(cell(K::TypeGlyph, "WSTR"), 32);
+    QCOMPARE(cell(K::TypeGlyph, "1024"), 32);
+    QCOMPARE(cell(K::FillSquares, "000"), 24);
+    QCOMPARE(cell(K::Codicon, "symbol-class"), 16);
+    QCOMPARE(cell(K::AddBytes, "1024"), 16);
+    QCOMPARE(cell(K::InsertBytes, "2048"), 16);
+    QCOMPARE(cell(K::DeleteCross, ""), 16);
+    QCOMPARE(cell(K::ClassPtr, ""), 16);
+    // The rendered pixmap is exactly the cell (device px).
+    for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("H64"), GlyphFamily::Hex, 16, dpr, m_dark)).width(), qRound(24 * dpr));
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("WSTR"), GlyphFamily::Text, 16, dpr, m_dark)).width(), qRound(32 * dpr));
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("F"), GlyphFamily::Float, 16, dpr, m_dark)).width(), qRound(16 * dpr));
+    }
+}
+
+// refreshOwnActionIcons / QMenu use the square path: a 24- or 32-wide ribbon
+// cell must never be downscaled into a 16×16 QIcon — the label shrinks
+// (1×) inside a 16×16 canvas instead. Distinct cache entry from the wide one.
+void TestPixelGlyphs::squarePathFitsSixteen() {
+    RibbonIconSpec h64; h64.kind = RibbonIconSpec::Kind::TypeGlyph; h64.arg = QStringLiteral("H64"); h64.family = GlyphFamily::Hex;
+    RibbonIconSpec fill; fill.kind = RibbonIconSpec::Kind::FillSquares; fill.arg = QStringLiteral("000"); fill.family = GlyphFamily::Hex;
+    RibbonIconSpec wstr; wstr.kind = RibbonIconSpec::Kind::TypeGlyph; wstr.arg = QStringLiteral("WSTR"); wstr.family = GlyphFamily::Text;
+    for (double dpr : {1.0, 1.25, 2.0}) {
+        for (const RibbonIconSpec* sp : {&h64, &fill, &wstr}) {
+            RibbonIconOptions sq; sq.wide = false;
+            const QPixmap square = ribbonIcon(*sp, RibbonIconSize::Small, dpr, m_dark, sq);
+            const QPixmap wide = ribbonIcon(*sp, RibbonIconSize::Small, dpr, m_dark);
+            const QImage si = straight(square), wi = straight(wide);
+            QCOMPARE(si.width(), qRound(16 * dpr));
+            QCOMPARE(si.height(), qRound(16 * dpr));
+            QCOMPARE(wi.width(), qRound(ribbonIconCellWidth(*sp) * dpr));
+            QVERIFY(square.cacheKey() != wide.cacheKey());
+            const Bbox b = inkBbox(si);
+            QVERIFY2(b.ink > 0, qPrintable(sp->arg + QStringLiteral(" square path is blank")));
+            QVERIFY(b.maxX < si.width() && b.maxY < si.height());
+            for (int y = 0; y < si.height(); ++y)
+                for (int x = 0; x < si.width(); ++x) {
+                    const int a = qAlpha(si.pixel(x, y));
+                    QVERIFY2(a == 0 || a == 255, "square path must stay crisp (no downscale)");
+                }
+        }
+    }
+}
+
+// Defect A: Codicons render only at integer multiples of their 16-unit grid.
+// Small: 16·round(dpr) device px centred in the 16-logical cell when it fits
+// (1.25 → 16 in a 20 cell), else the whole cell. Large: 24 @ 100 %, 32 @
+// 125 / 150 %, 48 @ 200 %.
+void TestPixelGlyphs::codiconsOnTheSixteenGrid() {
+    QCOMPARE(ribbonSmallCodiconDev(16, 1.0), 16);
+    QCOMPARE(ribbonSmallCodiconDev(20, 1.25), 16);
+    QCOMPARE(ribbonSmallCodiconDev(24, 1.5), 24);   // 32 doesn't fit → AA at the cell
+    QCOMPARE(ribbonSmallCodiconDev(32, 2.0), 32);
+    QCOMPARE(ribbonLargeIconDev(1.0), 24);
+    QCOMPARE(ribbonLargeIconDev(1.25), 32);
+    QCOMPARE(ribbonLargeIconDev(1.5), 32);
+    QCOMPARE(ribbonLargeIconDev(2.0), 48);
+    QCOMPARE(ribbonLargeIconDev(3.0), 80);   // round(4.5) = 5 grid units
+
+    const QString path = QStringLiteral(":/vsicons/console.svg");   // 1-unit frame at the edge
+    // Small at 1.25: 20×20 canvas, ink confined to the centred 16×16 box.
+    {
+        const QImage img = straight(tintedSvgIcon(path, Qt::white, 16, 1.25));
+        QCOMPARE(img.width(), 20);
+        const Bbox b = inkBbox(img, 30);
+        QVERIFY(b.ink > 0);
+        QVERIFY2(b.minX >= 2 && b.maxX <= 17 && b.minY >= 2 && b.maxY <= 17,
+                 qPrintable(QStringLiteral("small@1.25 ink %1..%2 × %3..%4, want inside 2..17")
+                            .arg(b.minX).arg(b.maxX).arg(b.minY).arg(b.maxY)));
+        // The 1-unit frame lands on whole device pixels: the outermost ink
+        // column is fully opaque, not a grey halo pair.
+        int solid = 0, soft = 0;
+        for (int y = 3; y <= 16; ++y) {
+            const int a = qAlpha(img.pixel(b.minX, y));
+            if (a == 255) ++solid; else if (a > 0) ++soft;
+        }
+        QVERIFY2(solid > soft, qPrintable(QStringLiteral("frame column: %1 solid / %2 soft").arg(solid).arg(soft)));
+    }
+    // Large: canvas = ribbonLargeIconDev(dpr) square, dpr stamped after painting.
+    for (double dpr : {1.0, 1.25, 1.5, 2.0}) {
+        const QPixmap pm = largeCodiconIcon(path, Qt::white, dpr);
+        QCOMPARE(pm.devicePixelRatio(), dpr);
+        const QImage img = straight(pm);
+        QCOMPARE(img.width(), ribbonLargeIconDev(dpr));
+        QCOMPARE(img.height(), ribbonLargeIconDev(dpr));
+        QVERIFY(inkBbox(img, 30).ink > 0);
+    }
+    // At 32 device px (2× the grid) the frame is crisp: the left frame column
+    // is solid, its neighbours are transparent or solid, never mid-alpha.
+    {
+        const QImage img = straight(largeCodiconIcon(path, Qt::white, 1.25));
+        const Bbox b = inkBbox(img, 30);
+        int soft = 0;
+        for (int y = b.minY + 2; y <= b.maxY - 2; ++y)
+            for (int x = b.minX; x <= b.minX + 2; ++x) {
+                const int a = qAlpha(img.pixel(x, y));
+                if (a > 0 && a < 255) ++soft;
+            }
+        QVERIFY2(soft == 0, qPrintable(QStringLiteral("large@1.25 frame edge has %1 grey pixels").arg(soft)));
+    }
+    // The dispatcher: Large size → the large canvas; Small → the 16 cell.
+    RibbonIconSpec sp; sp.kind = RibbonIconSpec::Kind::Codicon; sp.arg = QStringLiteral("console");
+    QCOMPARE(straight(ribbonIcon(sp, RibbonIconSize::Large, 1.25, m_dark)).width(), 32);
+    QCOMPARE(straight(ribbonIcon(sp, RibbonIconSize::Small, 1.25, m_dark)).width(), 20);
+    // Plain ink override reaches the tint; a family icon ignores it.
+    RibbonIconOptions o; o.plainInk = QColor(10, 200, 30);
+    {
+        const QImage img = straight(ribbonIcon(sp, RibbonIconSize::Small, 1.0, m_dark, o));
+        const Bbox b = inkBbox(img, 250);
+        QVERIFY(b.ink > 0);
+        QCOMPARE(QColor(img.pixel(b.minX, b.minY)).name(), o.plainInk.name());
+    }
+    sp.family = GlyphFamily::Pointer;
+    {
+        const QImage img = straight(ribbonIcon(sp, RibbonIconSize::Small, 1.0, m_dark, o));
+        const Bbox b = inkBbox(img, 250);
+        QCOMPARE(QColor(img.pixel(b.minX, b.minY)).name(),
+                 ribbonFamilyColour(GlyphFamily::Pointer, m_dark, m_dark.background).name());
+    }
+}
+
+// Redo = discard mirrored: pixel-exact flip of the unmirrored render, and a
+// distinct cache entry.
+void TestPixelGlyphs::mirrorHIsAFlipAndKeyed() {
+    const QString path = QStringLiteral(":/vsicons/discard.svg");
+    for (double dpr : {1.0, 1.25}) {
+        const QPixmap plain = tintedSvgIcon(path, Qt::white, 16, dpr, false);
+        const QPixmap mirror = tintedSvgIcon(path, Qt::white, 16, dpr, true);
+        QVERIFY(plain.cacheKey() != mirror.cacheKey());
+        const QImage a = straight(plain), b = straight(mirror);
+        QCOMPARE(a.size(), b.size());
+        QVERIFY(inkBbox(a, 30).ink > 0);
+        QCOMPARE(a.mirrored(true, false), b);
+        QVERIFY(a != b);   // discard isn't symmetric
+    }
+    RibbonIconSpec sp; sp.kind = RibbonIconSpec::Kind::Codicon; sp.arg = QStringLiteral("discard");
+    RibbonIconSpec m = sp; m.mirrorH = true;
+    QVERIFY(ribbonIcon(sp, RibbonIconSize::Small, 1.0, m_dark).cacheKey()
+            != ribbonIcon(m, RibbonIconSize::Small, 1.0, m_dark).cacheKey());
+    QCOMPARE(straight(ribbonIcon(sp, RibbonIconSize::Large, 1.25, m_dark)).mirrored(true, false),
+             straight(ribbonIcon(m, RibbonIconSize::Large, 1.25, m_dark)));
+}
+
+// Defect I: terminal.svg / files.svg are 24-unit viewBoxes among 16-unit
+// siblings — rendered on the 16 grid their strokes come out 2/3 weight. Every
+// Codicon the ribbon references (plus the … overflow glyph) must be 16-unit.
+void TestPixelGlyphs::everyRibbonCodiconIsSixteenUnit() {
+    QStringList names{QStringLiteral("ellipsis")};   // the overflow item
+    for (const RibbonTabSpec& tab : defaultRibbonSpec())
+        for (const RibbonPanelSpec& panel : tab.panels)
+            for (const RibbonItemSpec& it : panel.items) {
+                if (it.icon.kind == RibbonIconSpec::Kind::Codicon) names << it.icon.arg;
+                if (it.icon.kind == RibbonIconSpec::Kind::ClassPtr) names << QStringLiteral("symbol-class");
+            }
+    names.removeDuplicates();
+    QVERIFY(names.size() >= 20);
+    const QRegularExpression vb(QStringLiteral("viewBox=\"([^\"]*)\""));
+    for (const QString& n : names) {
+        QFile f(QStringLiteral(":/vsicons/") + n + QStringLiteral(".svg"));
+        QVERIFY2(f.open(QIODevice::ReadOnly), qPrintable(n + QStringLiteral(".svg: not in resources.qrc (renders blank)")));
+        const QString svg = QString::fromUtf8(f.readAll());
+        const QRegularExpressionMatch mt = vb.match(svg);
+        QVERIFY2(mt.hasMatch(), qPrintable(n + QStringLiteral(".svg has no viewBox")));
+        const QString box = mt.captured(1).simplified();
+        QVERIFY2(box == QStringLiteral("0 0 16 16"),
+                 qPrintable(QStringLiteral("%1.svg viewBox is '%2', want '0 0 16 16' (24-unit trap)").arg(n, box)));
+    }
+    // The known traps are indeed 24-unit — the guard is meaningful.
+    for (const char* trap : {"terminal", "files"}) {
+        QFile f(QStringLiteral(":/vsicons/") + QLatin1String(trap) + QStringLiteral(".svg"));
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QRegularExpressionMatch mt = vb.match(QString::fromUtf8(f.readAll()));
+        QVERIFY(mt.hasMatch() && mt.captured(1).simplified() == QStringLiteral("0 0 24 24"));
+        QVERIFY2(!names.contains(QLatin1String(trap)), qPrintable(QStringLiteral("%1.svg is still referenced").arg(trap)));
+    }
 }
 
 void TestPixelGlyphs::inkColourIsExact() {
@@ -287,10 +532,12 @@ void TestPixelGlyphs::compositesFitAndAreCrisp() {
         }
         for (const QImage& img : {straight(deleteIcon(16, dpr, m_dark)),
                                   straight(fillIcon(QStringLiteral("000"), GlyphFamily::Hex, 16, dpr, m_dark)),
-                                  straight(fillIcon(QStringLiteral("???"), GlyphFamily::Bits, 16, dpr, m_dark))}) {
+                                  straight(fillIcon(QStringLiteral("???"), GlyphFamily::Bits, 16, dpr, m_dark)),
+                                  straight(fillIcon(QStringLiteral("FFF"), GlyphFamily::Hex, 16, dpr, m_dark, false))}) {
             const Bbox b = inkBbox(img);
             QVERIFY(b.ink > 0);
-            QVERIFY(b.w() <= cell && b.h() <= cell);
+            QVERIFY(b.w() <= img.width() && b.h() <= img.height());
+            QCOMPARE(img.height(), cell);
             for (int y = 0; y < img.height(); ++y)
                 for (int x = 0; x < img.width(); ++x) {
                     const int a = qAlpha(img.pixel(x, y));
@@ -345,6 +592,11 @@ void TestPixelGlyphs::sourceInTintWhitensBakedColourCodicon() {
                      qPrintable(QStringLiteral("pixel (%1,%2) = %3 not white").arg(x).arg(y).arg(QColor(px).name())));
         }
     QVERIFY2(opaque > 10, "debug-stop.svg rendered (almost) nothing — qrc alias missing?");
+    // The swapped-in icons must resolve too (a missing alias renders blank).
+    for (const char* n : {"discard", "console", "clippy", "ellipsis"})
+        QVERIFY2(inkBbox(straight(tintedSvgIcon(QStringLiteral(":/vsicons/") + QLatin1String(n)
+                                                + QStringLiteral(".svg"), Qt::white, 16, 1.0)), 30).ink > 5,
+                 qPrintable(QStringLiteral("%1.svg is blank — qrc alias missing?").arg(QLatin1String(n))));
     // Every Codicon the spec references must resolve (a missing alias renders blank).
     for (const RibbonTabSpec& tab : defaultRibbonSpec())
         for (const RibbonPanelSpec& panel : tab.panels)
@@ -368,6 +620,8 @@ void TestPixelGlyphs::cacheKeyIncludesEveryInput() {
     light.background = Qt::white;
     light.text = Qt::black;
     QVERIFY(typeGlyphIcon(QStringLiteral("H64"), GlyphFamily::Hex, 16, 1.0, light).cacheKey() != a.cacheKey());
+    // wide vs square is a separate entry even at the same logical height.
+    QVERIFY(typeGlyphIcon(QStringLiteral("H64"), GlyphFamily::Hex, 16, 1.0, m_dark, false).cacheKey() != a.cacheKey());
 }
 
 QTEST_MAIN(TestPixelGlyphs)

@@ -10,14 +10,21 @@
 // addAction()s its actions to a widget — the editor owns the plain keys;
 // shortcuts only show up in tooltips.
 //
-// Layout (100 %): tab row fm.height()+5 ≈ 22, body ≈ 74 → ≈ 96 total.
-//   panel = columns of Small items (3 per column, new column on
+// Layout (10 pt, fm.height 17): tab row fm.height()+3 = 20, body 69
+// (padTop 2 + 3 rows × 18 + caption 12 + hairline 1) → 89 total.
+//   Flat: no panel boxes, no caption bands — one 1-device-px `border`
+//   divider column per panel gap (kPanelGap 13, divider at A.right()+7),
+//   a 9 pt textMuted caption under each panel, hairlines above and below the
+//   body. Panel = columns of Small items (3 per column, new column on
 //   columnBreakBefore / separatorBefore / when full) or full-height Large
-//   items, a caption strip underneath, hairline separators between panels.
+//   items. Nothing is filled or outlined at rest: hover = `hover` fill,
+//   pressed = `button`, checked = indHoverSpan tint + a 2-device-row
+//   underline (same as the active tab), disabled = 40 % opacity.
 // Narrow widths: stage 1 drops labels (glyphLabels panels first, then — in
-// LabelMode::Auto — the rest by dropPriority), stage 2 hides whole panels
-// (lowest dropPriority first, never `neverHide`) behind a » chevron whose
-// QMenu carries one submenu per hidden panel.
+// LabelMode::Auto — the rest by labelDrop, higher first, equal values
+// together), stage 2 hides whole panels (lower hideOrder first, never
+// `neverHide`) behind a middle-row … button whose QMenu carries one submenu
+// per hidden panel.
 
 #include "ribbon_spec.h"
 #include "themes/theme.h"
@@ -119,7 +126,7 @@ private:
     };
     struct LaidPanel {
         QString id;
-        QRect   rect;            // full panel box (items + caption)
+        QRect   rect;            // items + caption (no box is painted)
         QRect   captionRect;
         QVector<int> separatorXs;   // `||` hairlines inside the panel
         bool    labelsDropped = false;
@@ -127,16 +134,19 @@ private:
     struct Layout {
         QVector<LaidItem>  items;
         QVector<LaidPanel> panels;
+        QVector<int>       dividerXs;      // 1-device-px columns between panels (+ before …)
         QStringList        hiddenPanels;
-        QRect              overflowRect;
+        QRect              overflowRect;   // the … item (middle row) when panels are hidden
         int                width = 0;
         int                naturalWidth = 0;
         int                forWidth = -1;   // widget width this layout was computed for
         QString            tab;
     };
     struct Metrics {
-        int tabRowH = 22, rowH = 18, captionH = 14, bodyPad = 3, bodyH = 74;
-        int smallIcon = 16, largeIcon = 32;
+        int tabRowH = 20, rowH = 18, captionH = 12, padTop = 2, bodyH = 69;
+        int   smallIcon = 16;          // small cell height (logical)
+        int   largeIconDev = 32;       // large Codicon side in DEVICE px (ribbonLargeIconDev)
+        qreal largeIcon = 25.6;        // … in logical px (largeIconDev / dpr)
     };
 
     void init();
@@ -184,6 +194,7 @@ private:
 
     QString m_hoverId;       // item id, "tab:<id>" or "overflow"
     QString m_pressedId;
+    bool    m_overflowOpen = false;   // … stays pressed while its menu is up
     // Started when a tab press restores the minimized body: the DblClick that
     // completes that same click pair must not collapse it again.
     QElapsedTimer m_restoreTimer;
