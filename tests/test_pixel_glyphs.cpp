@@ -467,68 +467,86 @@ void TestPixelGlyphs::signedDiffersFromUnsigned() {
             ++total;
             if (a.pixel(x, y) != b.pixel(x, y)) ++diff;
         }
-    QVERIFY2(diff * 100 > total * 20, qPrintable(QStringLiteral("I32 vs U32: %1/%2 differ").arg(diff).arg(total)));
-    // And the colours are different families.
-    QVERIFY(ribbonFamilyColour(GlyphFamily::Signed, m_dark, m_dark.background)
-            != ribbonFamilyColour(GlyphFamily::Unsigned, m_dark, m_dark.background));
+    // DELIBERATE CHANGE (was: > 20 % of pixels differ, and the two families
+    // are different colours). The palette is "4 hues + white" now: Signed and
+    // Unsigned share `syntaxNumber` because the I / U letter already carries
+    // the sign, which frees markerPtr to mean only "destructive". So the two
+    // glyphs differ by their FIRST LETTER alone.
+    QVERIFY2(diff > 0, qPrintable(QStringLiteral("I32 vs U32 render identically (%1/%2)")
+                                  .arg(diff).arg(total)));
+    QCOMPARE(ribbonFamilyColour(GlyphFamily::Signed, m_dark, m_dark.background),
+             ribbonFamilyColour(GlyphFamily::Unsigned, m_dark, m_dark.background));
+    // The difference is confined to the leading glyph cell (3 px + 1 gap at
+    // scale 1, so 4·s of the label's width).
+    const int s = pixelGlyphScale(1.0);
+    for (int y = y0; y <= y1; ++y)
+        for (int x = x0 + (kGlyphW + kGlyphGap) * s; x <= x1; ++x)
+            QVERIFY2(a.pixel(x, y) == b.pixel(x, y),
+                     qPrintable(QStringLiteral("I32/U32 differ outside the first letter at %1,%2")
+                                .arg(x).arg(y)));
+    // markerPtr is reserved for destructive commands — no type family uses it.
+    for (GlyphFamily f : {GlyphFamily::Hex, GlyphFamily::Signed, GlyphFamily::Unsigned,
+                          GlyphFamily::Float, GlyphFamily::Text, GlyphFamily::Pointer,
+                          GlyphFamily::Bits, GlyphFamily::Plain})
+        QVERIFY2(ribbonFamilyColour(f, m_dark, m_dark.background) != m_dark.markerPtr,
+                 familyName(f));
 }
 
+// DELIBERATE CHANGE. Add / Insert used to be "bitmap top-left + a 4-5-device-px
+// corner number", which at 100 % was a 1-px-stroke digit — unreadable, and the
+// reason the panel needed labels at all. There are two forms now:
+//   labelled   → the bare "+" / hook glyph, centred in a 16-square cell (the
+//                button's own text carries the count);
+//   unlabelled → a 32-wide cell whose content IS the count, at the uniform
+//                pixel scale: "+4"…"+2K" for Add, hook + "4"…"2K" for Insert.
 void TestPixelGlyphs::compositesFitAndAreCrisp() {
-    // 1.5 and 2.5 are the cases where k = round(dpr) rounds UP (cell 24 / 40
-    // with k 2 / 3): a 1-digit number at 2k used to land on the plus bar /
-    // arrow head. The number must clear the top-left bitmap at every dpr.
     for (double dpr : {1.0, 1.25, 1.5, 2.0, 2.5}) {
         const int cell = qRound(16 * dpr);
+        const int wideCell = qRound(32 * dpr);
         const int k = qMax(1, qRound(dpr));
         for (int n : {4, 8, 64, 1024, 2048}) {
             for (int which = 0; which < 2; ++which) {
                 const bool add = (which == 0);
-                const QImage img = straight(add ? addBytesIcon(n, 16, dpr, m_dark)
-                                                : insertBytesIcon(n, 16, dpr, m_dark));
-                const QString tag = QStringLiteral("%1 %2@%3").arg(add ? "add" : "insert").arg(n).arg(dpr);
-                QCOMPARE(img.width(), cell);
-                const Bbox b = inkBbox(img);
-                QVERIFY2(b.ink > 0, qPrintable(tag + QStringLiteral(" empty")));
-                for (int y = 0; y < img.height(); ++y)
-                    for (int x = 0; x < img.width(); ++x) {
-                        const int a = qAlpha(img.pixel(x, y));
-                        QVERIFY2(a == 0 || a == 255, qPrintable(tag + QStringLiteral(" alpha %1").arg(a)));
-                    }
-                // Re-draw the bitmap alone at the position ribbon_icons.h uses
-                // (plus at (k,k), hook at (0,k)); whatever ink the composite has
-                // beyond it is the number — the two bboxes must not intersect.
-                QImage bmOnly(cell, cell, QImage::Format_ARGB32_Premultiplied);
-                bmOnly.fill(Qt::transparent);
-                {
-                    QPainter p(&bmOnly);
-                    if (add) drawBitmap(p, k, k, kPlus5x5, k, Qt::white);
-                    else     drawBitmap(p, 0, k, kHookArrow7x7, k, Qt::white);
-                }
-                const QImage bmS = bmOnly.convertToFormat(QImage::Format_ARGB32);
-                const Bbox bitmapBox = inkBbox(bmS);
-                Bbox numberBox;
-                for (int y = 0; y < cell; ++y)
-                    for (int x = 0; x < cell; ++x)
-                        if (qAlpha(img.pixel(x, y)) == 255 && qAlpha(bmS.pixel(x, y)) == 0) {
-                            numberBox.minX = qMin(numberBox.minX, x); numberBox.maxX = qMax(numberBox.maxX, x);
-                            numberBox.minY = qMin(numberBox.minY, y); numberBox.maxY = qMax(numberBox.maxY, y);
-                            ++numberBox.ink;
+                for (int labelled = 1; labelled >= 0; --labelled) {
+                    const QImage img = straight(add ? addBytesIcon(n, 16, dpr, m_dark, labelled)
+                                                    : insertBytesIcon(n, 16, dpr, m_dark, labelled));
+                    const QString tag = QStringLiteral("%1 %2@%3 %4").arg(add ? "add" : "insert")
+                        .arg(n).arg(dpr).arg(labelled ? "labelled" : "glyph");
+                    QCOMPARE(img.width(), labelled ? cell : wideCell);
+                    QCOMPARE(img.height(), cell);
+                    const Bbox b = inkBbox(img);
+                    QVERIFY2(b.ink > 0, qPrintable(tag + QStringLiteral(" empty")));
+                    // Whole device pixels only — no anti-aliasing anywhere.
+                    for (int y = 0; y < img.height(); ++y)
+                        for (int x = 0; x < img.width(); ++x) {
+                            const int a = qAlpha(img.pixel(x, y));
+                            QVERIFY2(a == 0 || a == 255, qPrintable(tag + QStringLiteral(" alpha %1").arg(a)));
                         }
-                QVERIFY2(numberBox.ink > 0, qPrintable(tag + QStringLiteral(": number missing")));
-                // Every bitmap pixel is present in the composite (nothing painted over it).
-                for (int y = 0; y < cell; ++y)
-                    for (int x = 0; x < cell; ++x)
-                        if (qAlpha(bmS.pixel(x, y)) == 255)
-                            QVERIFY2(qAlpha(img.pixel(x, y)) == 255, qPrintable(tag + QStringLiteral(": bitmap pixel lost")));
-                const QRect bmRect(bitmapBox.minX, bitmapBox.minY, bitmapBox.w(), bitmapBox.h());
-                const QRect numRect(numberBox.minX, numberBox.minY, numberBox.w(), numberBox.h());
-                QVERIFY2(!bmRect.intersects(numRect),
-                         qPrintable(tag + QStringLiteral(": number bbox %1,%2 %3x%4 overlaps bitmap bbox %5,%6 %7x%8")
-                                    .arg(numRect.x()).arg(numRect.y()).arg(numRect.width()).arg(numRect.height())
-                                    .arg(bmRect.x()).arg(bmRect.y()).arg(bmRect.width()).arg(bmRect.height())));
-                // Number ink is whole s×s blocks and sits inside the cell.
-                QVERIFY(numberBox.maxX < cell && numberBox.maxY < cell);
+                    // Ink stays inside the cell with a margin on the short axis.
+                    QVERIFY2(b.minX >= 0 && b.maxX < img.width()
+                             && b.minY > 0 && b.maxY < img.height() - 1, qPrintable(tag + " overflows"));
+                    if (labelled) {
+                        // One centred bitmap, nothing else: the ink box is the
+                        // glyph's own square (5·s for +, 7·k for the hook).
+                        const int side = add ? kPlus5x5.w * detail::ribbonBitmapScale(cell, kPlus5x5.w, k)
+                                             : kHookArrow7x7.w * k;
+                        QCOMPARE(b.w(), side);
+                        QCOMPARE(b.h(), side);
+                        QVERIFY2(qAbs((b.minX + b.maxX + 1) - cell) <= 1, qPrintable(tag + " not centred"));
+                    } else {
+                        // The count is really there: more ink columns than the
+                        // bare glyph would use.
+                        const int glyphW = add ? kPlus5x5.w * k : kHookArrow7x7.w * k;
+                        QVERIFY2(b.w() > glyphW, qPrintable(tag + QStringLiteral(": no count drawn (w=%1)").arg(b.w())));
+                    }
+                }
             }
+        }
+        // Add and Insert must not render the same wordless cell.
+        for (int n : {4, 2048}) {
+            const QImage a = straight(addBytesIcon(n, 16, dpr, m_dark, false));
+            const QImage i = straight(insertBytesIcon(n, 16, dpr, m_dark, false));
+            QVERIFY2(a != i, "unlabelled Add and Insert are indistinguishable");
         }
         for (const QImage& img : {straight(deleteIcon(16, dpr, m_dark)),
                                   straight(fillIcon(QStringLiteral("000"), GlyphFamily::Hex, 16, dpr, m_dark)),

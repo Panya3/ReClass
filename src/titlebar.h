@@ -1,5 +1,6 @@
 #pragma once
 #include "themes/theme.h"
+#include <QAction>
 #include <QWidget>
 #include <QMenuBar>
 #include <QToolButton>
@@ -25,6 +26,11 @@ public:
     explicit TitleBarWidget(QWidget* parent = nullptr);
 
     QMenuBar* menuBar() const { return m_menuBar; }
+    // Quick access: the two commands used often enough to deserve a permanent
+    // home but not a ribbon panel of their own. The buttons are pure views of
+    // the actions — enabled state, icons and tooltips all come from them.
+    void setQuickActions(QAction* undo, QAction* redo);
+    QToolButton* quickButton(int index) const;   // 0 = undo, 1 = redo (nullptr before setQuickActions)
     void applyTheme(const Theme& theme);
     void setShowIcon(bool show);
     void setMenuBarTitleCase(bool titleCase);
@@ -44,6 +50,10 @@ private:
     QMenuBar*    m_menuBar    = nullptr;
     QHBoxLayout* m_menuBtnLayout = nullptr;
     QVector<QToolButton*> m_menuButtons;
+    QHBoxLayout* m_quickLayout = nullptr;   // spacer + hairline + undo/redo, right of the menus
+    QWidget*     m_quickRule   = nullptr;   // 1-device-px vertical `border` line
+    QToolButton* m_btnUndo     = nullptr;
+    QToolButton* m_btnRedo     = nullptr;
     QToolButton* m_btnMin     = nullptr;
     QToolButton* m_btnMax     = nullptr;
     QToolButton* m_btnClose   = nullptr;

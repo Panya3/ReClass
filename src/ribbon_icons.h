@@ -56,15 +56,24 @@ inline double wcagContrast(const QColor& a, const QColor& b) {
 }
 
 inline constexpr double kRibbonMinContrast = 3.0;
+// Pixel-font ink is 1-device-px strokes at 100 %: it needs the body-text
+// ratio, not the large-graphic one. Codicons (2-unit strokes on a 16 grid)
+// keep 3.0.
+inline constexpr double kRibbonPixelInkContrast = 4.5;
 
 // Family → theme token with a contrast guard: the first candidate that reads
-// at ≥ 3.0 : 1 against `onBg` wins; `text` is the fallback for every family.
-inline QColor ribbonFamilyColour(GlyphFamily family, const Theme& t, const QColor& onBg) {
+// at ≥ `minContrast` : 1 against `onBg` wins; `text` is the fallback.
+//
+// Four hues plus white. Signed AND Unsigned are both `syntaxNumber` — the
+// I / U letter already carries the sign, and giving Int the red back freed
+// `markerPtr` to mean exactly one thing on the strip: destructive.
+inline QColor ribbonFamilyColour(GlyphFamily family, const Theme& t, const QColor& onBg,
+                                 double minContrast = kRibbonMinContrast) {
     QVector<QColor> candidates;
     switch (family) {
     case GlyphFamily::Hex:      candidates = {t.text}; break;
-    case GlyphFamily::Signed:   candidates = {t.markerPtr}; break;
-    case GlyphFamily::Unsigned: candidates = {t.indHintGreen, t.indDataChanged, t.syntaxNumber}; break;
+    case GlyphFamily::Signed:   candidates = {t.syntaxNumber, t.indDataChanged}; break;
+    case GlyphFamily::Unsigned: candidates = {t.syntaxNumber, t.indDataChanged}; break;
     case GlyphFamily::Float:    candidates = {t.syntaxKeyword, t.syntaxType}; break;
     case GlyphFamily::Text:     candidates = {t.syntaxString, t.syntaxPreproc}; break;
     case GlyphFamily::Pointer:
@@ -75,26 +84,42 @@ inline QColor ribbonFamilyColour(GlyphFamily family, const Theme& t, const QColo
     case GlyphFamily::Plain:    candidates = {t.text}; break;
     }
     for (const QColor& c : candidates)
-        if (c.isValid() && wcagContrast(c, onBg) >= kRibbonMinContrast) return c;
+        if (c.isValid() && wcagContrast(c, onBg) >= minContrast) return c;
     return t.text;
 }
 
-// State tone (textDim for rest labels / icons, textMuted for inactive tabs and
-// captions) through the same 3 : 1 guard — mid.json / phosphor.json tones are
-// near-invisible on their backgrounds, `text` is the fallback.
+// State tone as a LADDER, not a cliff: try the asked-for tone, then `textDim`,
+// then `text`; the first that reads at ≥ 3 : 1 on `onBg` wins. Jumping straight
+// to `text` made panel captions and inactive tabs render at full brightness on
+// vs.json (whose `textMuted` misses the guard by 0.02) — the caption then
+// shouted exactly as loudly as the labels it was captioning.
 inline QColor ribbonToneColour(const QColor& tone, const Theme& t, const QColor& onBg) {
     if (tone.isValid() && wcagContrast(tone, onBg) >= kRibbonMinContrast) return tone;
+    if (t.textDim.isValid() && wcagContrast(t.textDim, onBg) >= kRibbonMinContrast) return t.textDim;
     return t.text;
 }
 
 // ── Cell / Codicon sizing ──
 
+// The pixel label an unlabelled Add / Insert cell carries: "+4" … "+2K" for
+// Add (the sign is the verb), "4" … "2K" for Insert (the hook glyph is).
+inline QString ribbonBytesGlyphLabel(int n, bool withPlus) {
+    const QString num = (n >= 1024 && (n % 1024) == 0)
+        ? QString::number(n / 1024) + QLatin1Char('K') : QString::number(n);
+    return withPlus ? QLatin1Char('+') + num : num;
+}
+
 // Logical width of an icon's 16-tall cell: pixel labels get 8·max(2, len)
-// (F / H8 / V2 = 16, H64 / PTR / 000 = 24, WSTR / 1024 = 32); everything else 16.
-inline int ribbonIconCellWidth(const RibbonIconSpec& spec) {
+// (F / H8 / V2 = 16, H64 / PTR / 000 = 24, WSTR = 32); everything else 16.
+// An UNLABELLED Add / Insert cell carries the byte count itself, so it widens
+// to 32 — that is where the count went when the 4-5-device-px corner numbers
+// (illegible at 100 %) were deleted.
+inline int ribbonIconCellWidth(const RibbonIconSpec& spec, bool labelled = true) {
     using K = RibbonIconSpec::Kind;
     if (spec.kind == K::TypeGlyph || spec.kind == K::FillSquares)
         return 8 * qMax(2, int(spec.arg.size()));
+    if (!labelled && (spec.kind == K::AddBytes || spec.kind == K::InsertBytes))
+        return 32;
     return 16;
 }
 
@@ -178,21 +203,10 @@ inline bool ribbonRenderTintedSvg(QImage& img, const QString& path, const QColor
     return true;
 }
 
-// Number label bottom-right of a composite (Add-N / Insert-N): 1-char numbers
-// start at the 2× scale, longer ones at k, shrunk until they fit the cell AND
-// clear the top-left bitmap (whose device extent ends at clearRight /
-// clearBottom) either horizontally or vertically. At 150 % (cell 24, k 2) a
-// 1-digit number at 4× would otherwise sit on the plus bar / arrow head.
-inline void ribbonDrawCornerNumber(QPainter& p, int cellDev, int k, const QString& num,
-                                   const QColor& ink, int clearRight, int clearBottom) {
-    const int w = pixelLabelWidth(num);
-    int s = num.size() <= 1 ? 2 * k : k;
-    auto placeX = [&](int sc) { return qMax(0, cellDev - k - w * sc); };
-    auto placeY = [&](int sc) { return cellDev - k - kGlyphH * sc; };
-    auto fits = [&](int sc) { return w * sc + k <= cellDev && kGlyphH * sc + 2 * k <= cellDev; };
-    auto clears = [&](int sc) { return placeX(sc) >= clearRight || placeY(sc) >= clearBottom; };
-    while (s > 1 && (!fits(s) || !clears(s))) --s;
-    drawPixelLabel(p, placeX(s), placeY(s), num, s, ink);
+// Largest whole multiple of a square bitmap that leaves a k margin in a
+// cellDev-square cell (the Add "+" and the Delete "✕" share this rule).
+inline int ribbonBitmapScale(int cellDev, int side, int k) {
+    return qMax(1, (cellDev - 2 * k) / side);
 }
 
 }  // namespace detail
@@ -203,7 +217,7 @@ inline void ribbonDrawCornerNumber(QPainter& p, int cellDev, int k, const QStrin
 // 8·max(2, len) × logicalSize when `wide`, logicalSize square otherwise.
 inline QPixmap typeGlyphIcon(const QString& label, GlyphFamily family, int logicalSize,
                              qreal dpr, const Theme& theme, bool wide = true) {
-    const QColor ink = ribbonFamilyColour(family, theme, theme.background);
+    const QColor ink = ribbonFamilyColour(family, theme, theme.background, kRibbonPixelInkContrast);
     const int cellW = wide ? 8 * qMax(2, int(label.size())) : logicalSize;
     const QString key = detail::ribbonIconKey(QStringLiteral("glyph"), label, cellW, logicalSize,
                                               dpr, ink, theme.background, wide);
@@ -224,44 +238,95 @@ inline QPixmap typeGlyphIcon(const QString& label, GlyphFamily family, int logic
     return pm;
 }
 
-// Green "+" top-left, byte count bottom-right (16-square cell).
-inline QPixmap addBytesIcon(int n, int logicalSize, qreal dpr, const Theme& theme) {
-    const QColor ink = ribbonFamilyColour(GlyphFamily::Unsigned, theme, theme.background);
+// Add N. Labelled ("Add" + the count sit beside the icon): a bare, centred
+// "+" in a 16-square cell. Unlabelled: the cell widens to 32 and the count
+// becomes real pixel text ("+4" … "+2K") at the uniform glyph scale — the
+// only form in which the number is actually readable.
+inline QPixmap addBytesIcon(int n, int logicalSize, qreal dpr, const Theme& theme,
+                            bool labelled = true, const QColor& inkOverride = QColor()) {
+    const QColor ink = inkOverride.isValid()
+        ? inkOverride
+        : ribbonFamilyColour(GlyphFamily::Plain, theme, theme.background, kRibbonPixelInkContrast);
+    const int cellW = labelled ? logicalSize : 2 * logicalSize;
     const QString key = detail::ribbonIconKey(QStringLiteral("add"), QString::number(n),
-                                              logicalSize, logicalSize, dpr, ink, theme.background);
+                                              cellW, logicalSize, dpr, ink, theme.background, labelled);
     auto& cache = detail::ribbonIconCache();
     if (auto it = cache.constFind(key); it != cache.constEnd()) return it.value();
 
-    const int cell = detail::ribbonCellDev(logicalSize, dpr);
+    const QSize cell = detail::ribbonCellDev(cellW, logicalSize, dpr);
     const int k = detail::ribbonUnit(dpr);
-    QImage img = detail::ribbonCanvas(cell, cell);
+    QImage img = detail::ribbonCanvas(cell);
     {
         QPainter p(&img);
-        drawBitmap(p, k, k, kPlus5x5, k, ink);
-        detail::ribbonDrawCornerNumber(p, cell, k, QString::number(n), ink,
-                                       k + kPlus5x5.w * k, k + kPlus5x5.h * k);
+        if (labelled) {
+            const int s = detail::ribbonBitmapScale(qMin(cell.width(), cell.height()), kPlus5x5.w, k);
+            const int side = kPlus5x5.w * s;
+            drawBitmap(p, (cell.width() - side) / 2, (cell.height() - side) / 2, kPlus5x5, s, ink);
+        } else {
+            const QString text = ribbonBytesGlyphLabel(n, true);
+            const int s = pixelLabelScale(text, cell.width(), cell.height(), dpr);
+            drawPixelLabel(p, (cell.width() - pixelLabelWidth(text) * s) / 2,
+                           (cell.height() - kGlyphH * s) / 2, text, s, ink);
+        }
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);
     return pm;
 }
 
-// Blue arch arrow top-left, byte count bottom-right (16-square cell).
-inline QPixmap insertBytesIcon(int n, int logicalSize, qreal dpr, const Theme& theme) {
-    const QColor ink = ribbonFamilyColour(GlyphFamily::Float, theme, theme.background);
+// Insert N. Labelled: the bare arch arrow in a 16-square cell. Unlabelled:
+// arrow + the count as pixel text side by side in the 32-wide cell (the arrow
+// is what tells Insert apart from Add once both are wordless).
+inline QPixmap insertBytesIcon(int n, int logicalSize, qreal dpr, const Theme& theme,
+                               bool labelled = true, const QColor& inkOverride = QColor()) {
+    const QColor ink = inkOverride.isValid()
+        ? inkOverride
+        : ribbonFamilyColour(GlyphFamily::Plain, theme, theme.background, kRibbonPixelInkContrast);
+    const int cellW = labelled ? logicalSize : 2 * logicalSize;
     const QString key = detail::ribbonIconKey(QStringLiteral("insert"), QString::number(n),
-                                              logicalSize, logicalSize, dpr, ink, theme.background);
+                                              cellW, logicalSize, dpr, ink, theme.background, labelled);
     auto& cache = detail::ribbonIconCache();
     if (auto it = cache.constFind(key); it != cache.constEnd()) return it.value();
 
-    const int cell = detail::ribbonCellDev(logicalSize, dpr);
+    const QSize cell = detail::ribbonCellDev(cellW, logicalSize, dpr);
+    const int k = detail::ribbonUnit(dpr);
+    QImage img = detail::ribbonCanvas(cell);
+    {
+        QPainter p(&img);
+        const int arrowSide = kHookArrow7x7.w * k;
+        if (labelled) {
+            drawBitmap(p, (cell.width() - arrowSide) / 2, (cell.height() - arrowSide) / 2,
+                       kHookArrow7x7, k, ink);
+        } else {
+            const QString text = ribbonBytesGlyphLabel(n, false);
+            const int s = pixelLabelScale(text, cell.width() - arrowSide - 2 * k, cell.height(), dpr);
+            const int textW = pixelLabelWidth(text) * s;
+            const int blockW = arrowSide + 2 * k + textW;
+            const int x0 = (cell.width() - blockW) / 2;
+            drawBitmap(p, x0, (cell.height() - arrowSide) / 2, kHookArrow7x7, k, ink);
+            drawPixelLabel(p, x0 + arrowSide + 2 * k, (cell.height() - kGlyphH * s) / 2, text, s, ink);
+        }
+    }
+    QPixmap pm = detail::ribbonFinish(img, dpr);
+    cache.insert(key, pm);
+    return pm;
+}
+
+// The 8-px ▾ that marks a button which opens a menu rather than acting.
+// Painted in the item's state tone, in whole device pixels like the glyphs.
+inline QPixmap ribbonMenuChevron(const QColor& ink, qreal dpr) {
+    const QString key = detail::ribbonIconKey(QStringLiteral("menuchev"), QString(), 8, 8, dpr,
+                                              ink, QColor(0, 0, 0, 0));
+    auto& cache = detail::ribbonIconCache();
+    if (auto it = cache.constFind(key); it != cache.constEnd()) return it.value();
+
+    const int cell = detail::ribbonCellDev(8, dpr);
     const int k = detail::ribbonUnit(dpr);
     QImage img = detail::ribbonCanvas(cell, cell);
     {
         QPainter p(&img);
-        drawBitmap(p, 0, k, kHookArrow7x7, k, ink);
-        detail::ribbonDrawCornerNumber(p, cell, k, QString::number(n), ink,
-                                       0 + kHookArrow7x7.w * k, k + kHookArrow7x7.h * k);
+        const int w = kChevronDown7x4.w * k, h = kChevronDown7x4.h * k;
+        drawBitmap(p, (cell - w) / 2, (cell - h) / 2, kChevronDown7x4, k, ink);
     }
     QPixmap pm = detail::ribbonFinish(img, dpr);
     cache.insert(key, pm);
@@ -281,7 +346,7 @@ inline QPixmap deleteIcon(int logicalSize, qreal dpr, const Theme& theme) {
     QImage img = detail::ribbonCanvas(cell, cell);
     {
         QPainter p(&img);
-        int s = qMax(1, (cell - 2 * k) / kCross7x7.w);
+        const int s = detail::ribbonBitmapScale(cell, kCross7x7.w, k);
         const int side = kCross7x7.w * s;
         drawBitmap(p, (cell - side) / 2, (cell - side) / 2, kCross7x7, s, ink);
     }
@@ -293,9 +358,16 @@ inline QPixmap deleteIcon(int logicalSize, qreal dpr, const Theme& theme) {
 // Row of byte squares above a 3-char label ("000" / "FFF" / "???") at the
 // uniform glyph scale: 8·s-tall block (2 rows + gap + 5) in a 24-wide cell.
 inline QPixmap fillIcon(const QString& text, GlyphFamily family, int logicalSize, qreal dpr,
-                        const Theme& theme, bool wide = true) {
-    const QColor ink = ribbonFamilyColour(family, theme, theme.background);
-    const QColor squares = ribbonToneColour(theme.textDim, theme, theme.background);
+                        const Theme& theme, bool wide = true,
+                        const QColor& inkOverride = QColor()) {
+    // `inkOverride` is the item's state tone: a fill button is chrome, not a
+    // type, so its squares and label follow rest / hover / disabled like every
+    // other Plain icon instead of sitting at a fixed family colour.
+    const QColor ink = inkOverride.isValid()
+        ? inkOverride
+        : ribbonFamilyColour(family, theme, theme.background, kRibbonPixelInkContrast);
+    const QColor squares = inkOverride.isValid()
+        ? inkOverride : ribbonToneColour(theme.textDim, theme, theme.background);
     const int cellW = wide ? 8 * qMax(2, int(text.size())) : logicalSize;
     const QString key = detail::ribbonIconKey(QStringLiteral("fill"), text, cellW, logicalSize, dpr,
                                               ink, theme.background, wide)
@@ -400,8 +472,10 @@ enum class RibbonIconSize { Small, Large };
 
 struct RibbonIconOptions {
     bool   wide = true;   // per-kind cell width (ribbon buttons); false = 16-square (QAction / QMenu)
-    QColor plainInk;      // state tone for GlyphFamily::Plain Codicons (rest / hover / checked);
-                          // invalid = the family colour. Family-tinted icons ignore it.
+    QColor plainInk;      // state tone for GlyphFamily::Plain icons (rest / hover / checked /
+                          // destructive); invalid = the family colour. Family-tinted icons ignore it.
+    bool   labelled = true;  // the button shows a text label — Add / Insert then draw the bare
+                             // glyph; unlabelled they draw the byte count themselves (32-wide cell).
 };
 
 inline QString ribbonCodiconPath(const QString& name) {
@@ -415,16 +489,18 @@ inline QPixmap ribbonIcon(const RibbonIconSpec& spec, RibbonIconSize size, qreal
     using K = RibbonIconSpec::Kind;
     const int small = 16;
     const bool large = (size == RibbonIconSize::Large);
+    // Plain icons take the item's state tone; family-tinted ones keep their hue.
+    const QColor plain = (spec.family == GlyphFamily::Plain) ? o.plainInk : QColor();
     switch (spec.kind) {
     case K::TypeGlyph:   return typeGlyphIcon(spec.arg, spec.family, small, dpr, theme, o.wide);
-    case K::AddBytes:    return addBytesIcon(spec.arg.toInt(), small, dpr, theme);
-    case K::InsertBytes: return insertBytesIcon(spec.arg.toInt(), small, dpr, theme);
+    case K::AddBytes:    return addBytesIcon(spec.arg.toInt(), small, dpr, theme, o.labelled, plain);
+    case K::InsertBytes: return insertBytesIcon(spec.arg.toInt(), small, dpr, theme, o.labelled, plain);
     case K::DeleteCross: return deleteIcon(small, dpr, theme);
-    case K::FillSquares: return fillIcon(spec.arg, spec.family, small, dpr, theme, o.wide);
+    case K::FillSquares: return fillIcon(spec.arg, spec.family, small, dpr, theme, o.wide, plain);
     case K::ClassPtr:    return classPtrIcon(small, dpr, theme);
     case K::Codicon: {
-        const QColor tint = (spec.family == GlyphFamily::Plain && o.plainInk.isValid())
-            ? o.plainInk : ribbonFamilyColour(spec.family, theme, theme.background);
+        const QColor tint = plain.isValid()
+            ? plain : ribbonFamilyColour(spec.family, theme, theme.background);
         const QString path = ribbonCodiconPath(spec.arg);
         return large ? largeCodiconIcon(path, tint, dpr, spec.mirrorH)
                      : tintedSvgIcon(path, tint, small, dpr, spec.mirrorH);

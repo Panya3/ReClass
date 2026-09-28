@@ -23,6 +23,7 @@
 #include <QSignalSpy>
 #include <QVBoxLayout>
 
+#include "paintutil.h"
 #include "ribbon.h"
 #include "ribbon_icons.h"
 #include "themes/theme.h"
@@ -130,6 +131,12 @@ private slots:
     void disabledDimsUnderline();
     void activeTabUnderline();
     void overflowIsMiddleRowItem();
+    void captionToneNeverBrighterThanLabel();
+    void largeCellsShareAWidthAndSitOnRowThree();
+    void collapseChevron();
+    void groupCaptionsSpanTheirColumns();
+    void structureKeepsItsWordsEverywhere();
+    void bothTabsFitTheUserWindow();
 
 private:
     Theme m_dark;
@@ -146,12 +153,15 @@ void TestRibbonLayout::basics() {
     bar.applyTheme(m_dark);
     QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
     QCOMPARE(bar.labelMode(), RibbonBar::LabelMode::Auto);   // same default as the app
-    QCOMPARE(bar.currentTab(), QStringLiteral("modify"));
-    QCOMPARE(bar.tabIds(), QStringList({QStringLiteral("modify"), QStringLiteral("home")}));
+    // Home is first (and therefore the first-run tab): it is what a new user
+    // needs before there is anything to modify.
+    QCOMPARE(bar.currentTab(), QStringLiteral("home"));
+    QCOMPARE(bar.tabIds(), QStringList({QStringLiteral("home"), QStringLiteral("modify")}));
     QVERIFY(bar.actionIds().contains(QStringLiteral("type.int32")));
-    QVERIFY(bar.actionIds().contains(QStringLiteral("home.tools.scanner")));
-    QVERIFY(bar.actionIds().contains(QStringLiteral("edit.undo")));
-    QCOMPARE(bar.actionIds().count(QStringLiteral("edit.undo")), 1);   // shared by both tabs, one action
+    QVERIFY(bar.actionIds().contains(QStringLiteral("home.panels.scanner")));
+    // Undo / Redo are title-strip quick access now — no ribbon button at all.
+    QVERIFY(!bar.actionIds().contains(QStringLiteral("edit.undo")));
+    QVERIFY(!bar.actionIds().contains(QStringLiteral("edit.redo")));
     // data payloads the wiring track relies on
     QCOMPARE(bar.action(QStringLiteral("add.1024"))->data().toInt(), 1024);
     QCOMPARE(bar.action(QStringLiteral("insert.8"))->data().toInt(), 8);
@@ -166,10 +176,12 @@ void TestRibbonLayout::basics() {
              qPrintable(QStringLiteral("height %1").arg(bar.preferredHeight())));
     QCOMPARE(bar.sizeHint().height(), bar.preferredHeight());
     QVERIFY(bar.minimumSizeHint().width() < 200);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     QVERIFY(!bar.panelRect(QStringLiteral("type")).isNull());
     QVERIFY(!bar.panelRect(QStringLiteral("add")).isNull());
-    QVERIFY(bar.panelRect(QStringLiteral("add")).left() >= 6);
+    QVERIFY(!bar.panelRect(QStringLiteral("structure")).isNull());
+    QCOMPARE(bar.panelRect(QStringLiteral("add")).left(), rcx::kGutter);
     // The ribbon never owns a static toolTip — the hovered item's text is
     // published on demand (see tooltipFollowsHover).
     QVERIFY(bar.toolTip().isEmpty());
@@ -233,14 +245,13 @@ void TestRibbonLayout::overflowByWidth() {
     bar.resize(760, bar.preferredHeight());
     const QStringList hidden = bar.overflowedPanelIds();
     QVERIFY2(!hidden.isEmpty(), "expected panels to overflow at 760 px");
-    QVERIFY(!hidden.contains(QStringLiteral("type")));
-    QVERIFY(!hidden.contains(QStringLiteral("edit")));
+    QVERIFY(!hidden.contains(QStringLiteral("type")));   // neverHide
     QVERIFY(!bar.panelRect(QStringLiteral("type")).isNull());
     QVERIFY(!bar.overflowButtonRect().isNull());
     for (const QString& p : hidden) QVERIFY(bar.panelRect(p).isNull());
-    // hideOrder: Selected (0) goes first, then Insert (10), then Add (20).
-    // Type glyph-only (369) + Edit + Add + Insert (All keeps their labels)
-    // ≈ 840 > 760, so exactly Selected + Insert hide.
+    // hideOrder: Selection (0) goes first, then Insert (10), then Add (20),
+    // then Structure (30). Type glyph-only (416) + Add + Insert + Structure
+    // (All keeps their labels) fits once the first two are gone.
     QCOMPARE(hidden, QStringList({QStringLiteral("selected"), QStringLiteral("insert")}));
     // Hidden panels' items have no rect.
     QVERIFY(bar.itemRect(QStringLiteral("sel.delete")).isNull());
@@ -254,6 +265,7 @@ void TestRibbonLayout::overflowMenuListsHiddenActions() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
     bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(760, bar.preferredHeight());
     const QStringList hidden = bar.overflowedPanelIds();
     QVERIFY(!hidden.isEmpty());
@@ -285,6 +297,7 @@ void TestRibbonLayout::overflowMenuIconsForExternalActions() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
     bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(760, bar.preferredHeight());
     QVERIFY(bar.overflowedPanelIds().contains(QStringLiteral("selected")));
 
@@ -323,19 +336,27 @@ void TestRibbonLayout::overflowMenuIconsForExternalActions() {
     QCOMPARE(ext.icon().cacheKey(), detached);
 }
 
+// DELIBERATE CHANGE (was: "Type labels appear at 1920 and drop at 1350").
+// A glyphLabels panel is glyph-only in EVERY mode now, so "All labels" is an
+// honest promise: the Type glyphs never had words to show. `keepLabel` items
+// are the documented exception — "Custom…" is a word, not a glyph.
 void TestRibbonLayout::typeLabelsCompactBeforePanelsHide() {
     for (auto mode : {RibbonBar::LabelMode::Auto, RibbonBar::LabelMode::All}) {
         RibbonBar bar;
         bar.applyTheme(m_dark);
         bar.setLabelMode(mode);
+        bar.setCurrentTab(QStringLiteral("modify"));
         bar.resize(1920, bar.preferredHeight());
-        QVERIFY(bar.itemLabelShown(QStringLiteral("type.hex64")));
-        QVERIFY(bar.itemLabelShown(QStringLiteral("add.1024")));
-        const int wide = bar.itemRect(QStringLiteral("type.hex64")).width();
-        bar.resize(1350, bar.preferredHeight());
-        // Type is icon-only at 1350 (the glyphs are the labels) while every panel stays.
         QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));
-        QVERIFY(bar.itemRect(QStringLiteral("type.hex64")).width() < wide);
+        QVERIFY(bar.itemLabelShown(QStringLiteral("type.custom")));   // keepLabel
+        QVERIFY(bar.itemLabelShown(QStringLiteral("add.1024")));
+        // The glyph cell is the whole button: 8·len + 6 (a group caption can
+        // widen the group's last column by a px or two — "Hex:" > 30).
+        const int w64 = bar.itemRect(QStringLiteral("type.hex64")).width();
+        QVERIFY2(w64 >= 30 && w64 <= 36, qPrintable(QStringLiteral("H64 width %1").arg(w64)));
+        bar.resize(1350, bar.preferredHeight());
+        QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));
+        QVERIFY(bar.itemLabelShown(QStringLiteral("type.custom")));
         QVERIFY(bar.itemLabelShown(QStringLiteral("add.1024")));
         QVERIFY(bar.overflowedPanelIds().isEmpty());
         // Icon-only items never got a label rect either.
@@ -346,6 +367,7 @@ void TestRibbonLayout::typeLabelsCompactBeforePanelsHide() {
 void TestRibbonLayout::labelModes() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));
     QSignalSpy spy(&bar, &RibbonBar::labelModeChanged);
     bar.resize(1920, bar.preferredHeight());
     QCOMPARE(bar.labelMode(), RibbonBar::LabelMode::Auto);
@@ -357,47 +379,61 @@ void TestRibbonLayout::labelModes() {
     QCOMPARE(spy.count(), 2);
     QCOMPARE(spy.last().at(0).toInt(), 2);
     QVERIFY(!bar.itemLabelShown(QStringLiteral("add.1024")));
-    QVERIFY(bar.naturalWidth() < allW / 2);
+    // DELIBERATE CHANGE (was < allW / 2): Type is glyph-only in All mode too
+    // now, so All is no longer twice the icons-only width — Modify's biggest
+    // panel costs the same in both modes.
+    QVERIFY2(bar.naturalWidth() < allW * 4 / 5,
+             qPrintable(QStringLiteral("icons %1 vs all %2").arg(bar.naturalWidth()).arg(allW)));
     bar.setLabelMode(RibbonBar::LabelMode::Auto);
     QCOMPARE(spy.count(), 3);
     QCOMPARE(spy.last().at(0).toInt(), 0);
     QVERIFY(bar.itemLabelShown(QStringLiteral("add.1024")));   // room at 1920
     bar.resize(760, bar.preferredHeight());
-    // Auto compacts every panel before hiding any, so Modify fits at 760.
-    QVERIFY(bar.overflowedPanelIds().isEmpty());
+    // Auto compacts EVERY panel's labels before hiding any: at 760 all four
+    // labelled Modify panels are wordless and only then does Selection go.
     QVERIFY(!bar.itemLabelShown(QStringLiteral("add.1024")));
+    if (!bar.overflowedPanelIds().contains(QStringLiteral("selected")))
+        QVERIFY(!bar.itemLabelShown(QStringLiteral("sel.duplicate")));
+    // DELIBERATE CHANGE (was `!itemLabelShown("type.array")`): the three
+    // Structure commands are `keepLabel` — "words in every mode" — so they are
+    // deliberately NOT part of the wordless sweep. A bare list-selection glyph
+    // does not say "Break Class".
+    QVERIFY(bar.itemLabelShown(QStringLiteral("type.array")));
+    // DELIBERATE CHANGE (was `<= 1`): keeping the Structure words costs ~48 px
+    // that used to be spent on its labels, so at 760 the second panel in the
+    // hide order goes to the » menu. That is what hideOrder Selection 0 →
+    // Insert 10 → Add 20 → Structure 30 is FOR: at the user's 1080 window
+    // nothing hides at all (bothTabsFitTheUserWindow), and when a 760-px strip
+    // has to give something up, a panel behind » beats three mute glyphs.
+    const QStringList hidden760 = bar.overflowedPanelIds();
+    QVERIFY2(hidden760.size() <= 2, qPrintable(hidden760.join(',')));
+    QCOMPARE(hidden760, QStringList({QStringLiteral("selected"), QStringLiteral("insert")}));
     bar.setLabelMode(RibbonBar::LabelMode::Auto);   // no-op → no signal
     QCOMPARE(spy.count(), 3);
 }
 
-// Stage-1 order (labelDrop, higher first; glyphLabels panels first): Modify =
-// Type, then Add + Insert together, then Selected; Home = Tools, Code,
-// Process, Project. Edit is icon-only for good, so it is not a probe. Pinned
-// by scanning the width down and recording where each panel's labels vanish.
+// Stage-1 order (labelDrop, higher first): Modify = Add + Insert together,
+// then Structure, then Selection (Type has no labels to drop); Home = Panels,
+// Source, then File + Class together. Pinned by scanning the width down and
+// recording where each panel's labels vanish.
 void TestRibbonLayout::autoDropOrder() {
     struct Probe { QString tab; QStringList ids; };
     const Probe probes[] = {
-        {QStringLiteral("modify"), {QStringLiteral("type.hex64"), QStringLiteral("add.1024"),
-                                    QStringLiteral("sel.duplicate")}},
-        {QStringLiteral("home"),   {QStringLiteral("home.tools.scanner"), QStringLiteral("home.code.generate"),
-                                    QStringLiteral("home.process.goto"), QStringLiteral("home.project.open")}},
+        // DELIBERATE CHANGE (type.array removed): Structure is keepLabel, so it
+        // has no labels to drop and cannot appear in a drop-order scan. Modify's
+        // observable stage-1 order is Add+Insert (20) then Selection (0).
+        {QStringLiteral("modify"), {QStringLiteral("add.1024"), QStringLiteral("sel.duplicate")}},
+        {QStringLiteral("home"),   {QStringLiteral("home.panels.scanner"),
+                                    QStringLiteral("home.source.goto"),
+                                    QStringLiteral("home.file.open")}},
     };
-    // Edit never shows a label at any width.
-    {
-        RibbonBar bar;
-        bar.applyTheme(m_dark);
-        bar.resize(2400, bar.preferredHeight());
-        QVERIFY(!bar.itemLabelShown(QStringLiteral("edit.undo")));
-        QVERIFY(!bar.itemLabelShown(QStringLiteral("edit.redo")));
-        QVERIFY(!bar.itemRect(QStringLiteral("edit.undo")).isNull());
-    }
     for (const Probe& probe : probes) {
         RibbonBar bar;
         bar.applyTheme(m_dark);
         bar.setLabelMode(RibbonBar::LabelMode::Auto);
         bar.setCurrentTab(probe.tab);
         bar.resize(2400, bar.preferredHeight());
-        const int fitW = bar.naturalWidth() + 6;   // right margin
+        const int fitW = bar.naturalWidth() + 6;   // kRightMargin
         bar.resize(fitW, bar.preferredHeight());
         for (const QString& id : probe.ids)
             QVERIFY2(bar.itemLabelShown(id), qPrintable(probe.tab + QStringLiteral(": ") + id + QStringLiteral(" should still be labelled at the natural width")));
@@ -419,23 +455,26 @@ void TestRibbonLayout::autoDropOrder() {
         for (int i = 1; i < probe.ids.size(); ++i)
             QVERIFY2(gone[i] < gone[i - 1], qPrintable(QStringLiteral("%1: %2 (%3) should drop after %4 (%5)")
                 .arg(probe.tab, probe.ids[i]).arg(gone[i]).arg(probe.ids[i - 1]).arg(gone[i - 1])));
-        // Equal labelDrop values drop together: Add and Insert lose their
-        // labels at the same width.
-        if (probe.tab == QStringLiteral("modify")) {
-            int addGone = -1, insGone = -1;
-            for (int w = fitW; w >= 300 && (addGone < 0 || insGone < 0); --w) {
-                bar.resize(w, bar.preferredHeight());
-                if (addGone < 0 && !bar.itemLabelShown(QStringLiteral("add.1024"))) addGone = w;
-                if (insGone < 0 && !bar.itemLabelShown(QStringLiteral("insert.1024"))) insGone = w;
-            }
-            QCOMPARE(insGone, addGone);
+        // Equal labelDrop values drop together: Add + Insert on Modify,
+        // File + Class on Home.
+        const QString a = probe.tab == QStringLiteral("modify")
+            ? QStringLiteral("add.1024") : QStringLiteral("home.file.open");
+        const QString b = probe.tab == QStringLiteral("modify")
+            ? QStringLiteral("insert.1024") : QStringLiteral("home.class.newenum");
+        int aGone = -1, bGone = -1;
+        for (int w = fitW; w >= 300 && (aGone < 0 || bGone < 0); --w) {
+            bar.resize(w, bar.preferredHeight());
+            if (aGone < 0 && !bar.itemLabelShown(a)) aGone = w;
+            if (bGone < 0 && !bar.itemLabelShown(b)) bGone = w;
         }
+        QCOMPARE(bGone, aGone);
     }
 }
 
 void TestRibbonLayout::setActionSwapAndDisabledDims() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     bar.show();
     QTest::qWait(30);
@@ -470,6 +509,7 @@ void TestRibbonLayout::setActionSwapAndDisabledDims() {
 void TestRibbonLayout::hiddenActionRemovesRect() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     QVERIFY(!bar.itemRect(QStringLiteral("type.bool")).isNull());
     const QRect floatBefore = bar.itemRect(QStringLiteral("type.float"));
@@ -493,6 +533,7 @@ void TestRibbonLayout::clickTriggersWithoutTakingFocus() {
     lay->setContentsMargins(0, 0, 0, 0);
     auto* bar = new RibbonBar(&win);
     bar->applyTheme(m_dark);
+    bar->setCurrentTab(QStringLiteral("modify"));
     auto* edit = new QLineEdit(&win);
     lay->addWidget(bar);
     lay->addWidget(edit);
@@ -529,6 +570,7 @@ void TestRibbonLayout::tooltipFollowsHover() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
     bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     bar.show();
     QTest::qWait(30);
@@ -549,6 +591,24 @@ void TestRibbonLayout::tooltipFollowsHover() {
     ext.setToolTip(QStringLiteral("Changed"));
     QVERIFY(bar.toolTip().startsWith(QStringLiteral("Changed")));
 
+    // A bound MENU action that never set a tooltip: Qt echoes its menu text
+    // ("&Close Project" -> "Close Project"), which is a different name from
+    // the one painted on the strip. The spec wins there, and its own
+    // "(Ctrl+W)" is not doubled by the shortcut suffix.
+    bar.setCurrentTab(QStringLiteral("home"));
+    bar.resize(1920, bar.preferredHeight());
+    QApplication::processEvents();
+    QAction menuAct(QStringLiteral("&Close Project"));
+    menuAct.setShortcut(QKeySequence(QStringLiteral("Ctrl+W")));
+    bar.setAction(QStringLiteral("home.file.close"), &menuAct);
+    hoverAt(bar, bar.itemRect(QStringLiteral("home.file.close")).center());
+    QCOMPARE(bar.toolTip(), QStringLiteral("Close Project (Ctrl+W)"));
+    QCOMPARE(bar.toolTip().count(QStringLiteral("Ctrl+W")), 1);
+    bar.setAction(QStringLiteral("home.file.close"), nullptr);
+    bar.setCurrentTab(QStringLiteral("modify"));
+    bar.resize(1920, bar.preferredHeight());
+    QApplication::processEvents();
+
     // Another item → its text; the caption strip → none; the tab row → none.
     hoverAt(bar, bar.itemRect(QStringLiteral("sel.delete")).center());
     QCOMPARE(bar.toolTip(), bar.action(QStringLiteral("sel.delete"))->toolTip());
@@ -565,6 +625,16 @@ void TestRibbonLayout::tooltipFollowsHover() {
     hoverAt(bar, ov.center());
     QCOMPARE(bar.toolTip(), QStringLiteral("More panels"));
 
+    // The collapse chevron is not an item, but it still names itself — and
+    // the name says what the click will do, not what the state is.
+    hoverAt(bar, bar.collapseButtonRect().center());
+    QCOMPARE(bar.toolTip(), QStringLiteral("Collapse the ribbon (Ctrl+F1)"));
+    bar.setMinimized(true);
+    hoverAt(bar, QPoint(0, 0));   // leave and re-enter so the id changes
+    hoverAt(bar, bar.collapseButtonRect().center());
+    QCOMPARE(bar.toolTip(), QStringLiteral("Expand the ribbon (Ctrl+F1)"));
+    bar.setMinimized(false);
+
     // Leaving clears it.
     QEvent leave(QEvent::Leave);
     QApplication::sendEvent(&bar, &leave);
@@ -574,6 +644,7 @@ void TestRibbonLayout::tooltipFollowsHover() {
 void TestRibbonLayout::tabsAndMinimize() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));   // Home is the default now
     bar.resize(1920, bar.preferredHeight());
     bar.show();
     QTest::qWait(30);
@@ -586,11 +657,11 @@ void TestRibbonLayout::tabsAndMinimize() {
     QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, homeTab.center());
     QCOMPARE(bar.currentTab(), QStringLiteral("home"));
     QCOMPARE(tabSpy.count(), 1);
-    QVERIFY(!bar.itemRect(QStringLiteral("home.tools.scanner")).isNull());
+    QVERIFY(!bar.itemRect(QStringLiteral("home.panels.scanner")).isNull());
     QVERIFY(bar.itemRect(QStringLiteral("type.int32")).isNull());
     // Large items span the full three rows.
-    const QRect large = bar.itemRect(QStringLiteral("home.tools.scanner"));
-    const QRect small = bar.itemRect(QStringLiteral("home.process.refresh"));
+    const QRect large = bar.itemRect(QStringLiteral("home.panels.scanner"));
+    const QRect small = bar.itemRect(QStringLiteral("home.source.refresh"));
     QVERIFY(large.height() >= 3 * small.height());
     QVERIFY(large.width() >= 48);
 
@@ -599,7 +670,7 @@ void TestRibbonLayout::tabsAndMinimize() {
     QVERIFY(bar.isMinimized());
     QCOMPARE(minSpy.count(), 1);
     QVERIFY(bar.preferredHeight() < fullH / 2);
-    QVERIFY(bar.itemRect(QStringLiteral("home.tools.scanner")).isNull());
+    QVERIFY(bar.itemRect(QStringLiteral("home.panels.scanner")).isNull());
     QVERIFY(bar.itemIdAt(large.center()).isEmpty());
     // A plain click on a tab restores the body.
     const QRect modifyTab = bar.tabRect(QStringLiteral("modify"));
@@ -634,7 +705,7 @@ void TestRibbonLayout::doubleClickWhileMinimizedRestoresOnce() {
     QCOMPARE(minSpy.count(), 1);
     QCOMPARE(minSpy.last().at(0).toBool(), false);
     QCOMPARE(bar.currentTab(), QStringLiteral("home"));
-    QVERIFY(!bar.itemRect(QStringLiteral("home.tools.scanner")).isNull());
+    QVERIFY(!bar.itemRect(QStringLiteral("home.panels.scanner")).isNull());
 
     // (2) The real-window sequence: Press (restores) · Release · Press · DblClick · Release.
     bar.setMinimized(true);
@@ -678,6 +749,7 @@ void TestRibbonLayout::lightThemeStillPaints() {
     QVERIFY(light.background.isValid());
     RibbonBar bar;
     bar.applyTheme(light);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     bar.show();
     QTest::qWait(30);
@@ -699,49 +771,54 @@ void TestRibbonLayout::flatMetrics() {
     QCOMPARE(bar.tabRowHeight(), fm.height() + 3);
     QCOMPARE(bar.bodyHeight(), 2 + 3 * qMax(18, fm.height() + 1) + 12 + 1);
     QCOMPARE(bar.preferredHeight(), bar.tabRowHeight() + bar.bodyHeight());
-    // Tabs: 4 px apart, no overlap.
+    // Tabs: Home first, 4 px apart, starting on the shared kGutter.
     const QRect modify = bar.tabRect(QStringLiteral("modify")), home = bar.tabRect(QStringLiteral("home"));
-    QCOMPARE(home.left(), modify.right() + 1 + 4);
-    QCOMPARE(modify.left(), 6);
+    QCOMPARE(home.left(), rcx::kGutter);
+    QCOMPARE(modify.left(), home.right() + 1 + 4);
     // Panels: 13 px gap; first row starts 2 px under the tab row.
-    const QRect edit = bar.panelRect(QStringLiteral("edit")), add = bar.panelRect(QStringLiteral("add"));
-    QCOMPARE(add.left(), edit.right() + 1 + 13);
-    QCOMPARE(edit.top(), bar.tabRowHeight() + 2);
-    QCOMPARE(edit.height(), 3 * qMax(18, fm.height() + 1) + 12);
+    bar.setCurrentTab(QStringLiteral("modify"));
+    const QRect add = bar.panelRect(QStringLiteral("add")), ins = bar.panelRect(QStringLiteral("insert"));
+    QCOMPARE(ins.left(), add.right() + 1 + 13);
+    QCOMPARE(add.top(), bar.tabRowHeight() + 2);
+    QCOMPARE(add.height(), 3 * qMax(18, fm.height() + 1) + 12);
     // Small rect is colW × 18 with a per-kind icon cell: H64 (24) column wider
     // than the H8 (16) column by exactly the cell difference (glyph-only).
+    // A group caption can add a px or two to its group's last column.
     bar.setLabelMode(RibbonBar::LabelMode::IconsOnly);
-    QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).width(), 24 + 6);
-    QCOMPARE(bar.itemRect(QStringLiteral("type.hex8")).width(), 16 + 6);
+    QVERIFY(bar.itemRect(QStringLiteral("type.hex64")).width() >= 24 + 6);
+    QVERIFY(bar.itemRect(QStringLiteral("type.hex8")).width() >= 16 + 6);
     QCOMPARE(bar.itemRect(QStringLiteral("type.utf16")).width(), 32 + 6);
-    QCOMPARE(bar.itemRect(QStringLiteral("type.class")).width(), 16 + 6);
+    // DELIBERATE CHANGE (was 16 + 6, the icon-only cell): Structure is
+    // keepLabel, so even in IconsOnly its three items carry words and the
+    // column takes the widest of them.
+    QCOMPARE(bar.itemRect(QStringLiteral("type.array")).width(),
+             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Ptr → Class")) + 6);
+    QCOMPARE(bar.itemRect(QStringLiteral("type.class")).width(),
+             bar.itemRect(QStringLiteral("type.array")).width());
     QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).height(), qMax(18, fm.height() + 1));
+    // DELIBERATE CHANGE: Type is glyph-only in All mode too, so the width does
+    // not grow by a "Hex 64" label any more.
+    const int glyphW = bar.itemRect(QStringLiteral("type.hex64")).width();
     bar.setLabelMode(RibbonBar::LabelMode::All);
-    QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).width(),
-             3 + 24 + 4 + fm.horizontalAdvance(QStringLiteral("Hex 64")) + 6);
-    // Large: clamp(label + 8, 48, 80).
+    QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).width(), glyphW);
+    // …but a keepLabel item does grow.
+    QCOMPARE(bar.itemRect(QStringLiteral("type.custom")).width(),
+             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Custom…")) + 6);
+    // Large: clamp(label + 8, 48, 80), equalised inside the panel.
     bar.setCurrentTab(QStringLiteral("home"));
-    QCOMPARE(bar.itemRect(QStringLiteral("home.project.open")).width(), 48);
-    QCOMPARE(bar.itemRect(QStringLiteral("home.project.newclass")).width(),
+    QCOMPARE(bar.itemRect(QStringLiteral("home.file.open")).width(), 48);
+    QCOMPARE(bar.itemRect(QStringLiteral("home.class.newclass")).width(),
              qBound(48, fm.horizontalAdvance(QStringLiteral("New Class")) + 8, 80));
-    // Tools rhythm: Scanner + Symbols large, Bookmarks / Console / RTTI one small column.
-    QCOMPARE(bar.itemRect(QStringLiteral("home.tools.symbols")).height(), 3 * qMax(18, fm.height() + 1));
-    QCOMPARE(bar.itemRect(QStringLiteral("home.tools.console")).height(), qMax(18, fm.height() + 1));
-    QCOMPARE(bar.itemColumn(QStringLiteral("home.tools.bookmarks")), bar.itemColumn(QStringLiteral("home.tools.rtti")));
-    // Home fits fully labelled in the user's 1080-px window.
-    bar.setLabelMode(RibbonBar::LabelMode::Auto);
-    bar.resize(1080, bar.preferredHeight());
-    QVERIFY2(bar.naturalWidth() + 6 <= 1080, qPrintable(QStringLiteral("Home natural %1").arg(bar.naturalWidth())));
-    for (const char* id : {"home.project.newclass", "home.process.goto", "home.code.generate", "home.tools.scanner", "home.tools.rtti"})
-        QVERIFY2(bar.itemLabelShown(QLatin1String(id)), id);
-    QVERIFY(bar.overflowedPanelIds().isEmpty());
-    // … and Modify keeps Add / Insert / Selected labelled with Type glyph-only.
-    bar.setCurrentTab(QStringLiteral("modify"));
-    QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));
-    QVERIFY(bar.itemLabelShown(QStringLiteral("add.1024")));
-    QVERIFY(bar.itemLabelShown(QStringLiteral("insert.1024")));
-    QVERIFY(bar.itemLabelShown(QStringLiteral("sel.duplicate")));
-    QVERIFY(bar.overflowedPanelIds().isEmpty());
+    // A `menu` item reserves 10 px for its ▾.
+    QCOMPARE(bar.itemRect(QStringLiteral("home.source.attach")).width(),
+             qBound(48, fm.horizontalAdvance(QStringLiteral("Source")) + 8, 80) + 10);
+    QCOMPARE(bar.itemRect(QStringLiteral("home.file.export")).width(),
+             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Export")) + 6 + 10);
+    // Panels rhythm: Scanner + Symbols large, Bookmarks / Console / Split one small column.
+    QCOMPARE(bar.itemRect(QStringLiteral("home.panels.symbols")).height(), 3 * qMax(18, fm.height() + 1));
+    QCOMPARE(bar.itemRect(QStringLiteral("home.panels.console")).height(), qMax(18, fm.height() + 1));
+    QCOMPARE(bar.itemColumn(QStringLiteral("home.panels.bookmarks")),
+             bar.itemColumn(QStringLiteral("home.panels.split")));
 }
 
 // Defects D / E: no panel boxes, no caption bands, no fills or outlines at
@@ -753,6 +830,7 @@ void TestRibbonLayout::nothingFilledAtRest() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
     bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     bar.show();
     QTest::qWait(30);
@@ -803,9 +881,8 @@ void TestRibbonLayout::nothingFilledAtRest() {
     const int bodyBottom = bar.tabRowHeight() + bar.bodyHeight();
     for (int y = qRound((bodyBottom - 3) * dpr); y < qFloor(bodyBottom * dpr - 0.5); ++y)
         QVERIFY2(!sameColour(img.pixel(divX, y), m_dark.border), qPrintable(QStringLiteral("divider touches the body hairline at row %1").arg(y)));
-    // No divider before the first panel.
-    const QRect edit = bar.panelRect(QStringLiteral("edit"));
-    for (int x = 0; x < qRound(edit.left() * dpr); ++x)
+    // No divider before the first panel (Add is first on Modify now).
+    for (int x = 0; x < qRound(add.left() * dpr); ++x)
         QVERIFY(!sameColour(img.pixel(x, yMid), m_dark.border));
     // Body bottom hairline is one device row, full width.
     const QVector<int> rows = rowsWith(img, QRect(0, qRound((bodyBottom - 2) * dpr), 8, qRound(3 * dpr)), m_dark.border);
@@ -819,6 +896,7 @@ void TestRibbonLayout::hoverIsFillOnly() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
     bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1920, bar.preferredHeight());
     bar.show();
     QTest::qWait(30);
@@ -845,15 +923,18 @@ void TestRibbonLayout::hoverIsFillOnly() {
                             .arg(edge.x()).arg(edge.y()).arg(edge.width()).arg(edge.height())
                             .arg(countColour(img, edge, m_dark.hover))));
     QVERIFY(countColour(img, d, m_dark.hover) > d.width() * d.height() / 3);
-    // Label tone: text on hover, textDim at rest.
     QVERIFY(countColour(img, d, m_dark.text) > 0);
     QEvent leave(QEvent::Leave);
     QApplication::sendEvent(&bar, &leave);
     QApplication::processEvents();
     const QImage rest = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    // DELIBERATE CHANGE (was: rest ink == textDim, no `text` pixel at rest).
+    // Chrome tone ladder: the ribbon is the actionable surface, so its rest
+    // ink IS `text` and only the `hover` fill marks the pointer. A dim rest
+    // tone put the toolbar below the document in the hierarchy.
     QCOMPARE(countColour(rest, d, m_dark.hover), 0);
-    QCOMPARE(countColour(rest, d, m_dark.text), 0);
-    QVERIFY(countColour(rest, d, ribbonToneColour(m_dark.textDim, m_dark, m_dark.background)) > 0);
+    QVERIFY2(countColour(rest, d, m_dark.text) > 0, "rest ink must be `text`");
+    QCOMPARE(countColour(rest, d, ribbonToneColour(m_dark.textDim, m_dark, m_dark.background)), 0);
     // Pressed = `button` fill (vs.json: button != background). A press is
     // always preceded by a move in real life; QTest::mousePress isn't.
     hoverAt(bar, r.center());
@@ -876,10 +957,13 @@ void TestRibbonLayout::checkedUnderline() {
     bar.show();
     QTest::qWait(30);
     QApplication::processEvents();
-    QAction code(QStringLiteral("Code"));
+    // DELIBERATE CHANGE: home.code.codeview is gone with the Code/Both pair
+    // (the pane tabs own view mode). Symbols is the same geometry class — a
+    // Large cell — and is genuinely checkable (checked = the dock is open).
+    QAction code(QStringLiteral("Symbols"));
     code.setCheckable(true);
-    bar.setAction(QStringLiteral("home.code.codeview"), &code);
-    const QRect r = bar.itemRect(QStringLiteral("home.code.codeview"));
+    bar.setAction(QStringLiteral("home.panels.symbols"), &code);
+    const QRect r = bar.itemRect(QStringLiteral("home.panels.symbols"));
     QVERIFY(!r.isNull());
     {
         const QImage off = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
@@ -893,12 +977,14 @@ void TestRibbonLayout::checkedUnderline() {
     // Underline: two contiguous rows ending on the rect's last device row.
     const int xMid = d.left() + d.width() / 2;
     const QVector<int> rows = rowsWith(img, QRect(xMid, d.top(), 1, d.height() + 2), m_dark.indHoverSpan);
-    // The label is indHoverSpan too, so only count the rows in the bottom quarter.
+    // The label is indHoverSpan too — and it now sits on the row-3 line, right
+    // above the underline — so only the last few device rows are the underline.
+    const int lastRow = int(qFloor((r.bottom() + 1) * dpr - 0.5));
     QVector<int> bottom;
-    for (int y : rows) if (y >= d.top() + d.height() * 3 / 4) bottom << y;
+    for (int y : rows) if (y >= lastRow - 1) bottom << y;
     QCOMPARE(bottom.size(), 2);
     QCOMPARE(bottom[1], bottom[0] + 1);
-    QCOMPARE(bottom[1], int(qFloor((r.bottom() + 1) * dpr - 0.5)));
+    QCOMPARE(bottom[1], lastRow);
     // Full width of the item.
     QVERIFY(countColour(img, QRect(d.left(), bottom[0], d.width(), 2), m_dark.indHoverSpan) >= d.width() * 2 - 4);
     // No ring: the top row and side columns carry no accent, no border, no fill.
@@ -929,11 +1015,13 @@ void TestRibbonLayout::disabledDimsUnderline() {
     bar.show();
     QTest::qWait(30);
     QApplication::processEvents();
-    QAction both(QStringLiteral("Both"));
+    // DELIBERATE CHANGE: repointed from the deleted home.code.bothview to the
+    // other checkable Large cell (same geometry class).
+    QAction both(QStringLiteral("Scanner"));
     both.setCheckable(true);
     both.setChecked(true);
-    bar.setAction(QStringLiteral("home.code.bothview"), &both);
-    const QRect r = bar.itemRect(QStringLiteral("home.code.bothview"));
+    bar.setAction(QStringLiteral("home.panels.scanner"), &both);
+    const QRect r = bar.itemRect(QStringLiteral("home.panels.scanner"));
     QVERIFY(!r.isNull());
     const QImage on = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     const QRect d = devRect(on, r);
@@ -967,7 +1055,7 @@ void TestRibbonLayout::activeTabUnderline() {
     QApplication::processEvents();
     const QImage img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     const qreal dpr = img.devicePixelRatio() > 0 ? img.devicePixelRatio() : 1.0;
-    const QRect active = bar.tabRect(QStringLiteral("modify")), other = bar.tabRect(QStringLiteral("home"));
+    const QRect active = bar.tabRect(QStringLiteral("home")), other = bar.tabRect(QStringLiteral("modify"));
     const QRect ad = devRect(img, active), od = devRect(img, other);
     const int hairRow = qFloor(bar.tabRowHeight() * dpr - 0.5);
     // Two contiguous accent rows under the active tab, the last on the hairline row.
@@ -982,9 +1070,12 @@ void TestRibbonLayout::activeTabUnderline() {
     const QRect inner(ad.left(), 0, ad.width(), hairRow - 1);
     QCOMPARE(countColour(img, inner, m_dark.border), 0);
     QCOMPARE(countColour(img, inner, m_dark.hover), 0);
-    QVERIFY(countColour(img, inner, menuBarColor(m_dark)) > inner.width() * inner.height() / 2);
-    // Text ladder: inactive textMuted (guarded), active text.
-    QVERIFY(countColour(img, od, ribbonToneColour(m_dark.textMuted, m_dark, menuBarColor(m_dark))) > 0);
+    // DELIBERATE CHANGE (was menuBarColor): the tab row is the ribbon's own
+    // header, not a second menu strip — it shares the ribbon's `background`.
+    QVERIFY(countColour(img, inner, m_dark.background) > inner.width() * inner.height() / 2);
+    QCOMPARE(countColour(img, inner, menuBarColor(m_dark)), 0);
+    // Text ladder: inactive textDim through the ladder, active text.
+    QVERIFY(countColour(img, od, ribbonToneColour(m_dark.textDim, m_dark, m_dark.background)) > 0);
     QCOMPARE(countColour(img, od, m_dark.text), 0);
     QVERIFY(countColour(img, inner, m_dark.text) > 0);
     hoverAt(bar, other.center());
@@ -1008,6 +1099,7 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     RibbonBar bar;
     bar.applyTheme(m_dark);
     bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(760, bar.preferredHeight());
     QVERIFY(!bar.overflowedPanelIds().isEmpty());
     const QRect ov = bar.overflowButtonRect();
@@ -1015,8 +1107,9 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     QCOMPARE(ov.top(), bar.tabRowHeight() + 2 + 18);   // middle row
     // Right of the last visible panel: divider at right+7, item at divider+5.
     int lastRight = -1;
-    for (const QString& id : {QStringLiteral("edit"), QStringLiteral("add"), QStringLiteral("insert"),
-                              QStringLiteral("selected"), QStringLiteral("type")})
+    for (const QString& id : {QStringLiteral("add"), QStringLiteral("insert"),
+                              QStringLiteral("selected"), QStringLiteral("type"),
+                              QStringLiteral("structure")})
         if (const QRect r = bar.panelRect(id); !r.isNull()) lastRight = qMax(lastRight, r.right());
     QCOMPARE(ov.left(), lastRight + 7 + 5);
     QVERIFY(ov.right() + 6 <= 760);
@@ -1038,6 +1131,261 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     const QImage hov = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     QVERIFY(countColour(hov, d, m_dark.hover) > d.width() * d.height() / 3);
     QCOMPARE(countColour(hov, QRect(d.left(), d.top(), d.width(), 1), m_dark.border), 0);
+}
+
+// P0 #1: the caption is the SECONDARY tier and can never out-shout the label
+// it captions. `ribbonToneColour` is a ladder (tone → textDim → text): on
+// vs.json `textMuted` misses the 3:1 guard by 0.02, and the old cliff jumped
+// straight to `text` — captions rendered at exactly label brightness.
+void TestRibbonLayout::captionToneNeverBrighterThanLabel() {
+    for (const QString& name : {QStringLiteral("vs"), QStringLiteral("tw")}) {
+        const Theme t = loadTheme(name);
+        QVERIFY2(t.background.isValid(), qPrintable(name));
+        const QColor caption = ribbonToneColour(t.textDim, t, t.background);
+        const double dCap = qAbs(wcagLuminance(caption) - wcagLuminance(t.background));
+        const double dLbl = qAbs(wcagLuminance(t.text) - wcagLuminance(t.background));
+        QVERIFY2(dCap <= dLbl + 1e-9,
+                 qPrintable(QStringLiteral("%1: caption %2 contrasts more than label %3")
+                            .arg(name, caption.name(), t.text.name())));
+        // …and it still clears the readability floor.
+        QVERIFY2(wcagContrast(caption, t.background) >= kRibbonMinContrast, qPrintable(name));
+    }
+    // Pixel probe: the caption strip carries no `text` pixel at all.
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));
+    bar.resize(1920, bar.preferredHeight());
+    bar.show();
+    QTest::qWait(30);
+    QApplication::processEvents();
+    const QImage img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    const QRect add = bar.panelRect(QStringLiteral("add"));
+    const QRect capDev = devRect(img, QRect(add.left(), add.bottom() - 10, add.width(), 11));
+    QCOMPARE(countColour(img, capDev, m_dark.text), 0);
+    QVERIFY(countColour(img, capDev, ribbonToneColour(m_dark.textDim, m_dark, m_dark.background)) > 0);
+}
+
+// P0 #14: Large cells of one panel share the widest width, and a Large label
+// sits on the row-3 line — the same line as the third small button beside it.
+void TestRibbonLayout::largeCellsShareAWidthAndSitOnRowThree() {
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    bar.setLabelMode(RibbonBar::LabelMode::All);
+    bar.setCurrentTab(QStringLiteral("home"));
+    bar.resize(1920, bar.preferredHeight());
+    const QRect open = bar.itemRect(QStringLiteral("home.file.open"));
+    const QRect save = bar.itemRect(QStringLiteral("home.file.save"));
+    QVERIFY(!open.isNull() && !save.isNull());
+    QCOMPARE(open.width(), save.width());
+    const QRect scanner = bar.itemRect(QStringLiteral("home.panels.scanner"));
+    const QRect symbols = bar.itemRect(QStringLiteral("home.panels.symbols"));
+    QCOMPARE(scanner.width(), symbols.width());
+    // "Symbols" is wider than "Scanner", so the pair took the wider one.
+    const QFontMetrics fm(bar.font());
+    QCOMPARE(scanner.width(),
+             qMax(qBound(48, fm.horizontalAdvance(QStringLiteral("Scanner")) + 8, 80),
+                  qBound(48, fm.horizontalAdvance(QStringLiteral("Symbols")) + 8, 80)));
+
+    // Row-3 line: the Large label's row is the third small row of the
+    // neighbouring column (Bookmarks / Console / Split Below).
+    const int rowH = qMax(18, fm.height() + 1);
+    const QRect third = bar.itemRect(QStringLiteral("home.panels.split"));
+    QCOMPARE(third.height(), rowH);
+    QCOMPARE(third.top(), scanner.top() + 2 * rowH);
+
+    // …and the ink proves it: the Large label's pixels live in row 3 only.
+    bar.show();
+    QTest::qWait(30);
+    QApplication::processEvents();
+    const QImage img = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    const QRect row3 = devRect(img, QRect(scanner.left(), scanner.top() + 2 * rowH,
+                                          scanner.width(), rowH));
+    QVERIFY2(countColour(img, row3, m_dark.text) > 10, "no Large label ink on the row-3 line");
+}
+
+// P0 #9: the collapse control — 22 px at the right end of the tab row, one
+// click toggles, and the glyph says which way the click goes.
+void TestRibbonLayout::collapseChevron() {
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    bar.resize(1080, bar.preferredHeight());
+    bar.show();
+    QTest::qWait(30);
+    QApplication::processEvents();
+
+    const QRect cr = bar.collapseButtonRect();
+    QCOMPARE(cr.size(), QSize(22, bar.tabRowHeight()));
+    QCOMPARE(cr.right() + 1, bar.width() - 6);   // kRightMargin
+    // It never sits on a tab — at ANY width. The chevron is hit-tested before
+    // tabIdAt, so an unclamped cell would eat clicks on the last tab once the
+    // widget got narrow enough.
+    for (int w : {80, 120, 200, 400, 1080, 1920}) {
+        bar.resize(w, bar.preferredHeight());
+        const QRect c = bar.collapseButtonRect();
+        for (const QString& id : bar.tabIds())
+            QVERIFY2(!bar.tabRect(id).intersects(c),
+                     qPrintable(QStringLiteral("chevron %1 over tab %2 at width %3")
+                                .arg(c.left()).arg(id).arg(w)));
+    }
+    bar.resize(1080, bar.preferredHeight());
+    QApplication::processEvents();
+
+    // Rest: ink but no fill; hover: the `hover` fill, like the … item.
+    const QImage rest = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    const QRect d = devRect(rest, cr);
+    QCOMPARE(countColour(rest, d, m_dark.hover), 0);
+    QVERIFY2(inkAmount(rest, cr, m_dark.background) > 0.5, "no chevron drawn");
+    hoverAt(bar, cr.center());
+    QApplication::processEvents();
+    const QImage hov = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    QVERIFY(countColour(hov, d, m_dark.hover) > d.width() * d.height() / 4);
+
+    // A click toggles — and only once (the DblClick half must not undo it).
+    QSignalSpy minSpy(&bar, &RibbonBar::minimizedChanged);
+    QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, cr.center());
+    QVERIFY(bar.isMinimized());
+    QCOMPARE(minSpy.count(), 1);
+    QCOMPARE(bar.currentTab(), QStringLiteral("home"));   // not a tab click
+    // setMinimized() clears the hover id; the press re-derives it, so the cell
+    // keeps its fill and advertises the new direction without a mouse move.
+    QCOMPARE(bar.toolTip(), QStringLiteral("Expand the ribbon (Ctrl+F1)"));
+    QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.collapseButtonRect().center());
+    QVERIFY(!bar.isMinimized());
+    QCOMPARE(minSpy.count(), 2);
+
+    // The glyph swaps with the state (different pixels, same cell).
+    const QImage up = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    bar.setMinimized(true);
+    bar.resize(1080, bar.preferredHeight());
+    QApplication::processEvents();
+    const QImage down = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+    int diff = 0;
+    for (int y = d.top(); y <= d.bottom() && y < down.height(); ++y)
+        for (int x = d.left(); x <= d.right() && x < down.width(); ++x)
+            if (up.pixel(x, y) != down.pixel(x, y)) ++diff;
+    QVERIFY2(diff > 4, "chevron-up and chevron-down render the same");
+}
+
+// P1 #18: the Type panel captions its column GROUPS (Hex: Int: UInt: Byte: …)
+// instead of repeating "Type", and every caption fits over the columns it
+// spans — including "Byte:", which is wider than its single 22-px column.
+void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));
+    bar.resize(1920, bar.preferredHeight());
+    QFont cf = bar.font();
+    cf.setPointSize(qMax(6, cf.pointSize() - 1));
+    const QFontMetrics cfm(cf);
+
+    struct Group { const char* caption; const char* first; const char* last; };
+    const Group groups[] = {
+        {"Hex:",   "type.hex64",  "type.hex16"},
+        {"Int:",   "type.int64",  "type.int16"},
+        {"UInt:",  "type.uint64", "type.uint16"},
+        {"Byte:",  "type.hex8",   "type.uint8"},
+        {"Float:", "type.double", "type.mat4x4"},
+        {"Ptr:",   "type.pointer", "type.funcptr"},
+        {"Str:",   "type.utf8",   "type.utf16"},
+    };
+    for (const Group& g : groups) {
+        const QRect a = bar.itemRect(QLatin1String(g.first));
+        const QRect b = bar.itemRect(QLatin1String(g.last));
+        QVERIFY2(!a.isNull() && !b.isNull(), g.caption);
+        const int span = b.right() - a.left() + 1;
+        QVERIFY2(span >= cfm.horizontalAdvance(QLatin1String(g.caption)),
+                 qPrintable(QStringLiteral("%1 spans %2 px, caption needs %3")
+                            .arg(QLatin1String(g.caption)).arg(span)
+                            .arg(cfm.horizontalAdvance(QLatin1String(g.caption)))));
+        // REGRESSION: the caption must sit OVER the columns it names. The
+        // span-width check above passed while "Str:" was painted on top of
+        // "Custom…" — the last group ran to the panel's right edge and every
+        // group was shifted right by the gap it had already absorbed.
+        const QRect cap = bar.groupCaptionRect(QLatin1String(g.caption));
+        QVERIFY2(!cap.isNull(), g.caption);
+        QVERIFY2(cap.left() >= a.left() - 1 && cap.right() <= b.right() + 1,
+                 qPrintable(QStringLiteral("%1 caption %2..%3 vs columns %4..%5")
+                            .arg(QLatin1String(g.caption))
+                            .arg(cap.left()).arg(cap.right()).arg(a.left()).arg(b.right())));
+        QVERIFY2(cap.center().x() >= a.left() && cap.center().x() <= b.right(),
+                 qPrintable(QStringLiteral("%1 caption centre %2 outside %3..%4")
+                            .arg(QLatin1String(g.caption))
+                            .arg(cap.center().x()).arg(a.left()).arg(b.right())));
+    }
+    // Custom… belongs to no family: it terminates "Str:" instead of being
+    // swallowed by it, and carries no caption of its own.
+    {
+        const QRect str = bar.groupCaptionRect(QStringLiteral("Str:"));
+        const QRect custom = bar.itemRect(QStringLiteral("type.custom"));
+        QVERIFY(!custom.isNull());
+        QVERIFY2(str.right() < custom.left(),
+                 qPrintable(QStringLiteral("Str: ends at %1, Custom… starts at %2")
+                            .arg(str.right()).arg(custom.left())));
+    }
+    // The Byte column really is one column of three.
+    QCOMPARE(bar.itemColumn(QStringLiteral("type.hex8")), bar.itemColumn(QStringLiteral("type.uint8")));
+    // And Structure is a panel of its own with a normal caption.
+    QVERIFY(!bar.panelRect(QStringLiteral("structure")).isNull());
+}
+
+// P1 #18: "gives the three restructuring commands words in every mode".
+// keepLabel, not the ordinary labelDrop treatment — a bare list-selection
+// glyph does not say "Break Class".
+void TestRibbonLayout::structureKeepsItsWordsEverywhere() {
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    bar.setCurrentTab(QStringLiteral("modify"));
+    const char* ids[] = {"type.class", "type.ptrclass", "type.array"};
+    for (RibbonBar::LabelMode mode : {RibbonBar::LabelMode::Auto,
+                                      RibbonBar::LabelMode::All,
+                                      RibbonBar::LabelMode::IconsOnly}) {
+        bar.setLabelMode(mode);
+        for (int w : {700, 760, 1080, 1920}) {
+            bar.resize(w, bar.preferredHeight());
+            if (bar.overflowedPanelIds().contains(QStringLiteral("structure"))) continue;
+            for (const char* id : ids)
+                QVERIFY2(bar.itemLabelShown(QLatin1String(id)),
+                         qPrintable(QStringLiteral("%1 wordless at %2 in mode %3")
+                                    .arg(QLatin1String(id)).arg(w).arg(int(mode))));
+        }
+    }
+    bar.setLabelMode(RibbonBar::LabelMode::Auto);
+}
+
+// P1 #15/#18: both tabs fit the user's 1080-logical-px window with every
+// label they have. The width estimator is Small = 29 + 7.8·chars,
+// Large = clamp(7.8·chars + 8, 48, 80).
+void TestRibbonLayout::bothTabsFitTheUserWindow() {
+    RibbonBar bar;
+    bar.applyTheme(m_dark);
+    bar.setLabelMode(RibbonBar::LabelMode::Auto);
+    for (const char* tab : {"home", "modify"}) {
+        bar.setCurrentTab(QLatin1String(tab));
+        bar.resize(1080, bar.preferredHeight());
+        QVERIFY2(bar.naturalWidth() + 6 <= 1080,
+                 qPrintable(QStringLiteral("%1 natural %2").arg(QLatin1String(tab)).arg(bar.naturalWidth())));
+        QVERIFY2(bar.overflowedPanelIds().isEmpty(), qPrintable(bar.overflowedPanelIds().join(',')));
+    }
+    // Home: every label present at 1080.
+    bar.setCurrentTab(QStringLiteral("home"));
+    bar.resize(1080, bar.preferredHeight());
+    for (const char* id : {"home.file.open", "home.file.save", "home.file.export", "home.file.close",
+                           "home.class.newclass", "home.class.newstruct", "home.class.newenum",
+                           "home.source.attach", "home.source.refresh", "home.source.goto",
+                           "home.panels.scanner", "home.panels.symbols", "home.panels.bookmarks",
+                           "home.panels.console", "home.panels.split"})
+        QVERIFY2(bar.itemLabelShown(QLatin1String(id)), id);
+    // Modify: every worded label present; the Type glyphs stay glyphs.
+    bar.setCurrentTab(QStringLiteral("modify"));
+    bar.resize(1080, bar.preferredHeight());
+    for (const char* id : {"add.4", "add.2048", "insert.4", "insert.2048",
+                           "sel.delete", "sel.duplicate", "sel.comment", "sel.swap", "sel.rtti",
+                           "type.custom", "type.class", "type.ptrclass", "type.array"})
+        QVERIFY2(bar.itemLabelShown(QLatin1String(id)), id);
+    QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));
+    QVERIFY(!bar.itemLabelShown(QStringLiteral("sel.zero")));   // iconOnly
+    // Add / Insert show the count alone; the action keeps the long form.
+    QCOMPARE(bar.action(QStringLiteral("add.1024"))->text(), QStringLiteral("Add 1024"));
 }
 
 QTEST_MAIN(TestRibbonLayout)

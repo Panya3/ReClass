@@ -1,6 +1,7 @@
 #include "ribbon_actions.h"
 #include "controller.h"
 #include "editor.h"
+#include "ribbon_spec.h"
 #include <QTimer>
 #include <QUndoStack>
 #include <algorithm>
@@ -47,6 +48,17 @@ QAction* RibbonActions::add(const QString& id, const QString& text,
     return a;
 }
 
+// The label and the tooltip come from defaultRibbonSpec() — ONE text per
+// command, shared by the ribbon button, this QAction, the overflow menu and
+// the tooltip. Ids that have no button (the title-strip undo/redo pair) pass
+// their strings through the overload above.
+QAction* RibbonActions::add(const QString& id, const QVariant& data) {
+    const RibbonItemSpec* spec = ribbonSpecForId(id);
+    Q_ASSERT_X(spec, "RibbonActions::add", qPrintable(id + QStringLiteral(" is not in defaultRibbonSpec()")));
+    if (!spec) return add(id, id, id, data);
+    return add(id, spec->label, spec->tooltip.isEmpty() ? spec->label : spec->tooltip, data);
+}
+
 bool RibbonActions::anyEditorEditing(RcxController* c, RcxEditor* extra) {
     if (extra && extra->isEditing()) return true;
     if (c)
@@ -81,68 +93,45 @@ int RibbonActions::lineOfNode(RcxEditor* ed, uint64_t nodeId) {
 
 void RibbonActions::buildActions() {
     // ── Type panel ──
-    // Fixed-kind buttons: one slot, the kind rides in data().
-    auto typeAct = [this](const QString& id, NodeKind k, const QString& text,
-                          const QString& tip) {
-        QAction* a = add(id, text, tip, int(k));
+    // Fixed-kind buttons: one slot, the kind rides in data(). Every label and
+    // tooltip below comes from defaultRibbonSpec() — see add(id, data).
+    auto typeAct = [this](const QString& id, NodeKind k) {
+        QAction* a = add(id, int(k));
         wire(a, [this, k]() {
             if (auto* c = ctrl()) c->retypeSelection(k);
         });
     };
-    typeAct(QStringLiteral("type.hex64"),  NodeKind::Hex64,  QStringLiteral("Hex 64"),
-            QStringLiteral("Change to hex64 — 8 raw bytes (key 4)"));
-    typeAct(QStringLiteral("type.hex32"),  NodeKind::Hex32,  QStringLiteral("Hex 32"),
-            QStringLiteral("Change to hex32 — 4 raw bytes (key 3)"));
-    typeAct(QStringLiteral("type.hex16"),  NodeKind::Hex16,  QStringLiteral("Hex 16"),
-            QStringLiteral("Change to hex16 — 2 raw bytes (key 2)"));
-    typeAct(QStringLiteral("type.hex8"),   NodeKind::Hex8,   QStringLiteral("Hex 8"),
-            QStringLiteral("Change to hex8 — 1 raw byte (key 1)"));
-    typeAct(QStringLiteral("type.int64"),  NodeKind::Int64,  QStringLiteral("Int 64"),
-            QStringLiteral("Change to int64_t — signed 8-byte integer (S on an 8-byte field)"));
-    typeAct(QStringLiteral("type.int32"),  NodeKind::Int32,  QStringLiteral("Int 32"),
-            QStringLiteral("Change to int32_t — signed 4-byte integer (S on a 4-byte field)"));
-    typeAct(QStringLiteral("type.int16"),  NodeKind::Int16,  QStringLiteral("Int 16"),
-            QStringLiteral("Change to int16_t — signed 2-byte integer (S on a 2-byte field)"));
-    typeAct(QStringLiteral("type.int8"),   NodeKind::Int8,   QStringLiteral("Int 8"),
-            QStringLiteral("Change to int8_t — signed byte (S on a 1-byte field)"));
-    typeAct(QStringLiteral("type.uint64"), NodeKind::UInt64, QStringLiteral("UInt 64"),
-            QStringLiteral("Change to uint64_t — unsigned 8-byte integer (U on an 8-byte field)"));
-    typeAct(QStringLiteral("type.uint32"), NodeKind::UInt32, QStringLiteral("UInt 32"),
-            QStringLiteral("Change to uint32_t — unsigned 4-byte integer (U on a 4-byte field)"));
-    typeAct(QStringLiteral("type.uint16"), NodeKind::UInt16, QStringLiteral("UInt 16"),
-            QStringLiteral("Change to uint16_t — unsigned 2-byte integer (U on a 2-byte field)"));
-    typeAct(QStringLiteral("type.uint8"),  NodeKind::UInt8,  QStringLiteral("UInt 8"),
-            QStringLiteral("Change to uint8_t — unsigned byte (U on a 1-byte field)"));
-    typeAct(QStringLiteral("type.double"), NodeKind::Double, QStringLiteral("Double"),
-            QStringLiteral("Change to double — 8-byte float (F on an 8-byte field)"));
-    typeAct(QStringLiteral("type.float"),  NodeKind::Float,  QStringLiteral("Float"),
-            QStringLiteral("Change to float — 4-byte float (F on a 4-byte field)"));
-    typeAct(QStringLiteral("type.bool"),   NodeKind::Bool,   QStringLiteral("Bool"),
-            QStringLiteral("Change to bool — 1 byte"));
-    typeAct(QStringLiteral("type.vec2"),   NodeKind::Vec2,   QStringLiteral("Vec 2"),
-            QStringLiteral("Change to vec2 — 2 floats, 8 bytes"));
-    typeAct(QStringLiteral("type.vec3"),   NodeKind::Vec3,   QStringLiteral("Vec 3"),
-            QStringLiteral("Change to vec3 — 3 floats, 12 bytes"));
-    typeAct(QStringLiteral("type.vec4"),   NodeKind::Vec4,   QStringLiteral("Vec 4"),
-            QStringLiteral("Change to vec4 — 4 floats, 16 bytes"));
-    typeAct(QStringLiteral("type.mat4x4"), NodeKind::Mat4x4, QStringLiteral("Mat 4x4"),
-            QStringLiteral("Change to mat4x4 — 16 floats, 64 bytes"));
+    typeAct(QStringLiteral("type.hex64"),  NodeKind::Hex64);
+    typeAct(QStringLiteral("type.hex32"),  NodeKind::Hex32);
+    typeAct(QStringLiteral("type.hex16"),  NodeKind::Hex16);
+    typeAct(QStringLiteral("type.hex8"),   NodeKind::Hex8);
+    typeAct(QStringLiteral("type.int64"),  NodeKind::Int64);
+    typeAct(QStringLiteral("type.int32"),  NodeKind::Int32);
+    typeAct(QStringLiteral("type.int16"),  NodeKind::Int16);
+    typeAct(QStringLiteral("type.int8"),   NodeKind::Int8);
+    typeAct(QStringLiteral("type.uint64"), NodeKind::UInt64);
+    typeAct(QStringLiteral("type.uint32"), NodeKind::UInt32);
+    typeAct(QStringLiteral("type.uint16"), NodeKind::UInt16);
+    typeAct(QStringLiteral("type.uint8"),  NodeKind::UInt8);
+    typeAct(QStringLiteral("type.double"), NodeKind::Double);
+    typeAct(QStringLiteral("type.float"),  NodeKind::Float);
+    typeAct(QStringLiteral("type.bool"),   NodeKind::Bool);
+    typeAct(QStringLiteral("type.vec2"),   NodeKind::Vec2);
+    typeAct(QStringLiteral("type.vec3"),   NodeKind::Vec3);
+    typeAct(QStringLiteral("type.vec4"),   NodeKind::Vec4);
+    typeAct(QStringLiteral("type.mat4x4"), NodeKind::Mat4x4);
 
     // Pointer / function pointer: 64 vs 32 decided by tree.pointerSize at
     // trigger time; data() and the tooltip are relabelled on every refresh.
     {
-        QAction* a = add(QStringLiteral("type.pointer"), QStringLiteral("Pointer"),
-                         QStringLiteral("Change to ptr64 — 8-byte pointer (P key)"),
-                         int(NodeKind::Pointer64));
+        QAction* a = add(QStringLiteral("type.pointer"), int(NodeKind::Pointer64));
         wire(a, [this]() {
             auto* c = ctrl();
             if (!c || !c->document()) return;
             c->retypeSelection(c->document()->tree.pointerSize >= 8
                                ? NodeKind::Pointer64 : NodeKind::Pointer32);
         });
-        QAction* f = add(QStringLiteral("type.funcptr"), QStringLiteral("Func Ptr"),
-                         QStringLiteral("Change to fnptr64 — 8-byte function pointer"),
-                         int(NodeKind::FuncPtr64));
+        QAction* f = add(QStringLiteral("type.funcptr"), int(NodeKind::FuncPtr64));
         wire(f, [this]() {
             auto* c = ctrl();
             if (!c || !c->document()) return;
@@ -151,15 +140,13 @@ void RibbonActions::buildActions() {
         });
     }
     {
-        QAction* a = add(QStringLiteral("type.ptrclass"), QStringLiteral("Ptr→Class"),
-                         QStringLiteral("Change to a pointer to a new class (each selected 4/8-byte field)"));
+        QAction* a = add(QStringLiteral("type.ptrclass"));
         wire(a, [this]() {
             if (auto* c = ctrl()) c->convertSelectionToTypedPointers();
         });
     }
     {
-        QAction* a = add(QStringLiteral("type.class"), QStringLiteral("Class"),
-                         QStringLiteral("Break the selected bytes / fields into a new embedded class (Ctrl+Shift+B)"));
+        QAction* a = add(QStringLiteral("type.class"));
         wire(a, [this]() {
             auto* c = ctrl();
             if (!c) return;
@@ -172,15 +159,13 @@ void RibbonActions::buildActions() {
         });
     }
     {
-        QAction* a = add(QStringLiteral("type.array"), QStringLiteral("Array"),
-                         QStringLiteral("Turn the selected field (or contiguous same-type fields) into an array"));
+        QAction* a = add(QStringLiteral("type.array"));
         wire(a, [this]() {
             if (auto* c = ctrl()) c->makeArrayFromSelection();
         });
     }
     {
-        QAction* a = add(QStringLiteral("type.custom"), QStringLiteral("Custom…"),
-                         QStringLiteral("Type any type name for the selected field (inline type edit)"));
+        QAction* a = add(QStringLiteral("type.custom"));
         wire(a, [this]() {
             auto* c = ctrl();
             auto* ed = editor();
@@ -202,23 +187,19 @@ void RibbonActions::buildActions() {
             ed->beginInlineEdit(EditTarget::Type, line);
         });
     }
-    typeAct(QStringLiteral("type.utf8"),  NodeKind::UTF8,  QStringLiteral("ASCII"),
-            QStringLiteral("Change to str — ASCII / UTF-8 text"));
-    typeAct(QStringLiteral("type.utf16"), NodeKind::UTF16, QStringLiteral("UTF-16"),
-            QStringLiteral("Change to wstr — UTF-16 text"));
+    typeAct(QStringLiteral("type.utf8"),  NodeKind::UTF8);
+    typeAct(QStringLiteral("type.utf16"), NodeKind::UTF16);
 
     // ── Add / Insert panels ──
     static const int kByteCounts[] = {4, 8, 64, 1024, 2048};
     for (int n : kByteCounts) {
-        QAction* a = add(QStringLiteral("add.%1").arg(n), QStringLiteral("Add %1").arg(n),
-                         QStringLiteral("Append %1 bytes to the end of the class").arg(n), n);
+        QAction* a = add(QStringLiteral("add.%1").arg(n), n);
         wire(a, [this, n]() {
             if (auto* c = ctrl()) c->appendBytes(0, n);
         });
     }
     for (int n : kByteCounts) {
-        QAction* a = add(QStringLiteral("insert.%1").arg(n), QStringLiteral("Insert %1").arg(n),
-                         QStringLiteral("Insert %1 bytes above the selected field").arg(n), n);
+        QAction* a = add(QStringLiteral("insert.%1").arg(n), n);
         wire(a, [this, n]() {
             auto* c = ctrl();
             if (!c) return;
@@ -232,46 +213,47 @@ void RibbonActions::buildActions() {
         });
     }
 
-    // ── Selected panel ──
+    // ── Selection panel ──
     {
-        QAction* a = add(QStringLiteral("sel.delete"), QStringLiteral("Delete"),
-                         QStringLiteral("Delete the selected fields (Delete)"));
+        QAction* a = add(QStringLiteral("sel.delete"));
         wire(a, [this]() {
             if (auto* c = ctrl()) c->deleteSelection();
         });
-        QAction* d = add(QStringLiteral("sel.duplicate"), QStringLiteral("Duplicate"),
-                         QStringLiteral("Duplicate the selected fields below themselves (Ctrl+D)"));
+        QAction* d = add(QStringLiteral("sel.duplicate"));
         wire(d, [this]() {
             if (auto* c = ctrl()) c->duplicateSelection();
         });
-        QAction* cm = add(QStringLiteral("sel.comment"), QStringLiteral("Comment"),
-                          QStringLiteral("Edit the comment of the selected field(s) (;)"));
+        QAction* cm = add(QStringLiteral("sel.comment"));
         wire(cm, [this]() {
             if (auto* c = ctrl()) c->commentSelection(editor());
         });
-        QAction* z = add(QStringLiteral("sel.zero"), QStringLiteral("Zero"),
-                         QStringLiteral("Fill the selected bytes with 00"));
+        QAction* z = add(QStringLiteral("sel.zero"));
         wire(z, [this]() {
             if (auto* c = ctrl()) c->fillSelectionBytes(RcxController::ByteFill::Zero);
         });
-        QAction* ff = add(QStringLiteral("sel.ff"), QStringLiteral("FF"),
-                          QStringLiteral("Fill the selected bytes with FF"));
+        QAction* ff = add(QStringLiteral("sel.ff"));
         wire(ff, [this]() {
             if (auto* c = ctrl()) c->fillSelectionBytes(RcxController::ByteFill::FF);
         });
-        QAction* r = add(QStringLiteral("sel.random"), QStringLiteral("Random"),
-                         QStringLiteral("Fill the selected bytes with random values"));
+        QAction* r = add(QStringLiteral("sel.random"));
         wire(r, [this]() {
             if (auto* c = ctrl()) c->fillSelectionBytes(RcxController::ByteFill::Random);
         });
-        QAction* sw = add(QStringLiteral("sel.swap"), QStringLiteral("Swap"),
-                          QStringLiteral("Toggle big-endian display of the selected scalar(s)"));
+        // Big endian is a STATE, not a verb: checkable, so the button shows
+        // whether the selection is currently displayed byte-swapped.
+        QAction* sw = add(QStringLiteral("sel.swap"));
+        sw->setCheckable(true);
         wire(sw, [this]() {
             if (auto* c = ctrl()) c->toggleBigEndianSelection();
         });
+        // RTTI has no controller op of its own — MainWindow answers
+        // rttiRequested() with its Tools ▸ RTTI Browser action. It lives here
+        // so the id has one enabled predicate (it used to be permanently
+        // enabled on Home) AND goes through wire()'s inline-edit guard.
+        wire(add(QStringLiteral("sel.rtti")), [this]() { emit rttiRequested(); });
     }
 
-    // ── Edit ──
+    // ── Title-strip quick access (no ribbon button) ──
     {
         QAction* u = add(QStringLiteral("edit.undo"), QStringLiteral("Undo"),
                          QStringLiteral("Undo (Ctrl+Z)"));
@@ -436,15 +418,22 @@ RibbonActions::SelectionSummary RibbonActions::summarize() const {
     std::sort(plain.begin(), plain.end(), byOffset);
     std::sort(footers.begin(), footers.end(), byOffset);
     if (!footers.isEmpty()) s.footerTargetId = footers.first().id;
+    bool anyLittleEndian = false;
     for (const P& p : plain) {
         s.plainIds.append(p.id);
         const Node& n = tree.nodes[tree.indexOfId(p.id)];
         if (n.parentId != 0 && !s.insertAnchorId) s.insertAnchorId = p.id;
         if (isContainerKind(n.kind)) continue;
-        if (isEndianSwappable(n.kind)) s.anyScalar = true;
+        if (isEndianSwappable(n.kind)) {
+            s.anyScalar = true;
+            if (!n.bigEndian) anyLittleEndian = true;
+        }
         const int sz = n.byteSize();
         if ((sz == 4 || sz == 8) && n.refId == 0) s.anyPtrConvertible = true;
     }
+    // "Every swappable leaf is already swapped" — the checked state of the
+    // Big endian toggle, so one more click always un-swaps.
+    s.allBigEndian = s.anyScalar && !anyLittleEndian;
     s.plainCount = plain.size();
     s.deletableCount = deletable.size();
     s.allLeaf = s.plainCount > 0 && !s.anyFooter && !s.anyMember
@@ -477,10 +466,15 @@ void RibbonActions::refreshEnabled() {
               || id == QLatin1String("sel.ff")
               || id == QLatin1String("sel.random"))     en = fillOk;
         else if (id == QLatin1String("sel.swap"))      en = live && s.anyScalar;
+        // RTTI walks the vtable behind ONE selected pointer-sized field —
+        // it was permanently enabled while it lived on the Home tab.
+        else if (id == QLatin1String("sel.rtti"))      en = live && s.plainCount == 1 && s.anyPtrConvertible;
         else if (id == QLatin1String("edit.undo"))     en = live && s.canUndo;
         else if (id == QLatin1String("edit.redo"))     en = live && s.canRedo;
         a->setEnabled(en);
     }
+    if (QAction* sw = m_actions.value(QStringLiteral("sel.swap")))
+        sw->setChecked(s.anyScalar && s.allBigEndian);
 
     // Pointer-size relabel: the P key and these two buttons follow the
     // document's pointer width.

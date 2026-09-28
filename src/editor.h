@@ -299,8 +299,23 @@ private:
     // tooltip dismiss) on a steady refresh tick — the selection markers
     // themselves are always rebuilt.
     bool              m_lastApplyWasPatch = false;
+public:
+    // Which path the most recent applyDocument took. Exposed so a test can
+    // prove an invariant holds across a *patch* rather than accidentally
+    // asserting it on a full replace, where indicators behave differently.
+    bool lastApplyWasPatch() const { return m_lastApplyWasPatch; }
+private:
     // Skip-on-no-change caches for the refresh-tail path.
     QString           m_lastCommandRowText;
+    // Last string handed to documentApplied. Used ONLY to suppress the
+    // redundant re-emit at the end of setCommandRowText when applyDocument
+    // already emitted that exact text this frame; applyDocument itself always
+    // emits, so a mirror revealed mid-session still gets its content from the
+    // forced refresh.
+    QString           m_lastEmittedText;
+    // Line currently carrying the footer-pill hover fill (-1 = none), so the
+    // fill and its tooltip can be cleared without a doc-wide sweep.
+    int               m_pillHoverLine = -1;
 
     // ── Toggle: absolute vs relative offset margin
     bool m_relativeOffsets = true;
@@ -543,7 +558,13 @@ private:
     // of every selected id (delete-all + re-add; see the definition).
     void paintSelectionMarkers(const QSet<uint64_t>& selIds);
     void reformatMargins(int firstLine = -1, int lastLine = -1);
-    void applyHexDimming(const QVector<LineMeta>& meta, int firstLine = -1, int lastLine = -1);
+    // The document-tone pass: assigns IND_HEX_BYTE (the hex value span, the
+    // brightest ink), IND_HEX_DIM (furniture), IND_HEX_TYPE (hex type column
+    // + name slot) and IND_ZERO (ASCII column + 00 bytes).
+    // Needs the composed line text to find the zero tokens and the footer
+    // pill glyphs it must leave un-dimmed.
+    void applyHexDimming(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
+                         int firstLine = -1, int lastLine = -1);
     void applyHeatmapHighlight(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
                                 int firstLine = -1, int lastLine = -1);
     void applySymbolColoring(const QVector<LineMeta>& meta, const QVector<QString>& lineTexts,
@@ -552,7 +573,6 @@ private:
                                   const QVector<QString>& lineTexts);
     void applyOverlapHighlight(const QVector<LineMeta>& meta,
                                const QVector<QString>& lineTexts);
-    void applyBaseAddressColoring(const QVector<LineMeta>& meta);
     void applyCommandRowPills();
 
     void commitInlineEdit();
@@ -649,6 +669,12 @@ private:
         int      textLen   = 0;
         uint64_t bytes  = 0;    // AddBytes only: 0x10 / 0x100 / 0x1000
     };
+    // Every pill on a composed footer line, ascending by column. Single source
+    // of truth for the outline pass, the tone pass, hover and the click
+    // handler (see the definition).
+    static QVector<FooterPill> footerPillsIn(const QString& lineText);
+    // The one label for a pill — tooltip text, same words as the command.
+    static QString footerPillTooltip(const FooterPill& pill);
     FooterPill footerPillAt(int line, int col) const;
 
     // Single writer for the viewport cursor — skips the call when the shape is

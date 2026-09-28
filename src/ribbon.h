@@ -14,17 +14,25 @@
 // (padTop 2 + 3 rows × 18 + caption 12 + hairline 1) → 89 total.
 //   Flat: no panel boxes, no caption bands — one 1-device-px `border`
 //   divider column per panel gap (kPanelGap 13, divider at A.right()+7),
-//   a 9 pt textMuted caption under each panel, hairlines above and below the
-//   body. Panel = columns of Small items (3 per column, new column on
-//   columnBreakBefore / separatorBefore / when full) or full-height Large
-//   items. Nothing is filled or outlined at rest: hover = `hover` fill,
-//   pressed = `button`, checked = indHoverSpan tint + a 2-device-row
-//   underline (same as the active tab), disabled = 40 % opacity.
-// Narrow widths: stage 1 drops labels (glyphLabels panels first, then — in
-// LabelMode::Auto — the rest by labelDrop, higher first, equal values
-// together), stage 2 hides whole panels (lower hideOrder first, never
-// `neverHide`) behind a middle-row … button whose QMenu carries one submenu
-// per hidden panel.
+//   a 9 pt caption (textDim through the tone LADDER) under each panel, and
+//   hairlines above and below the body. The tab row is `background` too: it
+//   is the ribbon's own header, not a second menu strip. Panel = columns of
+//   Small items (3 per column, new column on columnBreakBefore /
+//   separatorBefore / when full) or full-height Large items; a panel whose
+//   items carry `groupCaption`s draws those under their column spans instead
+//   of one panel caption.
+//   Item tones: rest = `text` (icons and labels — the ribbon is the actionable
+//   surface), hover = `hover` fill, pressed = `button`, checked =
+//   indHoverSpan + a 2-device-row underline (same as the active tab), disabled
+//   = 40 % opacity of the same ink (never textDim × 0.4), destructive = the
+//   icon in markerPtr always and the label red only under the pointer.
+// Narrow widths: stage 1 drops labels (LabelMode::Auto only) by labelDrop,
+// higher first, equal values together; stage 2 hides whole panels (lower
+// hideOrder first, never `neverHide`) behind a middle-row … button whose QMenu
+// carries one submenu per hidden panel.
+// A 22-px chevron at the right end of the tab row collapses / expands the body
+// (Ctrl+F1, or double-click a tab); the state is persisted by the host through
+// the single `ribbonState` key (see ribbonStateFromSettings).
 
 #include "ribbon_spec.h"
 #include "themes/theme.h"
@@ -32,9 +40,11 @@
 #include <QAction>
 #include <QElapsedTimer>
 #include <QHash>
+#include <QPair>
 #include <QPointer>
 #include <QRect>
 #include <QSet>
+#include <QSettings>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -43,6 +53,31 @@
 class QMenu;
 
 namespace rcx {
+
+// ── Persisted ribbon state ──
+// ONE key, three values: the chevron, the double-click and View ▸ Ribbon all
+// write it, so the strip can never disagree with the menu (it used to keep
+// `showRibbon` and `ribbonMinimized` separately and the double-click only
+// touched the second).
+enum RibbonState { RibbonFull = 0, RibbonCollapsed = 1, RibbonHidden = 2 };
+
+// Reads `ribbonState`, migrating the two legacy keys once on first read (and
+// removing them, so no second persisted state survives).
+inline int ribbonStateFromSettings(QSettings& s) {
+    if (!s.contains(QStringLiteral("ribbonState"))) {
+        const bool shown = s.value(QStringLiteral("showRibbon"), true).toBool();
+        const bool mini  = s.value(QStringLiteral("ribbonMinimized"), false).toBool();
+        s.setValue(QStringLiteral("ribbonState"),
+                   !shown ? int(RibbonHidden) : mini ? int(RibbonCollapsed) : int(RibbonFull));
+        // Only the migrating read writes: this is called on every launch (and
+        // from tests), and a "read" that dirties the store on every call is a
+        // trap for the next caller.
+        s.remove(QStringLiteral("showRibbon"));
+        s.remove(QStringLiteral("ribbonMinimized"));
+    }
+    const int v = s.value(QStringLiteral("ribbonState"), int(RibbonFull)).toInt();
+    return (v < RibbonFull || v > RibbonHidden) ? int(RibbonFull) : v;
+}
 
 class RibbonBar : public QWidget {
     Q_OBJECT
@@ -83,8 +118,13 @@ public:
     bool    itemLabelShown(const QString& id) const;
     QRect   tabRect(const QString& tabId) const;
     QRect   panelRect(const QString& panelId) const;
+    // The rect a per-column group caption ("Hex:", "Str:") is drawn in, on the
+    // current tab. Null when no laid-out panel carries that caption.
+    QRect   groupCaptionRect(const QString& caption) const;
     QStringList overflowedPanelIds() const;
     QRect   overflowButtonRect() const;
+    // The collapse chevron at the right end of the tab row (always present).
+    QRect   collapseButtonRect() const;
     // The » menu (rebuilt on every call; owned by the ribbon).
     QMenu*  overflowMenu();
 
@@ -129,6 +169,9 @@ private:
         QRect   rect;            // items + caption (no box is painted)
         QRect   captionRect;
         QVector<int> separatorXs;   // `||` hairlines inside the panel
+        // Per-column-group captions (Type: "Hex:" "Int:" …). Non-empty means
+        // the panel's own caption is NOT drawn.
+        QVector<QPair<QRect, QString>> groupCaptions;
         bool    labelsDropped = false;
     };
     struct Layout {
@@ -192,7 +235,7 @@ private:
     mutable Layout m_layout;
     mutable bool   m_layoutDirty = true;
 
-    QString m_hoverId;       // item id, "tab:<id>" or "overflow"
+    QString m_hoverId;       // item id, "tab:<id>", "overflow" or "collapse"
     QString m_pressedId;
     bool    m_overflowOpen = false;   // … stays pressed while its menu is up
     // Started when a tab press restores the minimized body: the DblClick that

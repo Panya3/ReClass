@@ -199,10 +199,10 @@ private slots:
     // ── Every id exists, carries data where promised ──
     void testIdsAndData() {
         const QStringList ids = m_ra->ids();
-        QCOMPARE(ids.size(), 46);
+        QCOMPARE(ids.size(), 47);   // + sel.rtti (moved off the Home tab)
         for (const char* id : {"type.hex64", "type.int32", "type.pointer", "type.custom",
                                "add.4", "add.2048", "insert.64", "sel.delete", "sel.swap",
-                               "edit.undo", "edit.redo"})
+                               "sel.rtti", "edit.undo", "edit.redo"})
             QVERIFY2(m_ra->action(QString::fromLatin1(id)), id);
         QCOMPARE(act("type.int32")->data().toInt(), int(NodeKind::Int32));
         QCOMPARE(act("type.utf16")->data().toInt(), int(NodeKind::UTF16));
@@ -637,6 +637,45 @@ private slots:
         trig("sel.swap");
         QVERIFY(!m_a.node(m_a.h[0]).bigEndian);
         QVERIFY(!m_a.node(m_a.h[3]).bigEndian);
+    }
+
+    // Big endian is a STATE: the button is checkable and shows whether the
+    // selection is currently displayed byte-swapped (it used to be a verb with
+    // no feedback at all, so you could not tell which way the next click went).
+    void testBigEndianIsCheckable() {
+        QVERIFY(act("sel.swap")->isCheckable());
+        m_a.click(m_a.h[0]);
+        m_a.click(m_a.h[3], Qt::ControlModifier);
+        m_ra->refreshEnabled();
+        QVERIFY(act("sel.swap")->isEnabled());
+        QVERIFY(!act("sel.swap")->isChecked());
+        QVERIFY(!m_ra->lastSummary().allBigEndian);
+        trig("sel.swap");
+        m_ra->refreshEnabled();
+        QVERIFY2(act("sel.swap")->isChecked(), "both scalars swapped -> checked");
+        QVERIFY(m_ra->lastSummary().allBigEndian);
+        // One of the two back to little-endian -> no longer checked.
+        m_a.click(m_a.h[0]);
+        m_ra->refreshEnabled();
+        trig("sel.swap");
+        m_a.click(m_a.h[0]);
+        m_a.click(m_a.h[3], Qt::ControlModifier);
+        m_ra->refreshEnabled();
+        QVERIFY(!act("sel.swap")->isChecked());
+        QVERIFY(!m_ra->lastSummary().allBigEndian);
+    }
+
+    // RTTI used to sit on the Home tab, permanently enabled — it only means
+    // anything for exactly one selected pointer-sized field.
+    void testRttiEnabledOnlyForOnePointerField() {
+        m_ra->refreshEnabled();
+        QVERIFY(!act("sel.rtti")->isEnabled());        // nothing selected
+        m_a.click(m_a.h[0]);
+        m_ra->refreshEnabled();
+        QVERIFY(act("sel.rtti")->isEnabled());         // one 8-byte leaf
+        m_a.click(m_a.h[1], Qt::ControlModifier);
+        m_ra->refreshEnabled();
+        QVERIFY2(!act("sel.rtti")->isEnabled(), "two fields have no single vtable");
     }
 
     // Ptr→Class: two 8-byte leaves become typed pointers to two NEW classes, one step.

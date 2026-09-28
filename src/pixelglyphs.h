@@ -138,6 +138,15 @@ inline constexpr PixelBitmap kSquaresRow11x2{11, 2, {
     "###.###.###"}};
 inline constexpr int kSquaresGap = 1;   // rows between the squares and the label
 
+// The ▾ that marks a ribbon button which opens a menu instead of acting.
+// Solid, not an outline: at k = 1 (100 / 125 %) an outlined triangle is three
+// disconnected pixels.
+inline constexpr PixelBitmap kChevronDown7x4{7, 4, {
+    "#######",
+    ".#####.",
+    "..###..",
+    "...#..."}};
+
 // The red "*" that turns the class glyph into "pointer to class" (ReClassEx C*).
 inline constexpr PixelBitmap kStar5x5{5, 5, {
     "#.#.#",

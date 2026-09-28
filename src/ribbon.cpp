@@ -21,288 +21,10 @@
 
 namespace rcx {
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Spec tables
-// ═══════════════════════════════════════════════════════════════════════════
+// The tab / panel / item tables live in ribbon_spec.h — the wiring half reads
+// the same labels and tooltips from them, so a command has ONE name.
 
 namespace {
-
-using IK = RibbonIconSpec::Kind;
-using GF = GlyphFamily;
-
-RibbonItemSpec glyphItem(const char* id, const char* label, const char* tip,
-                         const char* glyph, GF family, NodeKind kind,
-                         bool brk = false, bool sep = false) {
-    RibbonItemSpec it;
-    it.id = QString::fromLatin1(id);
-    it.label = QString::fromUtf8(label);
-    it.tooltip = QString::fromUtf8(tip);
-    it.size = RibbonItemSize::Small;
-    it.icon = {IK::TypeGlyph, QString::fromLatin1(glyph), family};
-    it.columnBreakBefore = brk || sep;
-    it.separatorBefore = sep;
-    it.data = int(kind);
-    return it;
-}
-
-RibbonItemSpec codiconItem(const char* id, const char* label, const char* tip,
-                           const char* icon, GF family = GF::Plain,
-                           RibbonItemSize size = RibbonItemSize::Small,
-                           bool brk = false, bool sep = false,
-                           QVariant data = QVariant()) {
-    RibbonItemSpec it;
-    it.id = QString::fromLatin1(id);
-    it.label = QString::fromUtf8(label);
-    it.tooltip = QString::fromUtf8(tip);
-    it.size = size;
-    it.icon = {IK::Codicon, QString::fromLatin1(icon), family};
-    it.columnBreakBefore = brk || sep;
-    it.separatorBefore = sep;
-    it.data = data;
-    return it;
-}
-
-RibbonItemSpec bytesItem(const char* prefix, IK kind, int n, bool brk) {
-    RibbonItemSpec it;
-    const bool add = (kind == IK::AddBytes);
-    it.id = QStringLiteral("%1.%2").arg(QLatin1String(prefix)).arg(n);
-    it.label = QStringLiteral("%1 %2").arg(add ? QStringLiteral("Add") : QStringLiteral("Insert")).arg(n);
-    it.tooltip = add
-        ? QStringLiteral("Append %1 bytes to the end of the class").arg(n)
-        : QStringLiteral("Insert %1 bytes above the selection").arg(n);
-    it.size = RibbonItemSize::Small;
-    it.icon = {kind, QString::number(n), add ? GF::Unsigned : GF::Float};
-    it.columnBreakBefore = brk;
-    it.data = n;
-    return it;
-}
-
-RibbonPanelSpec editPanel() {
-    RibbonPanelSpec p;
-    p.id = QStringLiteral("edit");
-    p.caption = QStringLiteral("Edit");
-    p.neverHide = true;
-    // Icon-only for good: the two arrows never needed a label, and a labelled
-    // 2-item column with an empty third row read as a boxed card. Redo is the
-    // discard arrow mirrored (no 16-unit redo Codicon ships).
-    RibbonItemSpec undo = codiconItem("edit.undo", "Undo", "Undo the last change", "discard");
-    undo.iconOnly = true;
-    RibbonItemSpec redo = codiconItem("edit.redo", "Redo", "Redo the last undone change", "discard");
-    redo.iconOnly = true;
-    redo.icon.mirrorH = true;
-    p.items = {undo, redo};
-    return p;
-}
-
-QVector<RibbonTabSpec> buildDefaultSpec() {
-    QVector<RibbonTabSpec> tabs;
-
-    // ── Modify ──
-    {
-        RibbonTabSpec tab;
-        tab.id = QStringLiteral("modify");
-        tab.title = QStringLiteral("Modify");
-        tab.panels.append(editPanel());
-
-        RibbonPanelSpec add;
-        add.id = QStringLiteral("add");
-        add.caption = QStringLiteral("Add");
-        add.labelDrop = 20;   // Add + Insert lose their labels together
-        add.hideOrder = 20;
-        add.items = {
-            bytesItem("add", IK::AddBytes, 4, false),
-            bytesItem("add", IK::AddBytes, 8, false),
-            bytesItem("add", IK::AddBytes, 64, false),
-            bytesItem("add", IK::AddBytes, 1024, true),
-            bytesItem("add", IK::AddBytes, 2048, false),
-        };
-        tab.panels.append(add);
-
-        RibbonPanelSpec ins;
-        ins.id = QStringLiteral("insert");
-        ins.caption = QStringLiteral("Insert");
-        ins.labelDrop = 20;
-        ins.hideOrder = 10;
-        ins.items = {
-            bytesItem("insert", IK::InsertBytes, 4, false),
-            bytesItem("insert", IK::InsertBytes, 8, false),
-            bytesItem("insert", IK::InsertBytes, 64, false),
-            bytesItem("insert", IK::InsertBytes, 1024, true),
-            bytesItem("insert", IK::InsertBytes, 2048, false),
-        };
-        tab.panels.append(ins);
-
-        RibbonPanelSpec sel;
-        sel.id = QStringLiteral("selected");
-        sel.caption = QStringLiteral("Selected");
-        sel.labelDrop = 0;
-        sel.hideOrder = 0;    // first panel to hide
-        {
-            RibbonItemSpec del;
-            del.id = QStringLiteral("sel.delete");
-            del.label = QStringLiteral("Delete");
-            del.tooltip = QStringLiteral("Delete the selected fields");
-            del.icon = {IK::DeleteCross, QString(), GF::Signed};
-            del.destructive = true;
-            sel.items.append(del);
-            sel.items.append(codiconItem("sel.duplicate", "Duplicate",
-                                         "Duplicate the selected fields", "clippy"));
-            sel.items.append(codiconItem("sel.comment", "Comment",
-                                         "Edit the comment of the selected field", "note"));
-
-            auto fill = [](const char* id, const char* label, const char* tip,
-                           const char* text, GF fam, bool brk) {
-                RibbonItemSpec it;
-                it.id = QString::fromLatin1(id);
-                it.label = QString::fromUtf8(label);
-                it.tooltip = QString::fromUtf8(tip);
-                it.icon = {IK::FillSquares, QString::fromLatin1(text), fam};
-                it.iconOnly = true;
-                it.columnBreakBefore = brk;
-                return it;
-            };
-            sel.items.append(fill("sel.zero", "Zero", "Fill the selected bytes with 00", "000", GF::Hex, true));
-            sel.items.append(fill("sel.ff", "FF", "Fill the selected bytes with FF", "FFF", GF::Hex, false));
-            sel.items.append(fill("sel.random", "Random", "Fill the selected bytes with random data", "???", GF::Bits, true));
-            RibbonItemSpec swap = codiconItem("sel.swap", "Swap", "Toggle big-endian display of the selected scalars", "sync");
-            swap.iconOnly = true;
-            sel.items.append(swap);
-        }
-        tab.panels.append(sel);
-
-        RibbonPanelSpec type;
-        type.id = QStringLiteral("type");
-        type.caption = QStringLiteral("Type");
-        type.labelDrop = 30;  // its glyphs ARE the labels: first to go, even in All
-        type.neverHide = true;
-        type.glyphLabels = true;
-        type.items = {
-            glyphItem("type.hex64", "Hex 64", "Change the selected fields to Hex 64", "H64", GF::Hex, NodeKind::Hex64),
-            glyphItem("type.hex32", "Hex 32", "Change the selected fields to Hex 32", "H32", GF::Hex, NodeKind::Hex32),
-            glyphItem("type.hex16", "Hex 16", "Change the selected fields to Hex 16", "H16", GF::Hex, NodeKind::Hex16),
-            glyphItem("type.hex8",  "Hex 8",  "Change the selected fields to Hex 8",  "H8",  GF::Hex, NodeKind::Hex8, true),
-
-            glyphItem("type.int64", "Int 64", "Change the selected fields to int64_t", "I64", GF::Signed, NodeKind::Int64, true, true),
-            glyphItem("type.int32", "Int 32", "Change the selected fields to int32_t", "I32", GF::Signed, NodeKind::Int32),
-            glyphItem("type.int16", "Int 16", "Change the selected fields to int16_t", "I16", GF::Signed, NodeKind::Int16),
-            glyphItem("type.int8",  "Int 8",  "Change the selected fields to int8_t",  "I8",  GF::Signed, NodeKind::Int8, true),
-
-            glyphItem("type.uint64", "UInt 64", "Change the selected fields to uint64_t", "U64", GF::Unsigned, NodeKind::UInt64, true, true),
-            glyphItem("type.uint32", "UInt 32", "Change the selected fields to uint32_t", "U32", GF::Unsigned, NodeKind::UInt32),
-            glyphItem("type.uint16", "UInt 16", "Change the selected fields to uint16_t", "U16", GF::Unsigned, NodeKind::UInt16),
-            glyphItem("type.uint8",  "UInt 8",  "Change the selected fields to uint8_t",  "U8",  GF::Unsigned, NodeKind::UInt8, true),
-
-            glyphItem("type.double", "Double", "Change the selected fields to double", "D", GF::Float, NodeKind::Double, true, true),
-            glyphItem("type.float",  "Float",  "Change the selected fields to float",  "F", GF::Float, NodeKind::Float),
-            glyphItem("type.bool",   "Bool",   "Change the selected fields to bool",   "B", GF::Bits,  NodeKind::Bool),
-
-            glyphItem("type.vec2",   "Vec 2",   "Change the selected fields to a 2-float vector", "V2", GF::Float, NodeKind::Vec2, true, true),
-            glyphItem("type.vec3",   "Vec 3",   "Change the selected fields to a 3-float vector", "V3", GF::Float, NodeKind::Vec3),
-            glyphItem("type.vec4",   "Vec 4",   "Change the selected fields to a 4-float vector", "V4", GF::Float, NodeKind::Vec4),
-            glyphItem("type.mat4x4", "Mat 4x4", "Change the selected fields to a 4×4 float matrix", "M4", GF::Float, NodeKind::Mat4x4, true),
-
-            glyphItem("type.pointer", "Pointer",  "Change the selected fields to a pointer", "PTR", GF::Pointer, NodeKind::Pointer64, true, true),
-            glyphItem("type.funcptr", "Func Ptr", "Change the selected fields to a function pointer", "FN*", GF::Pointer, NodeKind::FuncPtr64),
-        };
-        {
-            RibbonItemSpec pc;
-            pc.id = QStringLiteral("type.ptrclass");
-            pc.label = QStringLiteral("Ptr → Class");
-            pc.tooltip = QStringLiteral("Turn the selected pointer into a pointer to a new class");
-            pc.icon = {IK::ClassPtr, QString(), GF::Pointer};
-            pc.data = int(NodeKind::Pointer64);
-            type.items.append(pc);
-
-            RibbonItemSpec cls = codiconItem("type.class", "Class", "Break the selection into a new class",
-                                             "symbol-class", GF::Pointer, RibbonItemSize::Small, true);
-            cls.data = int(NodeKind::Struct);
-            type.items.append(cls);
-            RibbonItemSpec arr = codiconItem("type.array", "Array", "Turn the selection into an array",
-                                             "symbol-array");
-            arr.data = int(NodeKind::Array);
-            type.items.append(arr);
-            type.items.append(codiconItem("type.custom", "Custom…", "Pick any type from the type chooser",
-                                          "symbol-misc"));
-        }
-        type.items.append(glyphItem("type.utf8",  "ASCII",  "Change the selected fields to an ASCII string", "STR",  GF::Text, NodeKind::UTF8, true, true));
-        type.items.append(glyphItem("type.utf16", "UTF-16", "Change the selected fields to a UTF-16 string", "WSTR", GF::Text, NodeKind::UTF16));
-        tab.panels.append(type);
-
-        tabs.append(tab);
-    }
-
-    // ── Home ──
-    {
-        RibbonTabSpec tab;
-        tab.id = QStringLiteral("home");
-        tab.title = QStringLiteral("Home");
-        tab.panels.append(editPanel());
-
-        RibbonPanelSpec project;
-        project.id = QStringLiteral("project");
-        project.caption = QStringLiteral("Project");
-        project.labelDrop = 0;    // last labels to go
-        project.neverHide = true;
-        // Size is the hierarchy, brightness the second tier (Plain = textDim
-        // at rest, text on hover); the ONE hue is the editor's class colour
-        // (GF::Pointer -> syntaxType) on the three "new type" buttons.
-        project.items = {
-            codiconItem("home.project.newclass", "New Class", "Create a new class", "symbol-class", GF::Pointer, RibbonItemSize::Large),
-            codiconItem("home.project.open", "Open", "Open a project", "folder-opened", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.project.save", "Save", "Save the project", "save", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.project.newstruct", "New Struct", "Create a new struct", "symbol-structure", GF::Pointer, RibbonItemSize::Small, true),
-            codiconItem("home.project.newenum", "New Enum", "Create a new enum", "symbol-enum", GF::Pointer),
-            codiconItem("home.project.close", "Close", "Close the project", "close"),
-        };
-        tab.panels.append(project);
-
-        RibbonPanelSpec process;
-        process.id = QStringLiteral("process");
-        process.caption = QStringLiteral("Process");
-        process.labelDrop = 10;
-        process.hideOrder = 20;
-        process.items = {
-            codiconItem("home.process.attach", "Attach", "Attach to a process or open a data source", "plug", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.process.refresh", "Refresh", "Refresh the memory view", "refresh", GF::Plain, RibbonItemSize::Small, true),
-            codiconItem("home.process.goto", "Go to Address", "Go to an address", "symbol-numeric"),
-        };
-        tab.panels.append(process);
-
-        RibbonPanelSpec code;
-        code.id = QStringLiteral("code");
-        code.caption = QStringLiteral("Code");
-        code.labelDrop = 20;
-        code.hideOrder = 10;
-        code.items = {
-            codiconItem("home.code.codeview", "Code", "Show the generated code", "code", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.code.bothview", "Both", "Show the structure and the generated code side by side", "split-horizontal", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.code.generate", "Generate", "Export the generated code", "file-code", GF::Plain, RibbonItemSize::Small, true),
-            codiconItem("home.code.split", "Split View", "Split the editor", "split-vertical"),
-        };
-        tab.panels.append(code);
-
-        RibbonPanelSpec tools;
-        tools.id = QStringLiteral("tools");
-        tools.caption = QStringLiteral("Tools");
-        tools.labelDrop = 30;   // first labels to go ...
-        tools.hideOrder = 0;    // ... and the first panel to hide
-        // Two Large + a small column (like every other Home panel) instead of
-        // five consecutive towers. console.svg / clippy.svg replace the
-        // 24-unit terminal / files (stroke weight mismatch on the 16 grid).
-        tools.items = {
-            codiconItem("home.tools.scanner", "Scanner", "Open the memory scanner", "search", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.tools.symbols", "Symbols", "Open the symbol browser", "symbol-key", GF::Plain, RibbonItemSize::Large),
-            codiconItem("home.tools.bookmarks", "Bookmarks", "Open the bookmarks", "bookmark", GF::Plain, RibbonItemSize::Small, true),
-            codiconItem("home.tools.console", "Console", "Show the console", "console"),
-            codiconItem("home.tools.rtti", "RTTI", "Open the RTTI browser", "symbol-interface"),
-        };
-        tab.panels.append(tools);
-
-        tabs.append(tab);
-    }
-
-    return tabs;
-}
 
 // Sensible colours when ThemeManager has nothing loaded (tests, harnesses run
 // from a directory without themes/). Mirrors src/themes/defaults/vs.json.
@@ -311,8 +33,8 @@ Theme fallbackTheme() {
         "name": "VS2022 Dark", "background": "#181818", "backgroundAlt": "#2d2d30",
         "surface": "#333337", "border": "#3f3f46", "borderFocused": "#b180d7",
         "button": "#3f3f46", "text": "#dcdcdc", "textDim": "#858585",
-        "textMuted": "#636369", "textFaint": "#4d4d55", "hover": "#242427",
-        "selected": "#1e1e21", "selection": "#264f78", "syntaxKeyword": "#569cd6",
+        "textMuted": "#636369", "textFaint": "#585862", "hover": "#242427",
+        "selected": "#2c2c31", "selection": "#264f78", "syntaxKeyword": "#569cd6",
         "syntaxNumber": "#b5cea8", "syntaxString": "#d69d85", "syntaxComment": "#57a64a",
         "syntaxPreproc": "#9b9b9b", "syntaxType": "#4ec9b0", "indHoverSpan": "#b180d7",
         "indCmdPill": "#2d2d30", "indDataChanged": "#8fbc7a", "indHintGreen": "#5a8248",
@@ -321,21 +43,25 @@ Theme fallbackTheme() {
     return Theme::fromJson(QJsonDocument::fromJson(kJson).object());
 }
 
-constexpr int kLeftMargin   = 6;   // frameless resize strips cover the outer 5 px
+// The strip's first ink lines up with every other strip in the window
+// (title label, breadcrumb, status) — one left edge down the whole app.
+constexpr int kLeftMargin   = kGutter;
 constexpr int kRightMargin  = 6;
 constexpr int kPanelGap     = 13;  // between panels ...
 constexpr int kDividerInset = 7;   // ... with the 1-device-px divider at A.right() + 7
 constexpr int kColGap       = 3;   // `|`
 constexpr int kSepGap       = 7;   // `||` (hairline in the middle)
-constexpr int kTabPad       = 10;
+constexpr int kTabPad       = kGutter;
 constexpr int kTabGap       = 4;
 constexpr int kOverflowW    = 22;  // the ... item: middle row, right of a divider
 constexpr int kOverflowH    = 18;
 constexpr int kOverflowInset = 5;  // overflow x = dividerX + 5
+constexpr int kCollapseW    = 22;  // the collapse chevron, right end of the tab row
+constexpr int kMenuChevronW = 10;  // width a `menu` item adds for its ▾
+constexpr int kMenuChevron  = 8;   // ... the glyph cell inside it
 constexpr int kLargeMinW    = 48;
 constexpr int kLargeMaxW    = 80;
 constexpr int kLargeIconOnlyW = 40;
-constexpr int kUnderlineRows = 2;  // DEVICE rows: active tab / checked item accent
 constexpr double kDisabledOpacity = 0.40;
 
 // Draws a dpr-stamped pixmap so its top-left lands on a whole device pixel
@@ -355,11 +81,6 @@ QColor pressedFill(const Theme& t) {
 }
 
 }  // namespace
-
-const QVector<RibbonTabSpec>& defaultRibbonSpec() {
-    static const QVector<RibbonTabSpec> spec = buildDefaultSpec();
-    return spec;
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RibbonBar
@@ -535,6 +256,7 @@ void RibbonBar::setMinimized(bool minimized) {
     m_minimized = minimized;
     m_hoverId.clear();
     m_pressedId.clear();
+    refreshToolTip();   // the hovered item is gone — so is its text
     updateGeometry();
     update();
     emit minimizedChanged(minimized);
@@ -575,18 +297,24 @@ int RibbonBar::preferredHeight() const {
 QSize RibbonBar::sizeHint() const { return QSize(naturalWidth() + kRightMargin, preferredHeight()); }
 QSize RibbonBar::minimumSizeHint() const { return QSize(80, preferredHeight()); }
 
-// 3 + icon cell + 4 + label + 6; icon-only = cell + 6. The cell is per icon
-// kind (ribbonIconCellWidth: 16 / 24 / 32) so the pixel labels share one scale.
+// 3 + icon cell + 4 + label + 6; icon-only = cell + 6; +10 for a `menu` ▾.
+// The cell is per icon kind (ribbonIconCellWidth: 16 / 24 / 32) so the pixel
+// labels share one scale — and an unlabelled Add / Insert cell is the wide one
+// (it carries the byte count itself).
 int RibbonBar::smallItemWidth(const RibbonItemSpec& it, bool label, const QFontMetrics& fm) const {
-    const int cellW = ribbonIconCellWidth(it.icon);
-    if (!label || it.iconOnly) return cellW + 6;
-    return 3 + cellW + 4 + fm.horizontalAdvance(it.label) + 6;
+    const bool labelled = label && !it.iconOnly;
+    const int cellW = ribbonIconCellWidth(it.icon, labelled);
+    const int chev = it.menu ? kMenuChevronW : 0;
+    if (!labelled) return cellW + 6 + chev;
+    return 3 + cellW + 4 + fm.horizontalAdvance(ribbonStripLabel(it)) + 6 + chev;
 }
 
-// clamp(label + 8, 48, 80); the label is elided (never for shipped labels).
+// clamp(label + 8, 48, 80) (+10 for a `menu` ▾); the label is elided (never
+// for shipped labels).
 int RibbonBar::largeItemWidth(const RibbonItemSpec& it, bool label, const QFontMetrics& fm) const {
-    if (!label) return kLargeIconOnlyW;
-    return qBound(kLargeMinW, fm.horizontalAdvance(it.label) + 8, kLargeMaxW);
+    const int chev = it.menu ? kMenuChevronW : 0;
+    if (!label) return kLargeIconOnlyW + chev;
+    return qBound(kLargeMinW, fm.horizontalAdvance(ribbonStripLabel(it)) + 8, kLargeMaxW) + chev;
 }
 
 // ── Layout engine ──
@@ -612,7 +340,11 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
     for (int pi = 0; pi < tab.panels.size(); ++pi) {
         const RibbonPanelSpec& panel = tab.panels[pi];
         if (hidePanels.contains(panel.id)) continue;
-        const bool labels = (m_labelMode != LabelMode::IconsOnly) && !dropLabels.contains(panel.id);
+        // A glyphLabels panel (Type) is glyph-only in EVERY mode — its icons
+        // ARE its labels, so "All labels" no longer promises words it can't
+        // deliver. `keepLabel` items (Custom…) opt back in per item.
+        const bool labels = (m_labelMode != LabelMode::IconsOnly)
+                         && !panel.glyphLabels && !dropLabels.contains(panel.id);
 
         struct Col {
             QVector<int> items;   // indexes into panel.items
@@ -620,6 +352,8 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
             bool sep = false;
             bool brk = false;
             int  w = 0;
+            QString groupCaption;   // set on the column that starts a caption group
+            bool endsGroup = false; // closes the open group WITHOUT opening one
         };
         QVector<Col> cols;
         for (int ii = 0; ii < panel.items.size(); ++ii) {
@@ -637,20 +371,52 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
                 cols.append(c);
             }
             Col& c = cols.last();
+            if (!it.groupCaption.isEmpty() && c.groupCaption.isEmpty())
+                c.groupCaption = it.groupCaption;
+            if (it.endsCaptionGroup) c.endsGroup = true;
             c.items.append(ii);
-            const int w = large ? largeItemWidth(it, labels, fm) : smallItemWidth(it, labels, fm);
+            const bool itemLabel = (labels || it.keepLabel) && !it.iconOnly;
+            const int w = large ? largeItemWidth(it, itemLabel, fm)
+                                : smallItemWidth(it, itemLabel, fm);
             c.w = qMax(c.w, w);
         }
         if (cols.isEmpty()) continue;
 
+        // Size = frequency, and equal widths inside a panel: every Large column
+        // takes the widest Large width, so Open/Save and Scanner/Symbols are
+        // one block instead of two ragged towers.
+        {
+            int maxLargeW = 0;
+            for (const Col& c : cols) if (c.large) maxLargeW = qMax(maxLargeW, c.w);
+            if (maxLargeW > 0)
+                for (Col& c : cols) if (c.large) c.w = maxLargeW;
+        }
+
+        // A group caption must fit over the columns it spans; widen the last
+        // column of the group when it doesn't ("Byte:" over one 22-px column).
+        for (int ci = 0; ci < cols.size(); ++ci) {
+            if (cols[ci].groupCaption.isEmpty()) continue;
+            int end = ci + 1;
+            while (end < cols.size() && cols[end].groupCaption.isEmpty() && !cols[end].endsGroup) ++end;
+            int span = 0;
+            for (int k = ci; k < end; ++k) {
+                if (k > ci) span += cols[k].sep ? kSepGap : kColGap;
+                span += cols[k].w;
+            }
+            const int need = cfm.horizontalAdvance(cols[ci].groupCaption) + 2;
+            if (need > span) cols[end - 1].w += need - span;
+        }
+
         // Panel width is the wider of its columns and its caption (+2); the
-        // columns are centred when the caption wins (Edit).
+        // columns are centred when the caption wins.
         int itemsW = 0;
         for (int ci = 0; ci < cols.size(); ++ci) {
             if (ci > 0) itemsW += cols[ci].sep ? kSepGap : kColGap;
             itemsW += cols[ci].w;
         }
-        const int captionW = cfm.horizontalAdvance(panel.caption) + 2;
+        const bool grouped = std::any_of(cols.cbegin(), cols.cend(),
+                                         [](const Col& c) { return !c.groupCaption.isEmpty(); });
+        const int captionW = grouped ? 0 : cfm.horizontalAdvance(panel.caption) + 2;
         const int panelW = qMax(itemsW, captionW);
 
         LaidPanel lp;
@@ -658,11 +424,29 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
         lp.labelsDropped = !labels;
         const int panelX = x;
         int cx = panelX + (panelW - itemsW) / 2;
+        int groupStartX = cx;
+        // Right edge of the last column placed, so a group's caption spans the
+        // COLUMNS it names and not the gap that follows them.
+        int groupEndX = cx;
+        QString groupText;
+        auto closeGroup = [&] {
+            if (!groupText.isEmpty())
+                lp.groupCaptions.append({QRect(groupStartX, captionTop,
+                                               groupEndX - groupStartX, m.captionH), groupText});
+            groupText.clear();
+        };
         for (int ci = 0; ci < cols.size(); ++ci) {
             const Col& c = cols[ci];
             if (ci > 0) {
                 if (c.sep) { lp.separatorXs << cx + kSepGap / 2; cx += kSepGap; }
                 else cx += kColGap;
+            }
+            // A column either opens a new group or closes the open one; either
+            // way the previous group ends at the previous column's right edge.
+            if (!c.groupCaption.isEmpty() || c.endsGroup) {
+                closeGroup();
+                groupStartX = cx;
+                groupText = c.groupCaption;   // empty for a pure terminator
             }
             for (int r = 0; r < c.items.size(); ++r) {
                 const RibbonItemSpec& it = panel.items[c.items[r]];
@@ -670,15 +454,17 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
                 li.id = it.id;
                 li.ref = ItemRef{tabIdx, pi, c.items[r]};
                 li.large = c.large;
-                li.label = labels && !it.iconOnly;
+                li.label = (labels || it.keepLabel) && !it.iconOnly;
                 li.column = column;
                 li.rect = c.large ? QRect(cx, itemsTop, c.w, itemsH)
                                   : QRect(cx, itemsTop + r * m.rowH, c.w, m.rowH);
                 L.items.append(li);
             }
             cx += c.w;
+            groupEndX = cx;
             ++column;
         }
+        closeGroup();
         lp.rect = QRect(panelX, itemsTop, panelW, itemsH + m.captionH);
         lp.captionRect = QRect(panelX, captionTop, panelW, m.captionH);
         // One divider per gap (none before the first panel).
@@ -722,24 +508,21 @@ void RibbonBar::relayout() const {
     if (L.width <= availW || tabIdx < 0) { m_layout = L; return; }
 
     const auto& panels = m_spec[tabIdx].panels;
-    // Stage 1: drop labels -- panels whose icons already read as labels
-    // (glyphLabels: Type) first, then by labelDrop, highest first; panels
-    // with the same labelDrop go together (Add + Insert). In All mode only
-    // the glyphLabels panels are candidates; in Auto every panel is.
-    if (m_labelMode != LabelMode::IconsOnly) {
+    // Stage 1: drop labels by labelDrop, highest first; panels with the same
+    // labelDrop go together (Add + Insert). Auto only — All means "show every
+    // label the panel has", and glyphLabels panels never had any to drop.
+    if (m_labelMode == LabelMode::Auto) {
         QVector<const RibbonPanelSpec*> cands;
         for (const auto& p : panels)
-            if (m_labelMode == LabelMode::Auto || p.glyphLabels) cands.append(&p);
+            if (!p.glyphLabels) cands.append(&p);
         std::stable_sort(cands.begin(), cands.end(),
                          [](const RibbonPanelSpec* a, const RibbonPanelSpec* b) {
-                             if (a->glyphLabels != b->glyphLabels) return a->glyphLabels;
                              return a->labelDrop > b->labelDrop;
                          });
         for (int i = 0; i < cands.size();) {
             int j = i;
             do { drop.insert(cands[j]->id); ++j; }
-            while (j < cands.size() && cands[j]->glyphLabels == cands[i]->glyphLabels
-                   && cands[j]->labelDrop == cands[i]->labelDrop);
+            while (j < cands.size() && cands[j]->labelDrop == cands[i]->labelDrop);
             L = computeLayout(tabIdx, availW, drop, hide, false);
             if (L.width <= availW) { m_layout = L; return; }
             i = j;
@@ -827,6 +610,15 @@ QRect RibbonBar::panelRect(const QString& panelId) const {
     return QRect();
 }
 
+QRect RibbonBar::groupCaptionRect(const QString& caption) const {
+    if (m_minimized) return QRect();
+    ensureLayout();
+    for (const LaidPanel& lp : m_layout.panels)
+        for (const auto& gc : lp.groupCaptions)
+            if (gc.second == caption) return gc.first;
+    return QRect();
+}
+
 QStringList RibbonBar::overflowedPanelIds() const {
     ensureLayout();
     return m_layout.hiddenPanels;
@@ -836,6 +628,21 @@ QRect RibbonBar::overflowButtonRect() const {
     if (m_minimized) return QRect();
     ensureLayout();
     return m_layout.hiddenPanels.isEmpty() ? QRect() : m_layout.overflowRect;
+}
+
+// Always visible, at the right end of the tab row: "every persisted UI state
+// has an on-screen control". Double-clicking a tab still works, but nothing
+// on screen used to say the ribbon could collapse at all.
+QRect RibbonBar::collapseButtonRect() const {
+    const int h = metrics().tabRowH;
+    // Never overlap the tabs: the chevron is hit-tested BEFORE tabIdAt, so at
+    // very narrow widths an unclamped cell would eat clicks on the last tab.
+    int minX = kLeftMargin;
+    if (!m_spec.isEmpty()) {
+        const QRect last = tabRect(m_spec.last().id);
+        if (!last.isNull()) minX = last.right() + 1 + kTabGap;
+    }
+    return QRect(qMax(minX, width() - kRightMargin - kCollapseW), 0, kCollapseW, h);
 }
 
 QMenu* RibbonBar::overflowMenu() {
@@ -868,13 +675,34 @@ void RibbonBar::showOverflowMenu() {
     menu->popup(mapToGlobal(QPoint(r.left(), r.bottom() + 1)));
 }
 
+// Qt's qt_strippedText: what QAction::toolTip() returns when nobody ever set
+// one ("&Close Project" -> "Close Project").
+static QString strippedActionText(QString s) {
+    s.remove(QStringLiteral("..."));
+    for (int i = 0; i < s.size(); ++i)
+        if (s.at(i) == QLatin1Char('&')) s.remove(i, 1);
+    return s.trimmed();
+}
+
 QString RibbonBar::tooltipFor(const QString& id) const {
     QAction* a = effectiveAction(id);
     const RibbonItemSpec* spec = itemSpec(id);
     QString tip = a ? a->toolTip() : QString();
+    // An external action that never set a tooltip hands back Qt's echo of its
+    // MENU text, which is a different name from the one on the strip ("Close"
+    // the button vs "Close Project" the tooltip). That is not a tooltip, so
+    // fall through to the spec — the one place a command's words live. An
+    // external that really does carry its own tooltip still wins.
+    if (a && spec && tip == strippedActionText(a->text())) tip.clear();
     if (tip.isEmpty() && spec) tip = spec->tooltip.isEmpty() ? spec->label : spec->tooltip;
-    if (a && !a->shortcut().isEmpty())
-        tip += QStringLiteral("  (%1)").arg(a->shortcut().toString(QKeySequence::NativeText));
+    // ONE hint format everywhere: "<what it does> — Ctrl+D" — but a spec
+    // tooltip that already names its shortcut ("Open a project (Ctrl+O)")
+    // must not get it a second time.
+    if (a && !a->shortcut().isEmpty()) {
+        const QString sc = a->shortcut().toString(QKeySequence::NativeText);
+        if (!tip.contains(sc, Qt::CaseInsensitive))
+            tip += QStringLiteral(" — %1").arg(sc);
+    }
     return tip;
 }
 
@@ -897,8 +725,8 @@ void RibbonBar::changeEvent(QEvent* e) {
 void RibbonBar::updateHover(QPoint pos) {
     QString id;
     if (pos.y() < metrics().tabRowH) {
-        const QString t = tabIdAt(pos);
-        if (!t.isEmpty()) id = QStringLiteral("tab:") + t;
+        if (collapseButtonRect().contains(pos)) id = QStringLiteral("collapse");
+        else if (const QString t = tabIdAt(pos); !t.isEmpty()) id = QStringLiteral("tab:") + t;
     } else if (!m_minimized) {
         id = itemIdAt(pos);
         if (id.isEmpty() && overflowButtonRect().contains(pos)) id = QStringLiteral("overflow");
@@ -920,6 +748,9 @@ void RibbonBar::updateHover(QPoint pos) {
 void RibbonBar::refreshToolTip() {
     QString tip;
     if (m_hoverId == QLatin1String("overflow")) tip = QStringLiteral("More panels");
+    else if (m_hoverId == QLatin1String("collapse"))
+        tip = m_minimized ? QStringLiteral("Expand the ribbon (Ctrl+F1)")
+                          : QStringLiteral("Collapse the ribbon (Ctrl+F1)");
     else if (!m_hoverId.isEmpty() && !m_hoverId.startsWith(QLatin1String("tab:"))) tip = tooltipFor(m_hoverId);
     if (tip != toolTip()) setToolTip(tip);
 }
@@ -934,6 +765,16 @@ void RibbonBar::mousePressEvent(QMouseEvent* e) {
     dismissRcxTooltip();
     const QPoint pos = e->pos();
     if (pos.y() < metrics().tabRowH) {
+        // The chevron owns its cell — checked before the tabs so it works
+        // even when a tab's rect grows into it.
+        if (collapseButtonRect().contains(pos)) {
+            setMinimized(!m_minimized);
+            // setMinimized() cleared the hover id; re-derive it from the cursor
+            // so the cell keeps its fill and immediately says "Expand …".
+            updateHover(pos);
+            e->accept();
+            return;
+        }
         const QString t = tabIdAt(pos);
         if (!t.isEmpty()) {
             setCurrentTab(t);
@@ -974,6 +815,12 @@ void RibbonBar::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 void RibbonBar::mouseDoubleClickEvent(QMouseEvent* e) {
+    // The chevron already toggled on the press half; a second toggle here
+    // would land back where it started.
+    if (e->button() == Qt::LeftButton && collapseButtonRect().contains(e->pos())) {
+        e->accept();
+        return;
+    }
     if (e->button() == Qt::LeftButton && e->pos().y() < metrics().tabRowH) {
         // A double-click on a tab while minimized is a "restore" gesture, not
         // a toggle. Qt may deliver it as Press (which already restored) …
@@ -1015,11 +862,12 @@ void RibbonBar::paintEvent(QPaintEvent*) {
     const Metrics m = metrics();
     const Theme& t = m_theme;
 
-    // Whole widget first (the host may hand us more height than we asked for),
-    // then the tab strip in the title-bar colour. The body is plain
-    // `background`: no panel boxes, no caption bands.
+    // ONE surface for the whole widget (the host may hand us more height than
+    // we asked for). The tab row used to be painted menuBarColor, which read
+    // as a second menu strip stacked on the first; it is the ribbon's own
+    // header, so it shares the ribbon's `background`. No panel boxes, no
+    // caption bands either.
     p.fillRect(rect(), t.background);
-    p.fillRect(QRect(0, 0, width(), m.tabRowH), menuBarColor(t));
     if (!m_minimized) paintBody(p, m);
     paintTabs(p, m);
 }
@@ -1035,7 +883,9 @@ void RibbonBar::paintTabs(QPainter& p, const Metrics& m) {
     const QRectF strip(0, 0, width(), m_minimized ? m.tabRowH + 1 : m.tabRowH);
     fillBottomDeviceRowOfRect(p, strip, t.border);
 
-    const QColor inactive = ribbonToneColour(t.textMuted, t, menuBarColor(t));
+    // Chrome text has three tiers and an inactive tab is the SECONDARY one:
+    // textDim through the ladder, never textMuted-escalated-to-text.
+    const QColor inactive = ribbonToneColour(t.textDim, t, t.background);
     for (const auto& tab : m_spec) {
         const QRect r = tabRect(tab.id);
         const bool active = (tab.id == m_currentTab);
@@ -1043,10 +893,26 @@ void RibbonBar::paintTabs(QPainter& p, const Metrics& m) {
         if (active)
             fillBottomDeviceRowsOfRect(p, QRectF(r.left(), 0, r.width(), strip.height()),
                                        kUnderlineRows, t.indHoverSpan);
-        // Text ladder (same as the REECLASS / Code / Both pane tabs):
-        // inactive textMuted, hover text, active text. No fill, no box.
+        // Text ladder (same as the doc tabs and the pane view tabs):
+        // inactive textDim, hover text, active text. No fill, no box.
         p.setPen((active || hovered) ? t.text : inactive);
         p.drawText(r, Qt::AlignCenter, tab.title);
+    }
+
+    // Collapse chevron, painted exactly like the … overflow item: nothing at
+    // rest, `hover` fill + `text` under the pointer. Up = expanded (click to
+    // fold), down = minimized (click to unfold).
+    {
+        const QRect r = collapseButtonRect();
+        const bool hovered = (m_hoverId == QLatin1String("collapse"));
+        if (hovered) p.fillRect(r.adjusted(0, 0, 0, -1), t.hover);
+        const QColor tone = hovered ? t.text : inactive;
+        const QString path = m_minimized ? QStringLiteral(":/vsicons/chevron-down.svg")
+                                         : QStringLiteral(":/vsicons/chevron-up.svg");
+        const int side = 16;
+        const QPixmap pm = tintedSvgIcon(path, tone, side, devicePixelRatioF());
+        drawPixmapSnapped(p, QPointF(r.left() + (r.width() - side) / 2.0,
+                                     r.top() + (r.height() - side) / 2.0), pm);
     }
 }
 
@@ -1066,13 +932,23 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
         fillLeftDeviceColOfRect(p, QRectF(dx, divTop, 1, divBottom - divTop), t.border);
 
     const int tabIdx = tabIndex(m_currentTab);
-    const QColor captionTone = ribbonToneColour(t.textMuted, t, t.background);
+    // A caption is the SECONDARY tier: textDim through the ladder, so it can
+    // never end up as bright as the labels it captions.
+    const QColor captionTone = ribbonToneColour(t.textDim, t, t.background);
     for (const LaidPanel& lp : m_layout.panels) {
         // `||` family separators span the rows only.
         for (int sx : lp.separatorXs)
             fillLeftDeviceColOfRect(p, QRectF(sx, itemsTop + 3, 1, itemsH - 6), t.border);
         p.setFont(captionFont());
         p.setPen(captionTone);
+        if (!lp.groupCaptions.isEmpty()) {
+            // Per-group captions replace the panel caption: "Type" told you
+            // nothing the glyphs didn't, "Hex: / Int: / UInt: / Byte:" names
+            // the column you are pointing at.
+            for (const auto& gc : lp.groupCaptions)
+                p.drawText(gc.first, Qt::AlignHCenter | Qt::AlignVCenter, gc.second);
+            continue;
+        }
         QString caption = lp.id;
         if (tabIdx >= 0)
             for (const auto& ps : m_spec[tabIdx].panels)
@@ -1103,12 +979,16 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
 // States, in paint order: opacity (disabled: everything below dims together)
 // -> fill (pressed `button` / hover `hover`, no outline) -> icon + label in
 // the state tone -> checked underline. Rest paints nothing but icon + label.
-//   rest      Plain icon + label textDim; family icons full colour
-//   hover     `hover` fill; Plain icon + label text
+//   rest      Plain icon + label `text` — the ribbon IS the actionable
+//             surface; dimming it at rest inverted the hierarchy against the
+//             document beside it. Family icons keep their hue.
+//   hover     `hover` fill; ink stays `text` (the fill carries the state)
 //   pressed   `button` fill (fallback `selected`)
 //   checked   Plain icon + label indHoverSpan + 2 device rows underline
-//   disabled  40 % opacity, never hover / pressed
-//   destructive (Delete)  icon + label markerPtr in every state
+//   disabled  40 % opacity of the SAME ink (never textDim x 0.4, which lands
+//             under 2:1), never hover / pressed
+//   destructive (Delete)  icon markerPtr always; the label goes red only
+//             under the pointer, so one red glyph marks it at rest
 void RibbonBar::paintItem(QPainter& p, const LaidItem& li, const Metrics& m) {
     const Theme& t = m_theme;
     const RibbonItemSpec* spec = itemSpec(li.ref);
@@ -1126,49 +1006,71 @@ void RibbonBar::paintItem(QPainter& p, const LaidItem& li, const Metrics& m) {
     if (pressed) p.fillRect(r, pressedFill(t));
     else if (hovered) p.fillRect(r, t.hover);
 
-    const QColor tone = spec->destructive ? t.markerPtr
-                      : checked           ? t.indHoverSpan
-                      : hovered           ? t.text
-                                          : ribbonToneColour(t.textDim, t, t.background);
+    const QColor tone = checked ? t.indHoverSpan
+                      : (spec->destructive && (hovered || pressed)) ? t.markerPtr
+                                                                    : t.text;
+    const QColor iconInk = spec->destructive ? t.markerPtr : tone;
     RibbonIconOptions o;
-    o.plainInk = tone;   // Plain Codicons only; family-tinted icons keep their colour
+    o.plainInk = iconInk;   // Plain icons only; family-tinted ones keep their colour
+    o.labelled = li.label;  // Add / Insert draw their own count when unlabelled
     p.setPen(tone);
     p.setFont(font());
     const qreal dpr = devicePixelRatioF();
     const QFontMetrics fm(font());
+    // A `menu` item ends in a ▾: the cell reserved 10 px for it.
+    const int chevW = spec->menu ? kMenuChevronW : 0;
+    const QRect cellR = r.adjusted(0, 0, -chevW, 0);
+    const QPixmap chev = chevW ? ribbonMenuChevron(tone, dpr) : QPixmap();
+    // Small items put the ▾ at the right edge; a Large item's ▾ rides with the
+    // label on row 3 (parked at the cell's right edge it read as a stray mark
+    // floating beside the icon).
+    if (chevW && !li.large)
+        drawPixmapSnapped(p, QPointF(r.right() + 1 - chevW + (chevW - kMenuChevron) / 2.0,
+                                     r.top() + (r.height() - kMenuChevron) / 2.0), chev);
 
     if (li.large) {
         const QPixmap pm = ribbonIcon(spec->icon, RibbonIconSize::Large, dpr, t, o);
         const qreal iconL = m.largeIcon;   // logical, fractional at 125 % (32 device)
         if (li.label) {
-            // icon + 2 + one text line, centred as a block in the 54-px cell
-            const qreal blockH = iconL + 2 + fm.height();
-            const qreal top = r.top() + (r.height() - blockH) / 2.0;
-            drawPixmapSnapped(p, QPointF(r.left() + (r.width() - iconL) / 2.0, top), pm);
-            const int labelTop = qRound(top + iconL + 2);
+            // The label sits on ROW 3 — the same baseline row as the third
+            // small button of the column next door — with the icon centred in
+            // rows 1-2. Centring the icon+label block instead floated the text
+            // ~5 px above that line and broke the strip's only horizontal
+            // rhythm.
+            drawPixmapSnapped(p, QPointF(r.left() + (r.width() - iconL) / 2.0,
+                                         r.top() + (2 * m.rowH - iconL) / 2.0), pm);
             // Elide only when the (integer) advance exceeds the budget: the
             // shaped run of a label that fits by the metric can be a fraction
             // wider, and elidedText would then trim it ("New Cla…").
-            const int budget = r.width() - 8;
-            const QString text = fm.horizontalAdvance(spec->label) > budget
-                ? fm.elidedText(spec->label, Qt::ElideRight, budget) : spec->label;
-            const QRect labelRect(r.left(), labelTop, r.width(), r.bottom() - labelTop + 1);
-            p.drawText(labelRect, Qt::AlignHCenter | Qt::AlignTop | Qt::TextDontClip, text);
+            const QString& label = ribbonStripLabel(*spec);
+            const int budget = cellR.width() - 8;
+            const QString text = fm.horizontalAdvance(label) > budget
+                ? fm.elidedText(label, Qt::ElideRight, budget) : label;
+            // Label (+ ▾) centred as one block on row 3.
+            const int textW = fm.horizontalAdvance(text);
+            const int blockW = textW + (chevW ? 2 + kMenuChevron : 0);
+            const int x0 = r.left() + (r.width() - blockW) / 2;
+            const int labelTop = r.top() + 2 * m.rowH;
+            p.drawText(QRect(x0, labelTop, textW, m.rowH),
+                       Qt::AlignLeft | Qt::AlignVCenter | Qt::TextDontClip, text);
+            if (chevW)
+                drawPixmapSnapped(p, QPointF(x0 + textW + 2,
+                                             labelTop + (m.rowH - kMenuChevron) / 2.0), chev);
         } else {
-            drawPixmapSnapped(p, QPointF(r.left() + (r.width() - iconL) / 2.0,
+            drawPixmapSnapped(p, QPointF(cellR.left() + (cellR.width() - iconL) / 2.0,
                                          r.top() + (r.height() - iconL) / 2.0), pm);
         }
     } else {
         const QPixmap pm = ribbonIcon(spec->icon, RibbonIconSize::Small, dpr, t, o);
-        const int cellW = ribbonIconCellWidth(spec->icon);
+        const int cellW = ribbonIconCellWidth(spec->icon, li.label);
         const int iconY = r.top() + (r.height() - m.smallIcon) / 2;
         if (li.label) {
-            drawPixmapSnapped(p, QPointF(r.left() + 3, iconY), pm);
-            const QRect labelRect(r.left() + 3 + cellW + 4, r.top(),
-                                  r.width() - (3 + cellW + 4) - 6, r.height());
-            p.drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter, spec->label);
+            drawPixmapSnapped(p, QPointF(cellR.left() + 3, iconY), pm);
+            const QRect labelRect(cellR.left() + 3 + cellW + 4, r.top(),
+                                  cellR.width() - (3 + cellW + 4) - 6, r.height());
+            p.drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter, ribbonStripLabel(*spec));
         } else {
-            drawPixmapSnapped(p, QPointF(r.left() + (r.width() - cellW) / 2, iconY), pm);
+            drawPixmapSnapped(p, QPointF(cellR.left() + (cellR.width() - cellW) / 2, iconY), pm);
         }
     }
     if (checked) fillBottomDeviceRowsOfRect(p, r, kUnderlineRows, t.indHoverSpan);

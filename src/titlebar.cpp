@@ -1,4 +1,6 @@
 #include "titlebar.h"
+#include "paintutil.h"
+#include "ribbon_icons.h"   // tintedSvgIcon: the mirrored `discard` = Redo
 #include "svgicon.h"
 #include "themes/thememanager.h"
 #include <QMenu>
@@ -22,7 +24,9 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
 
     // App name
     m_appLabel = new QLabel(QStringLiteral("REECLASS"), this);
-    m_appLabel->setContentsMargins(10, 0, 4, 0);
+    // The stylesheet owns the left gutter (a QSS-styled QLabel ignores
+    // contentsMargins) — two competing margins put the brand 14 px in.
+    m_appLabel->setContentsMargins(0, 0, 0, 0);
     m_appLabel->setAlignment(Qt::AlignVCenter);
     m_appLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     layout->addWidget(m_appLabel);
@@ -44,6 +48,12 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     m_menuBar->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
     layout->addWidget(m_menuBar);
 #endif
+
+    // Quick-access slot (filled by setQuickActions once RibbonActions exists).
+    m_quickLayout = new QHBoxLayout;
+    m_quickLayout->setContentsMargins(0, 0, 0, 0);
+    m_quickLayout->setSpacing(0);
+    layout->addLayout(m_quickLayout);
 
     layout->addStretch();
 
@@ -69,6 +79,45 @@ TitleBarWidget::TitleBarWidget(QWidget* parent)
     });
 }
 
+namespace {
+
+// The brand is chrome, so it is the chrome type size (10 pt DemiBold), not a
+// hand-set 12 PIXEL bold that ignored the app font and grew/shrank with the
+// DPI independently of the menus beside it. `kGutter` is the same left edge
+// the ribbon, breadcrumb and status bar start their ink on.
+QString appLabelSheet(const QColor& text) {
+    return QStringLiteral("QLabel { color: %1; font-family: 'JetBrains Mono'; "
+                          "font-size: 10pt; font-weight: 600; padding-left: %2px; }")
+        .arg(text.name()).arg(kGutter);
+}
+
+// The 16-px hairline between the menus and the quick-access pair. Its own
+// widget so it can paint a DEVICE-exact column (a 1-logical-px frame is two
+// device rows at 125 %), and transparent to the mouse so the title strip's
+// window-drag still works across it.
+class QuickAccessRule : public QWidget {
+public:
+    explicit QuickAccessRule(QWidget* parent) : QWidget(parent) {
+        setFixedWidth(1);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        setFocusPolicy(Qt::NoFocus);
+    }
+    void setColour(const QColor& c) { m_colour = c; update(); }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        if (!m_colour.isValid()) return;
+        QPainter p(this);
+        const int h = 16, y = (height() - h) / 2;
+        fillLeftDeviceColOfRect(p, QRectF(0, y, 1, h), m_colour);
+    }
+
+private:
+    QColor m_colour;
+};
+
+}  // namespace
+
 QToolButton* TitleBarWidget::makeChromeButton(const QString& iconPath) {
     auto* btn = new QToolButton(this);
     btn->setIcon(QIcon(iconPath));
@@ -77,6 +126,39 @@ QToolButton* TitleBarWidget::makeChromeButton(const QString& iconPath) {
     btn->setAutoRaise(true);
     btn->setFocusPolicy(Qt::NoFocus);
     return btn;
+}
+
+// Undo / Redo used to be a two-button ribbon panel with an empty third row —
+// a whole panel, a caption and a divider spent on two arrows. They belong in
+// the title strip, next to the menus that also carry them: always reachable,
+// never taking a panel's worth of the working strip.
+void TitleBarWidget::setQuickActions(QAction* undo, QAction* redo) {
+    if (!m_quickLayout || m_btnUndo) return;   // built once
+    m_quickLayout->addSpacing(10);
+    m_quickRule = new QuickAccessRule(this);
+    m_quickLayout->addWidget(m_quickRule);
+    m_quickLayout->addSpacing(6);
+
+    auto makeQuick = [this](QAction* a) -> QToolButton* {
+        auto* btn = new QToolButton(this);
+        btn->setAutoRaise(true);
+        btn->setFocusPolicy(Qt::NoFocus);
+        btn->setFixedSize(28, 32);
+        btn->setIconSize(QSize(16, 16));
+        // Everything visible (icon, tooltip, enabled) comes from the action:
+        // the strip can never disagree with Edit ▸ Undo. The button consumes
+        // its own press, so the title bar's startSystemMove never fires here.
+        if (a) btn->setDefaultAction(a);
+        m_quickLayout->addWidget(btn);
+        return btn;
+    };
+    m_btnUndo = makeQuick(undo);
+    m_btnRedo = makeQuick(redo);
+    applyTheme(m_theme);   // pick up the chrome button sheet
+}
+
+QToolButton* TitleBarWidget::quickButton(int index) const {
+    return index == 0 ? m_btnUndo : index == 1 ? m_btnRedo : nullptr;
 }
 
 void TitleBarWidget::applyTheme(const Theme& theme) {
@@ -91,9 +173,7 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
 
     // App label. padding-left in the stylesheet (not setContentsMargins, which
     // a QSS-styled QLabel ignores) so "REECLASS" isn't jammed into the corner.
-    m_appLabel->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; padding-left: 10px; }")
-            .arg(theme.text.name()));
+    m_appLabel->setStyleSheet(appLabelSheet(theme.text));
 
     // Menu bar palette — all roles used by MenuBarStyle, so live theme
     // switches don't rely on app-palette inheritance (which can stall
@@ -133,6 +213,30 @@ void TitleBarWidget::applyTheme(const Theme& theme) {
         .arg(theme.hover.name());
     m_btnMin->setStyleSheet(btnStyle);
     m_btnMax->setStyleSheet(btnStyle);
+
+    // Quick access: same flat chrome as the window buttons, icons re-tinted
+    // with the theme like every other chrome SVG. Redo is the discard arrow
+    // mirrored — the same pair the Edit menu shows, so one command reads the
+    // same everywhere (they used to be arrow-left / arrow-right in the menu).
+    if (m_btnUndo || m_btnRedo) {
+        const qreal qdpr = devicePixelRatioF();
+        const QIcon undoIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"),
+                                                theme.text, 16, qdpr));
+        const QIcon redoIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"),
+                                                theme.text, 16, qdpr, true));
+        if (m_btnUndo) {
+            m_btnUndo->setStyleSheet(btnStyle);
+            if (QAction* a = m_btnUndo->defaultAction()) a->setIcon(undoIcon);
+        }
+        if (m_btnRedo) {
+            m_btnRedo->setStyleSheet(btnStyle);
+            if (QAction* a = m_btnRedo->defaultAction()) a->setIcon(redoIcon);
+        }
+    }
+    // static_cast: m_quickRule is only ever set to a QuickAccessRule (this
+    // file is the only writer), and a Q_OBJECT in a .cpp would need its own
+    // moc include for qobject_cast.
+    if (m_quickRule) static_cast<QuickAccessRule*>(m_quickRule)->setColour(theme.border);
 
     // Linux menu tool buttons
     if (m_useToolButtons) {
@@ -178,9 +282,7 @@ void TitleBarWidget::setShowIcon(bool show) {
     } else {
         m_appLabel->setPixmap(QPixmap());
         m_appLabel->setText(QStringLiteral("REECLASS"));
-        m_appLabel->setStyleSheet(
-            QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; padding-left: 10px; }")
-                .arg(m_theme.text.name()));
+        m_appLabel->setStyleSheet(appLabelSheet(m_theme.text));
         setFixedHeight(32);
     }
 }
@@ -303,10 +405,11 @@ void TitleBarWidget::mouseDoubleClickEvent(QMouseEvent* event) {
 void TitleBarWidget::paintEvent(QPaintEvent* event) {
     QWidget::paintEvent(event);
 
-    // 1px bottom border
+    // Bottom hairline: exactly ONE device row. drawLine on a 1-logical-px
+    // pen covers 1.25 device px at 125 % and snaps to two rows — a double
+    // line next to the ribbon's device-exact one.
     QPainter p(this);
-    p.setPen(m_theme.border);
-    p.drawLine(0, height() - 1, width() - 1, height() - 1);
+    fillBottomDeviceRowOfRect(p, QRectF(0, 0, width(), height()), m_theme.border);
 }
 
 } // namespace rcx

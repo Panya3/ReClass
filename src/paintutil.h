@@ -7,6 +7,18 @@
 
 namespace rcx {
 
+// ── Shared chrome metrics ──
+// The first ink of every horizontal strip (title label, ribbon tabs and
+// panels, breadcrumb, pane tabs, status text, doc-tab icon pad) starts this
+// many logical px from the strip's left edge so the left margin reads as ONE
+// line down the window instead of five slightly different ones.
+inline constexpr int kGutter = 8;
+
+// One tab grammar: "current" is always this many DEVICE rows of the accent on
+// the strip's bottom edge — ribbon tabs, checked ribbon items, document tabs
+// and the pane view tabs. Painted through fillBottomDeviceRowsOfRect below.
+inline constexpr int kUnderlineRows = 2;
+
 // ── Device-pixel-exact edge fills ──
 // A 1-logical-px fillRect covers 1.25 device px at DPR 1.25 and snaps to TWO
 // filled rows/columns — a "1px" line next to a device-exact one (the editor

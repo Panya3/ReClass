@@ -83,6 +83,24 @@ inline QColor menuBarColor(const Theme& t) {
     return editorPaperColor(t).darker(127);
 }
 
+// Seam colour for every 1-px line that touches the document: the editor /
+// Code container outline, the doc-tab and breadcrumb bottoms, the pane-tab
+// and status-bar tops, dock-header bottoms. At full theme.border those lines
+// compete with the strip hairlines and the panes read as a stack of parallel
+// lines; blended 35% toward the editor paper they read as seams between
+// surfaces. DERIVED, not a new token: it tracks the theme automatically.
+// Strong theme.border is reserved for the seams BETWEEN chrome strips (title
+// bottom, ribbon tab-row bottom, ribbon body bottom).
+inline QColor containerBorderColor(const Theme& t) {
+    constexpr qreal k = 0.35;  // 0 = full border, 1 = gone
+    const QColor a = t.border;
+    const QColor b = editorPaperColor(t);
+    return QColor::fromRgbF(a.redF()   + (b.redF()   - a.redF())   * k,
+                            a.greenF() + (b.greenF() - a.greenF()) * k,
+                            a.blueF()  + (b.blueF()  - a.blueF())  * k,
+                            a.alphaF());
+}
+
 // ── Shared field metadata (serialization + editor UI) ──
 
 struct ThemeFieldMeta {

@@ -19,17 +19,51 @@ using namespace rcx;
 class TestRibbonIds : public QObject {
     Q_OBJECT
 private slots:
+    // DELIBERATE EXCEPTION: `edit.undo` / `edit.redo` are the title-strip
+    // quick-access pair (TitleBarWidget::setQuickActions). They stay in
+    // RibbonActions because it owns the undo-stack predicates, but they have
+    // no ribbon button by design — the Edit panel was two arrows, a caption
+    // and a divider spent on commands the menu already carried.
     void testEveryRibbonActionIdExistsInTheSpec() {
+        static const QSet<QString> kQuickAccessIds{QStringLiteral("edit.undo"),
+                                                   QStringLiteral("edit.redo")};
         RibbonActions acts([]() -> RcxController* { return nullptr; },
                            []() -> RcxEditor* { return nullptr; });
         RibbonBar bar;
         const QStringList specList = bar.actionIds();   // by value: never pair iterators of two temporaries
         const QSet<QString> specIds(specList.begin(), specList.end());
         for (const QString& id : acts.ids()) {
+            QVERIFY2(acts.action(id) != nullptr, qPrintable(id));
+            if (kQuickAccessIds.contains(id)) {
+                QVERIFY2(!specIds.contains(id),
+                         qPrintable(QStringLiteral("quick-access id '%1' grew a ribbon button").arg(id)));
+                continue;
+            }
             QVERIFY2(specIds.contains(id),
                      qPrintable(QStringLiteral("RibbonActions id '%1' has no ribbon button").arg(id)));
-            QVERIFY2(acts.action(id) != nullptr, qPrintable(id));
         }
+    }
+
+    // Every command's words come from ONE place: the spec table. A button and
+    // its action can no longer drift apart (Ptr→Class vs "Ptr → Class",
+    // "Swap" vs "Big endian", "Class" vs "Break Class"…).
+    void testLabelsAndTooltipsComeFromTheSpec() {
+        RibbonActions acts([]() -> RcxController* { return nullptr; },
+                           []() -> RcxEditor* { return nullptr; });
+        int checked = 0;
+        for (const QString& id : acts.ids()) {
+            const RibbonItemSpec* spec = ribbonSpecForId(id);
+            if (!spec) continue;   // the quick-access pair
+            QAction* a = acts.action(id);
+            QCOMPARE(a->text(), spec->label);
+            QCOMPARE(a->toolTip(), spec->tooltip);
+            ++checked;
+        }
+        QVERIFY2(checked > 40, qPrintable(QStringLiteral("only %1 ids checked").arg(checked)));
+        QCOMPARE(acts.action(QStringLiteral("type.hex64"))->text(), QStringLiteral("Hex 64"));
+        QCOMPARE(acts.action(QStringLiteral("sel.swap"))->text(), QStringLiteral("Big endian"));
+        QVERIFY(acts.action(QStringLiteral("sel.swap"))->isCheckable());
+        QCOMPARE(acts.action(QStringLiteral("type.class"))->text(), QStringLiteral("Break Class"));
     }
 
     void testEveryModifyButtonHasAnAction() {

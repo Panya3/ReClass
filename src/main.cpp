@@ -59,6 +59,7 @@
 #include <QStandardPaths>
 #include "ribbon.h"
 #include "ribbon_actions.h"
+#include "ribbon_icons.h"   // tintedSvgIcon: the Edit menu shares the ribbon's icons
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QVBoxLayout>
@@ -86,6 +87,11 @@
 #include "widgets/dialog_button.h"
 #include "widgets/unified_symbol_panel.h"
 #include "widgets/empty_overlay.h"
+#include "widgets/pane_tabs.h"
+#include "widgets/selection_status.h"
+#include "widgets/dock_header.h"
+#include "widgets/panel_search_field.h"
+#include "widgets/section_header.h"
 #include "names/name_registry.h"
 #include "names/pdb_name_provider.h"
 #include "names/pdb_type_provider.h"
@@ -439,13 +445,18 @@ public:
 };
 
 // Height of a document-dock tab (set in MenuBarStyle::sizeFromContents,
-// CT_TabBarTab). The Project dock's DockTitleBar is a SEPARATE control sitting
+// CT_TabBarTab). The Project dock's rcx::DockHeader is a SEPARATE control sitting
 // beside these tabs, but their bottom separator lines must line up to the
 // pixel — so createWorkspaceDock derives the header height from this same
 // constant (a QTabBar renders one extra pixel below the tab content, hence the
 // +1 there). Single source of truth so the two never drift again.
 // 31 = 37 shrunk ~15% (user-tuned); the Project header tracks it automatically.
 static constexpr int kDocTabBarHeight = 31;
+// Every dock header derives from the same number (rcx::DockHeader), so a
+// drift here would silently un-align the Project header seam from the
+// doc-tab seam beside it. Pinned at compile time rather than by comment.
+static_assert(kDocTabBarHeight == rcx::kDockHeaderContentH,
+              "dock headers and document tabs must share one height");
 
 // The start-page "splash" is a centered card; the main window launches 33%
 // LARGER than it in both width and height (window = 1.33 × splash). Both sizes
@@ -585,7 +596,10 @@ public:
             QColor bg     = opt->palette.color(QPalette::Window); // theme.background
             QColor line   = opt->palette.color(QPalette::Dark);   // theme.border
             QColor hov    = opt->palette.color(QPalette::Mid);    // theme.hover
-            QColor accent = opt->palette.color(QPalette::Link);   // theme.indHoverSpan
+            // Accent budget: indHoverSpan marks current/selected/checked. A
+            // separator the mouse happens to be over is neither, so its hover
+            // bar is textDim — a "you can grab this" cue, not a state.
+            QColor accent = rcx::ThemeManager::instance().current().textDim;
 
             // Top/bottom horizontal separators — keep invisible (prevents double
             // border lines near menu bar and status bar)
@@ -650,9 +664,9 @@ public:
         // visual separator with the editor; the editor now paints its own
         // device-exact border (EditorContainer::paintEvent), so painting
         // another line here just produced a double-line artifact at the
-        // editor's top edge. The pane-tab variant (Reclass/Code/Debug at the
-        // bottom) never wanted a base line either — its selected tab
-        // gets a 3-px QSS accent. Killing the whole primitive is the
+        // editor's top edge. The pane-tab variant (Structure/Code/Debug at
+        // the bottom) never wanted a base line either — its selected tab
+        // gets the shared 2-px underline. Killing the whole primitive is the
         // cleanest fix.
         if (elem == PE_FrameTabBarBase)
             return;
@@ -772,12 +786,18 @@ public:
                             fillLeftDeviceColOfRect(*p, QRectF(tab->rect), side);
                         fillRightDeviceColOfRect(*p, QRectF(tab->rect), side);
                     }
-                    // Selected accent line on top (2px) — not for sentinel "+" tab
-                    if (selected && !sentinel) {
-                        p->fillRect(QRect(tab->rect.left(), tab->rect.top(),
-                                          tab->rect.width(), 2),
-                                    tab->palette.color(QPalette::Link));   // theme.indHoverSpan
-                    }
+                    // Active-tab underline — BOTTOM edge, exactly 2 DEVICE
+                    // rows. This was a 2-logical-px fillRect on the TOP edge:
+                    // 3 device rows at DPR 1.25, and it pointed the opposite
+                    // way from the ribbon tab row directly above it. One tab
+                    // grammar now — ribbon tabs, doc tabs and pane tabs all
+                    // mark "active" with the same underline. (The 2 is
+                    // kUnderlineRows; it lives in ribbon.cpp until the shared
+                    // copy lands in paintutil.h.)
+                    if (selected && !sentinel)
+                        rcx::fillBottomDeviceRowsOfRect(
+                            *p, QRectF(tab->rect), 2,
+                            tab->palette.color(QPalette::Link));  // theme.indHoverSpan
                     return;
                 }
             }
@@ -799,20 +819,22 @@ public:
                     // Sentinel "+" tab — draw add icon instead of text
                     QString tabText = (tabIdx >= 0) ? tabBar->tabText(tabIdx) : tab->text;
                     if (tabText == QStringLiteral("\u200B")) {
-                        // + tab: dim at rest, accent on hover. Subordinate
-                        // visual weight relative to the per-tab \u00D7 close
-                        // button \u2014 earlier rev used full WindowText so the
-                        // + competed equally with the \u00D7 (same chroma, same
-                        // weight). Disabled.WindowText = theme.textMuted in
-                        // the app palette; Link = theme.indHoverSpan accent.
+                        // + tab: dim at rest, plain text on hover.
+                        // Subordinate visual weight relative to the per-tab
+                        // \u00D7 close button \u2014 earlier rev used full
+                        // WindowText so the + competed equally with the
+                        // \u00D7. Disabled.WindowText = theme.textMuted in the
+                        // app palette. Hover is Text, NOT Link: the accent is
+                        // reserved for current/selected, and "+" is neither.
                         bool hov = tab->state & State_MouseOver;
                         QColor fg = hov
-                            ? tab->palette.color(QPalette::Link)
+                            ? tab->palette.color(QPalette::Text)
                             : tab->palette.color(QPalette::Disabled,
                                                  QPalette::WindowText);
-                        // Center in content area: below 2px accent zone, above 1px bottom border
+                        // Center in the content area: the accent no longer eats
+                        // the top 2 px, only the 1px bottom border is reserved.
                         int cx = tab->rect.left() + tab->rect.width() / 2;
-                        int cy = tab->rect.top() + 2 + (tab->rect.height() - 3) / 2;
+                        int cy = tab->rect.top() + (tab->rect.height() - 1) / 2;
                         p->fillRect(cx - 3, cy, 7, 1, fg);  // horizontal
                         p->fillRect(cx, cy - 3, 1, 7, fg);  // vertical
                         return;
@@ -821,7 +843,15 @@ public:
                     int rightBtnW = 0;
                     if (tabIdx >= 0) {
                         if (auto* rb = tabBar->tabButton(tabIdx, QTabBar::RightSide))
-                            rightBtnW = rb->sizeHint().width() + 4;
+                            // size(), NOT sizeHint(). The wrapper is frozen with
+                            // setFixedSize so hiding the x cannot resize the tab,
+                            // but sizeHint() still comes from the LAYOUT, which
+                            // skips a hidden child and collapses to 0. Reading the
+                            // hint gave every non-current tab 16 px more label room
+                            // than the hovered one, so long titles re-elided (lost
+                            // a couple of characters) the instant you pointed at
+                            // them, and grew them back on leave.
+                            rightBtnW = rb->size().width() + 4;
                     }
 
                     // Source-status icon — read directly from the dock's
@@ -851,7 +881,7 @@ public:
                     // top — visually too high. With them at the same height
                     // and same vertical center, the box edges line up.
                     const int kIconSz  = fm.height();
-                    const int kIconPad = 8;
+                    const int kIconPad = rcx::kGutter;  // one left margin, every strip
                     const int kIconGap = 6;
                     int leftInset = kIconPad;
                     if (tabIdx >= 0) {
@@ -862,14 +892,14 @@ public:
                                 QString iconPath = dw->property("rcxSourceIcon").toString();
                                 if (iconPath.isEmpty()) break;
                                 bool live = dw->property("rcxSourceLive").toBool();
-                                // Visible content area depends on selection
-                                // state (CE_TabBarTabShape at line 615-621):
-                                //   - 1px bottom is ALWAYS the base-line border
-                                //   - 2px top is the accent strip but ONLY
-                                //     when selected
-                                // Center icon vertically in this area.
-                                int topInset    = selected ? 2 : 0;
-                                int bottomInset = 1;
+                                // Visible content area: only the 1px bottom
+                                // base-line border is reserved. The selected
+                                // accent used to steal the top 2 px, so labels
+                                // and icons jumped down a pixel the moment you
+                                // clicked a tab; the underline sits on the
+                                // bottom edge now, so every tab is one box.
+                                const int topInset    = 0;
+                                const int bottomInset = 1;
                                 int caTop = tab->rect.top() + topInset;
                                 int caH   = tab->rect.height() - topInset - bottomInset;
                                 int iy    = caTop + (caH - kIconSz) / 2 + 1;  // visual nudge
@@ -892,12 +922,13 @@ public:
                             }
                         }
                     }
-                    // Match icon's content-area: insets depend on selection
-                    // state, exactly as the bg fill in CE_TabBarTabShape does.
-                    int textTopInset    = selected ? 2 : 0;
-                    int textBottomInset = 1;
+                    // Match the icon's content area (see topInset above):
+                    // the same box whether or not the tab is selected.
+                    const int textTopInset    = 0;
+                    const int textBottomInset = 1;
                     QRect textRect = tab->rect.adjusted(leftInset, textTopInset,
-                                                        -(8 + rightBtnW), -textBottomInset);
+                                                        -(rcx::kGutter + rightBtnW),
+                                                        -textBottomInset);
 
                     QString text = tabText;
                     int maxW = textRect.width();
@@ -1302,7 +1333,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         for (int i = 0; i < tab->panes.size(); ++i) {
             if (tab->panes[i].tabWidget && tab->panes[i].tabWidget->isAncestorOf(now)) {
                 tab->activePaneIdx = i;
-                syncViewButtons(tab->panes[i].viewMode);
                 return;
             }
         }
@@ -1468,8 +1498,24 @@ void MainWindow::createMenus() {
 
     // Edit
     auto* edit = m_menuBar->addMenu("&Edit");
-    Qt5Qt6AddAction(edit, "&Undo", QKeySequence::Undo, makeIcon(":/vsicons/arrow-left.svg"), this, &MainWindow::undo);
-    Qt5Qt6AddAction(edit, "&Redo", QKeySequence::Redo, makeIcon(":/vsicons/arrow-right.svg"), this, &MainWindow::redo);
+    // Undo / Redo = the `discard` arrow and its mirror, the same pair the
+    // title-strip quick-access buttons show. arrow-left / arrow-right here
+    // meant one command had two icons depending on where you looked.
+    {
+        QAction* undoAct = Qt5Qt6AddAction(edit, "&Undo", QKeySequence::Undo, QIcon(), this, &MainWindow::undo);
+        QAction* redoAct = Qt5Qt6AddAction(edit, "&Redo", QKeySequence::Redo, QIcon(), this, &MainWindow::redo);
+        // The ink is theme-derived, so it has to follow the theme: a pair
+        // tinted once at construction keeps near-white arrows on a light menu
+        // after a live switch. (The title-strip twins re-tint in
+        // TitleBarWidget::applyTheme.)
+        auto retint = [this, undoAct, redoAct](const rcx::Theme& t) {
+            const qreal dpr = devicePixelRatioF();
+            undoAct->setIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"), t.text, 16, dpr));
+            redoAct->setIcon(rcx::tintedSvgIcon(QStringLiteral(":/vsicons/discard.svg"), t.text, 16, dpr, true));
+        };
+        retint(ThemeManager::instance().current());
+        connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this, retint);
+    }
     edit->addSeparator();
     Qt5Qt6AddAction(edit, "&Find Field...", QKeySequence::Find,
                     makeIcon(":/vsicons/search.svg"), this,
@@ -1764,18 +1810,51 @@ void MainWindow::createMenus() {
     });
 
     // ── Ribbon (ReClassEx-style Home | Modify strip above the doc tabs) ──
+    // ONE submenu, ONE persisted key. The old pair — a "Ribbon" checkbox that
+    // wrote `showRibbon` and a "Ribbon Labels" submenu — left the collapsed
+    // state (double-click) with no menu entry at all and two settings that
+    // could disagree.
     view->addSeparator();
-    m_actShowRibbon = view->addAction("&Ribbon");
-    m_actShowRibbon->setToolTip(QStringLiteral(
-        "Show the Home | Modify ribbon above the document tabs"));
-    m_actShowRibbon->setCheckable(true);
-    m_actShowRibbon->setChecked(settings.value("showRibbon", true).toBool());
-    connect(m_actShowRibbon, &QAction::triggered, this, [this](bool checked) {
-        QSettings("REECLASS", "REECLASS").setValue("showRibbon", checked);
-        if (m_ribbonHost) m_ribbonHost->setVisible(checked);
-    });
     {
-        auto* labelsMenu = view->addMenu("Ribbon &Labels");
+        m_ribbonMenu = view->addMenu("&Ribbon");
+        m_ribbonStateGroup = new QActionGroup(this);
+        m_ribbonStateGroup->setExclusive(true);
+        QSettings s("REECLASS", "REECLASS");
+        const int state = rcx::ribbonStateFromSettings(s);
+        struct { const char* text; const char* tip; int state; } states[] = {
+            {"&Full",      "Tabs and buttons",              rcx::RibbonFull},
+            {"&Collapsed", "Tabs only — clicking a tab expands the ribbon", rcx::RibbonCollapsed},
+            {"&Hidden",    "No ribbon at all",              rcx::RibbonHidden},
+        };
+        for (const auto& st : states) {
+            auto* a = m_ribbonMenu->addAction(QString::fromLatin1(st.text));
+            a->setCheckable(true);
+            a->setData(st.state);
+            a->setToolTip(QString::fromLatin1(st.tip));
+            a->setChecked(st.state == state);
+            m_ribbonStateGroup->addAction(a);
+        }
+        connect(m_ribbonStateGroup, &QActionGroup::triggered, this,
+                [this](QAction* a) { applyRibbonState(a->data().toInt()); });
+
+        // Ctrl+F1 never puts the ribbon into Hidden — that state has no
+        // on-screen chevron, so it stays a deliberate menu choice. Anything
+        // that is not Full (Collapsed OR Hidden) therefore maps back to Full,
+        // which also makes Ctrl+F1 the keyboard way out of Hidden.
+        m_ribbonMenu->addSeparator();
+        auto* toggle = m_ribbonMenu->addAction("&Toggle Ribbon");
+        toggle->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_F1));
+        toggle->setToolTip(QStringLiteral("Collapse or expand the ribbon body"));
+        connect(toggle, &QAction::triggered, this, [this]() {
+            applyRibbonState(m_ribbonState == rcx::RibbonFull ? int(rcx::RibbonCollapsed)
+                                                              : int(rcx::RibbonFull));
+        });
+        // No addAction(toggle) here: the menu bar lives inside the window's
+        // menu widget, so a menu action's shortcut is already registered —
+        // a second registration makes Qt report an ambiguous overload and
+        // fire NEITHER (the same trap Bookmarks hit with Ctrl+Shift+B).
+
+        m_ribbonMenu->addSeparator();
         m_ribbonLabelGroup = new QActionGroup(this);
         m_ribbonLabelGroup->setExclusive(true);
         const int savedMode =
@@ -1786,7 +1865,7 @@ void MainWindow::createMenus() {
             {"&Icons only", RibbonBar::LabelMode::IconsOnly},
         };
         for (const auto& m : modes) {
-            auto* a = labelsMenu->addAction(QString::fromLatin1(m.text));
+            auto* a = m_ribbonMenu->addAction(QString::fromLatin1(m.text));
             a->setCheckable(true);
             a->setData(int(m.mode));
             a->setChecked(int(m.mode) == savedMode);
@@ -1853,14 +1932,14 @@ void MainWindow::createMenus() {
     view->addSeparator();
     view->addAction(m_workspaceDock->toggleViewAction());
     {
-        // Memory Scanner opens floating only on its FIRST show — after the
-        // user explicitly redocks it (drag, double-click, context menu),
-        // re-opens via Ctrl+Shift+S must respect that choice. The previous
-        // version called setFloating(true) inside the toggle handler, so
-        // any redock got immediately undone the next time visibilityChanged
-        // round-tripped through the action's checked state.
+        // Toggling never touches the dock's AREA or floating state — the
+        // scanner opens wherever the user last left it (Bottom on a fresh
+        // profile, sized by createScannerDock's first-show request). An older
+        // version forced setFloating(true) in this handler, which undid any
+        // redock the next time visibilityChanged round-tripped through the
+        // action's checked state.
         auto* scanAct = new QAction(m_scannerDock->toggleViewAction()->icon(),
-                                    QStringLiteral("Memory Scanner"), this);
+                                    QStringLiteral("Scanner"), this);
         scanAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_S));
         scanAct->setCheckable(true);
         scanAct->setChecked(m_scannerDock->isVisible());
@@ -2108,6 +2187,10 @@ static QRect resizeEdgeRect(Qt::Edges e, int w, int h) {
 }
 
 // ── Dock title-bar grip (VS2022-style dot pattern) ──
+// Still used by the FLOATING document-dock title bar (createDocDock). The four
+// side docks dropped it when they moved to rcx::DockHeader — there the header
+// itself is the drag surface, so a separate 12-px dot column that existed only
+// to own a SizeAllCursor was pure chrome noise.
 class DockGripWidget : public QWidget {
 public:
     explicit DockGripWidget(QWidget* parent) : QWidget(parent) {
@@ -2140,6 +2223,9 @@ private:
 // ── Custom-painted dock title bar ──
 // Used as QDockWidget::setTitleBarWidget(). Paints its own background so Fusion
 // can't insert frames or steal pixels. Qt handles drag/dock natively.
+// SUPERSEDED for the four side docks by rcx::DockHeader (widgets/dock_header.h),
+// which adds the seam, the title, the close button and the float chrome that
+// each dock used to hand-roll differently. Kept as the plain painted base.
 // Widget-rect wrappers over the device-exact edge fills defined above
 // MenuBarStyle (see the comment there for the why).
 static void fillBottomDeviceRow(QPainter& p, const QWidget* w, const QColor& c) {
@@ -2152,6 +2238,8 @@ static void fillRightDeviceCol(QPainter& p, const QWidget* w, const QColor& c) {
 // 1-logical-px horizontal separator that always renders as exactly ONE
 // device pixel row (its bottom one), unlike a stylesheet'd QFrame.
 class HairlineSeparator : public QWidget {
+    // The four side docks no longer instantiate one: rcx::DockHeader and
+    // rcx::PanelSearchField each paint their own seam. Kept for other chrome.
     Q_OBJECT
     QColor m_color;
 public:
@@ -2219,9 +2307,11 @@ class WorkspaceRail : public QWidget {
     Q_OBJECT
 public:
     explicit WorkspaceRail(QWidget* parent = nullptr) : QWidget(parent) {
-        setFixedWidth(32);  // wide enough to read as a clickable handle
+        // 22 px: the same column the dock's own edge occupies, so expanding
+        // and collapsing the Project dock doesn't shift the editor sideways.
+        setFixedWidth(22);
         setCursor(Qt::PointingHandCursor);
-        setToolTip(QStringLiteral("Show Project workspace"));
+        setToolTip(QStringLiteral("Show Project"));
     }
 signals:
     void clicked();
@@ -2235,11 +2325,12 @@ protected:
         const auto& t = rcx::ThemeManager::instance().current();
         QPainter p(this);
         // Match the editor "paper" surface so the collapsed Project rail reads
-        // as the SAME background as the editor (no jarring lighter chrome). The
-        // chevron and vertical "PROJECT" label keep it legible as a clickable
-        // handle without a contrasting fill.
+        // as the SAME background as the editor (no jarring lighter chrome).
+        // Hover is the shared t.hover fill, not railBg.lighter(135): the rail
+        // is a rest-state handle and gets no accent of its own (accent budget).
         const QColor railBg = rcx::editorPaperColor(t);
-        p.fillRect(rect(), m_hover ? railBg.lighter(135) : railBg);
+        p.fillRect(rect(), railBg);
+        if (m_hover) p.fillRect(rect(), t.hover);
         // No right edge line of our own — the editor container immediately to
         // the right paints its device-exact left border, and a rail-side line
         // next to it read as a double line.
@@ -2247,22 +2338,21 @@ protected:
         const QColor fg = m_hover ? t.text : t.textDim;
         const double cx = width() / 2.0;
 
-        // Chevron ▸ near the top (right-pointing arrow → "expand").
-        p.setRenderHint(QPainter::Antialiasing);
-        QPen pen(fg, 1.8);
-        pen.setCapStyle(Qt::RoundCap);
-        pen.setJoinStyle(Qt::RoundJoin);
-        p.setPen(pen);
-        const double cy = 18.0;
-        p.drawLine(QPointF(cx - 3.0, cy - 6.0), QPointF(cx + 3.5, cy));
-        p.drawLine(QPointF(cx + 3.5, cy), QPointF(cx - 3.0, cy + 6.0));
+        // Chevron ▸ near the top (right-pointing arrow → "expand"), painted as
+        // device-aligned pixel art with AA off (was a 1.8-wide RoundCap pen,
+        // i.e. a soft smear at fractional DPR).
+        rcx::drawRailChevron(p, QPointF(cx, 18.0), fg, devicePixelRatioF());
 
         // Vertical "PROJECT" label, reading bottom-to-top, centered on the
-        // rail so it doesn't float against the bottom edge.
+        // rail so it doesn't float against the bottom edge. Size derived
+        // through resolvedPointSize — a raw setPixelSize(13) both ignored the
+        // user's chrome size and made the label the loudest thing on the strip.
         p.save();
-        QFont f = font();
-        f.setPixelSize(13);
-        f.setLetterSpacing(QFont::AbsoluteSpacing, 2.0);
+        // The chrome face, not the inherited app font: this label stands in
+        // for the Project dock's title and has to match it.
+        QFont f = rcx::chromeFont();
+        f.setPointSize(qMax(7, rcx::resolvedPointSize(f) - 1));
+        f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
         p.setFont(f);
         p.setPen(fg);
         p.translate(cx, height() / 2.0);
@@ -2340,6 +2430,7 @@ private:
 class ShimmerLabel : public QWidget {
 public:
     explicit ShimmerLabel(QWidget* parent = nullptr) : QWidget(parent) {
+        setAttribute(Qt::WA_Hover, true);   // for the hover underline below
         m_timer.setInterval(30);
         connect(&m_timer, &QTimer::timeout, this, [this]() {
             m_phase += 0.012f;
@@ -2368,6 +2459,7 @@ public:
     QColor colDim;      // dimmed suffix text
     QColor colBright;   // highlight sweep
     QColor colSep;      // vertical separator between sections
+    QColor colHover;    // main segment while hovered (the label is clickable)
 
     // Optional click handler — installed by createStatusBar to launch the
     // Goto Address dialog when the user clicks the location segment.
@@ -2378,6 +2470,9 @@ public:
     std::function<void()> onClicked;
 
 protected:
+    void enterEvent(QEnterEvent*) override { m_hover = true;  update(); }
+    void leaveEvent(QEvent*)      override { m_hover = false; update(); }
+
     void mousePressEvent(QMouseEvent* e) override {
         if (e->button() == Qt::LeftButton && onClicked) {
             onClicked();
@@ -2398,13 +2493,23 @@ protected:
         if (!m_shimmer) {
             QColor c = colBase.isValid() ? colBase
                                          : palette().color(QPalette::WindowText);
+            // The whole label is a click target (Goto Address), so on hover the
+            // MAIN segment says so: brighter + underlined, the same link cue
+            // the breadcrumb uses. The dim detail and the separator stay put.
+            QFont mainFont = font();
+            if (m_hover) {
+                if (colHover.isValid()) c = colHover;
+                mainFont.setUnderline(true);
+            }
             p.setPen(c);
+            p.setFont(mainFont);
             if (m_dimSuffix.isEmpty()) {
                 p.drawText(r, m_align, m_text);
             } else {
                 QFontMetrics fm(font());
                 int tw = fm.horizontalAdvance(m_text);
                 p.drawText(r, m_align, m_text);
+                p.setFont(font());
 
                 // Vertical separator between main text and dim suffix
                 int sepGap = fm.horizontalAdvance(' ');
@@ -2444,6 +2549,7 @@ private:
     QString      m_text;
     QString      m_dimSuffix;
     bool         m_shimmer = false;
+    bool         m_hover   = false;
     float        m_phase   = 0.0f;
     Qt::Alignment m_align  = Qt::AlignLeft | Qt::AlignVCenter;
     QTimer       m_timer;
@@ -2554,11 +2660,11 @@ protected:
         QPainter p(this);
         p.fillRect(rect(), palette().window());
 
-        // Top hairline separator (1 device pixel)
-        if (m_top.isValid()) {
-            qreal dpr = devicePixelRatioF();
-            p.fillRect(QRectF(0, 0, width(), 1.0 / dpr), m_top);
-        }
+        // Top seam — through the shared device-exact helper. The old
+        // hand-rolled `1.0 / dpr` rect picks a different row at a .25 phase
+        // than every other chrome line in the window.
+        if (m_top.isValid())
+            rcx::fillTopDeviceRowOfRect(p, QRectF(rect()), m_top);
 
         // Vertical divider between tabRow and label
         if (m_div.isValid() && m_divX >= 0)
@@ -2579,7 +2685,7 @@ private:
     void manualLayout() {
         if (!label) return;
         const int h = height();
-        const int gutter = 6;
+        const int gutter = rcx::kGutter;   // one left margin down the window
         // Resize grip pinned to the far bottom-right corner — laid out HERE (in
         // the status bar) rather than as a free MainWindow child, so QMainWindow's
         // layout can't reclaim it back to (0,0). Reserve its width on the right.
@@ -2595,7 +2701,7 @@ private:
         int rightReserve = gripReserve;
         if (sourceChip && sourceChip->isVisible()) {
             const int cw = sourceChip->sizeHint().width();
-            const int edge = 8;
+            const int edge = rcx::kGutter;
             sourceChip->setGeometry(qMax(0, width() - cw - edge - gripReserve), 0, cw, h);
             sourceChip->raise();
             rightReserve = cw + edge + gripReserve + gutter;
@@ -2677,8 +2783,15 @@ void MainWindow::createStatusBar() {
     // dedicated standalone button.
     m_statusLabel->setCursor(Qt::PointingHandCursor);
     m_statusLabel->onClicked = [this]() { showGotoAddressDialog(); };
+    // The type-key legend used to be printed into the status text on every
+    // selection. It never changed, so it was permanent clutter competing with
+    // the part that does change — it lives here now, where it is one hover
+    // away and can also explain what clicking the label does.
+    m_statusLabel->setToolTip(QStringLiteral(
+        "Type keys: P ptr · F float · S int · U uint  ·  ←/→ cycle same-size "
+        "types  ·  click: go to address (Ctrl+G)"));
 
-    // View toggle is now per-pane via QTabWidget tab bar (Reclass / Code tabs)
+    // View toggle is now per-pane via QTabWidget tab bar (Structure / Code)
     sb->tabRow = nullptr;
     sb->label  = m_statusLabel;
 
@@ -2711,13 +2824,16 @@ void MainWindow::createStatusBar() {
         statusBar()->setPalette(sbPal);
         statusBar()->setAutoFillBackground(true);
 
-        sb->setTopLineColor(t.border);
+        // The status strip's top edge touches the document column, so it is a
+        // seam (containerBorderColor), not a chrome-strip hairline (t.border).
+        sb->setTopLineColor(rcx::containerBorderColor(t));
         sb->setDividerColor(t.border);
 
         m_statusLabel->colBase   = t.textDim;
         m_statusLabel->colDim    = t.textMuted;
         m_statusLabel->colBright = t.indHoverSpan;
         m_statusLabel->colSep    = t.border;
+        m_statusLabel->colHover  = t.text;
     }
 
     // Sync status bar font to global editor font (10pt monospace)
@@ -2756,8 +2872,10 @@ void MainWindow::createStatusBar() {
     // Source-status chip — right-anchored liveness dot + "[kind:name]" of the
     // active data source. Updated via RcxController::sourceStatusChanged.
     {
+        // 10 pt, like the label beside it: at 9 pt the chip and the status text
+        // were two sizes on one baseline in a strip 20 px tall.
         QSettings s("REECLASS", "REECLASS");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 9);
+        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
         f.setFixedPitch(true);
         m_sourceChip = new SourceStatusChip(sb);
         m_sourceChip->setFont(f);
@@ -2817,6 +2935,55 @@ void MainWindow::setAppStatus(const QString& text, const QString& dimSuffix) {
         m_statusLabel->setText(text, dimSuffix);
         m_statusLabel->setShimmerActive(false);
     }
+}
+
+// Rebuild the status bar's location segment from a controller's CURRENT
+// selection. Split out of the nodeSelected lambda so it can also be called
+// when nothing was selected but the visible document changed: the segment used
+// to keep whatever the last tab to fire nodeSelected had written, so it
+// happily named UnnamedClass0 while UnnamedClass4 was on screen.
+// nodeIdx < 0 means "resolve the selection yourself" (setActiveDocDock has no
+// signal payload to hand on).
+void MainWindow::refreshSelectionStatus(RcxController* ctrl, int nodeIdx) {
+    if (!ctrl || !ctrl->document()) return;
+    const auto& tree = ctrl->document()->tree;
+    const auto sel = ctrl->selectedIds();
+    const int selCount = sel.size();
+    if (nodeIdx < 0 && selCount >= 1) {
+        // Resolve the selection ourselves. Pick the LOWEST-OFFSET member, not
+        // whatever the QSet hands out first: set order is not document order,
+        // so picking arbitrarily would make the same selection describe itself
+        // differently from one rebuild to the next. Resolving a multi-selection
+        // too (rather than only a lone one) is what makes this function
+        // idempotent — rebuilding never downgrades a live "hex64 x3" to the
+        // class-root form.
+        int best = -1;
+        uint64_t bestOff = 0;
+        for (const auto id : sel) {
+            const int i = tree.indexOfId(rcx::baseNodeIdFromSelId(id));
+            if (i < 0) continue;
+            if (best < 0 || tree.nodes[i].offset < bestOff) {
+                best = i;
+                bestOff = tree.nodes[i].offset;
+            }
+        }
+        nodeIdx = best;
+    }
+
+    // Gate on the node index ALONE. handleMarginClick emits nodeSelected
+    // without touching m_selIds, so an address-margin click with nothing
+    // selected is a real "this field" gesture that carries selCount == 0; a
+    // selCount floor here silently downgraded it to the class-root form.
+    const rcx::SelectionStatus st =
+        (nodeIdx >= 0 && nodeIdx < tree.nodes.size())
+            ? rcx::buildSelectionStatus(tree, nodeIdx, ctrl->viewRootId(), selCount)
+            : rcx::buildRootStatus(tree, ctrl->viewRootId());
+
+    auto* ap = findActiveSplitPane();
+    if (ap && ap->viewMode == VM_Rendered)
+        setAppStatus(QStringLiteral("Rendered: ") + st.main);
+    else
+        setAppStatus(st.main, st.dim);
 }
 
 void MainWindow::setMcpStatus(const QString& text) {
@@ -2889,24 +3056,27 @@ protected:
 // from the parent (createSplitPane) on every viewport change.
 class MinimapViewportIndicator : public QWidget {
 public:
-    MinimapViewportIndicator(QWidget* parent, const QColor& tint)
-        : QWidget(parent), m_tint(tint) {
+    explicit MinimapViewportIndicator(QWidget* parent) : QWidget(parent) {
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setAttribute(Qt::WA_NoSystemBackground);
     }
-//TODO-DELETE(MinimapViewportIndicator::setTint)     void setTint(const QColor& c) { m_tint = c; update(); }
 protected:
     void paintEvent(QPaintEvent*) override {
         QPainter p(this);
-        // Soft fill + 1px outline for clarity on dark and light themes.
-        QColor fill = m_tint; fill.setAlpha(60);
-        QColor edge = m_tint; edge.setAlpha(140);
+        // A faint neutral wash, no outline: this is "where you are", not a
+        // selection. It used to be a purple box with a bright edge, which made
+        // the map the loudest thing on the right-hand side and spent the
+        // accent on a passive indicator. Purple stays on the map's own hover.
+        //
+        // Read the tint LIVE, do not cache it at construction. That was
+        // survivable while the tint was indHoverSpan (which reads on either
+        // theme) but not now that it is theme.text, which INVERTS: a pane
+        // built under the dark theme kept #DCDCDC, and #DCDCDC at alpha 24
+        // over light paper is a ~1/255 delta, i.e. no indicator at all.
+        QColor fill = ThemeManager::instance().current().text;
+        fill.setAlpha(24);
         p.fillRect(rect(), fill);
-        p.setPen(edge);
-        p.drawRect(rect().adjusted(0, 0, -1, -1));
     }
-private:
-    QColor m_tint;
 };
 
 MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
@@ -2923,30 +3093,14 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.tabWidget->setUsesScrollButtons(false);
     pane.tabWidget->setElideMode(Qt::ElideNone);
 
-    // Style to match the top dock tab bar, with accent line on selected tab
+    // Flat tabs on the editor paper — one sheet, shared with applyTheme
+    // (rcx::paneTabStyle). The box borders are gone: the selected tab is
+    // marked only by the underline every tab family in the app uses.
     {
         const auto& t = ThemeManager::instance().current();
         QSettings s("REECLASS", "REECLASS");
-        QString editorFont = s.value("font", "JetBrains Mono").toString();
-        // Flat tabs: background matches the editor paper (no bg emphasis on
-        // selection — user-validated). Each tab has a right-border separator
-        // and a 1px bottom baseline; the SELECTED tab is marked only by a 2px
-        // accent on the BOTTOM edge (an underline), not a fill or a top line.
-        const QString paper = rcx::editorPaperColor(t).name();
-        pane.tabWidget->setStyleSheet(QStringLiteral(
-            "QTabWidget::pane { border: none; }"
-            "QTabBar { border: none; }"
-            "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none;"
-            "  border-right: 1px solid %6; border-bottom: 1px solid %6;"
-            "  border-radius: 0px; height: 26px;"
-            "  font-family: '%5'; font-size: 10pt;"
-            "}"
-            "QTabBar::tab:first { border-left: 1px solid %6; }"
-            "QTabBar::tab:selected { color: %3; border-bottom: 2px solid %4; }"
-            "QTabBar::tab:hover { color: %3; }")
-            .arg(paper, t.textMuted.name(), t.text.name(),
-                 t.indHoverSpan.name(), editorFont, t.border.name()));
+        pane.tabWidget->setStyleSheet(rcx::paneTabStyle(
+            t, s.value("font", "JetBrains Mono").toString()));
     }
 
     // Create editor via controller (parent = tabWidget for ownership)
@@ -3082,8 +3236,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Translucent rectangle overlay covering the lines currently
     // visible in the main editor. Auto-resizes when the editor is
     // scrolled or zoomed (zoom changes linesOnScreen → height changes).
-    const auto& iTheme = ThemeManager::instance().current();
-    auto* vIndicator = new MinimapViewportIndicator(mm, iTheme.indHoverSpan);
+    auto* vIndicator = new MinimapViewportIndicator(mm);
     vIndicator->hide();
 
     QsciScintilla* edSci = pane.editor->scintilla();
@@ -3095,6 +3248,9 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         int firstLine = edSci->firstVisibleLine();
         int linesOnEd = qMax(1, (int)edSci->SendScintilla(
                                     QsciScintillaBase::SCI_LINESONSCREEN));
+        // Nothing to indicate when the whole document is already on screen —
+        // a rectangle covering the entire map is noise, not information.
+        if (firstLine == 0 && linesOnEd >= total) { vIndicator->hide(); return; }
         // Convert from main-editor line indices to minimap pixel rows.
         // Each minimap line is mm->textHeight(0) tall.
         int mmLineH = mmw->textHeight(0);
@@ -3142,7 +3298,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     reclassPageLay->setContentsMargins(0, 0, 0, 0);
     reclassPageLay->setSpacing(0);
     reclassPageLay->addWidget(pane.editorContainer);
-    pane.tabWidget->addTab(pane.reclassPage, "REECLASS");  // index 0
+    pane.tabWidget->addTab(pane.reclassPage, rcx::kPaneTabs[0].name);  // "Structure"
 
     // Create per-pane rendered C++ view with find bar. Same device-exact
     // outline as the hex editor (EditorContainer) so the Code view reads as a
@@ -3258,14 +3414,14 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     codePageLay->setContentsMargins(0, 0, 0, 0);
     codePageLay->setSpacing(0);
     codePageLay->addWidget(pane.renderedContainer);
-    pane.tabWidget->addTab(pane.codePage, "Code");              // index 1
+    pane.tabWidget->addTab(pane.codePage, rcx::kPaneTabs[1].name);      // "Code"
 
     // Create Debug view: plain-text Scintilla showing composed text with visible special chars
     pane.debugView = new QsciScintilla;
     setupDebugSci(pane.debugView);
-    pane.tabWidget->addTab(pane.debugView, "Debug");            // index 2
+    pane.tabWidget->addTab(pane.debugView, rcx::kPaneTabs[2].name);     // "Debug"
 
-    // "Both" — index 3 — a real view that shows the hex editor (Reclass, 67%)
+    // "Both" — index 3 — a real view that shows the hex editor (Structure, 67%)
     // and the generated Code (33%) side by side IN THIS pane. The single tab
     // bar + corner (zoom, format/scope/gear) drive both. On entering/leaving
     // the tab the editorContainer/renderedContainer are reparented between
@@ -3273,7 +3429,11 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.bothSplitter = new QSplitter(Qt::Horizontal);
     pane.bothSplitter->setHandleWidth(1);
     pane.bothSplitter->setChildrenCollapsible(false);
-    pane.tabWidget->addTab(pane.bothSplitter, "Both");          // index 3
+    pane.tabWidget->addTab(pane.bothSplitter, rcx::kPaneTabs[3].name);  // "Both"
+    // Every tab says what it shows — the strip is the only place view mode is
+    // switched, so it has to explain itself.
+    for (int ti = 0; ti < rcx::kPaneTabCount && ti < pane.tabWidget->count(); ++ti)
+        pane.tabWidget->setTabToolTip(ti, QString::fromLatin1(rcx::kPaneTabs[ti].tip));
 
     // Corner widget: format combo + gear icon
     {
@@ -3282,9 +3442,12 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         QString ef = cs.value("font", "JetBrains Mono").toString();
 
         auto* cornerWidget = new QWidget;
+        // Named so rcx::paneTabStyle can give it the strip's surface — see the
+        // #rcxPaneCorner rule there.
+        cornerWidget->setObjectName(QStringLiteral("rcxPaneCorner"));
         // Pin the corner strip to the SAME height as the tabs (26px, set in
-        // the QTabBar::tab stylesheet above) so AlignVCenter on its children
-        // actually centers them against the Reclass/Code/Debug tab text —
+        // rcx::paneTabStyle) so AlignVCenter on its children actually
+        // centers them against the Structure/Code/Debug tab text —
         // otherwise QTabWidget gives the shorter corner widget its own height
         // and the row floats above the tab baseline.
         cornerWidget->setFixedHeight(26);
@@ -3315,7 +3478,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         pane.fmtGear->setFixedSize(22, 22);
         pane.fmtGear->setToolTip("Generator Options");
         pane.fmtGear->setStyleSheet(QStringLiteral(
-            "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
+            "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 0px; }"
             "QToolButton:hover { background: %4; }")
             .arg(ct.background.name(), ct.textMuted.name(), ct.border.name(),
                  ct.hover.name()));
@@ -3340,7 +3503,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         // Match the rendered tab text: the tabs use font-size 10pt + the editor
         // font family via the QTabBar stylesheet above (NOT tabBar()->font(),
         // which returns the smaller default widget font). Mirror that here so
-        // "Zoom 100%" reads at the same size as Reclass/Code/Debug.
+        // "Zoom 100%" reads at the same size as Structure/Code/Debug.
         const QFont tabFont(ef, 10);
         auto* zoomCap = new QLabel(QStringLiteral("Zoom"), cornerWidget);
         zoomCap->setFont(tabFont);
@@ -3355,10 +3518,12 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         // moves the centre down by half = 3px. Only the slider shifts.
         pane.zoomSlider->setContentsMargins(0, 6, 0, 0);
         pane.zoomSlider->setToolTip(QStringLiteral("Zoom (also Ctrl+scroll)"));
+        // Square corners, and a 3x11 bar for the handle instead of a 9px
+        // puck: the strip has no other rounded shape on it.
         pane.zoomSlider->setStyleSheet(QStringLiteral(
-            "QSlider::groove:horizontal { height: 3px; background: %1; border-radius: 1px; }"
-            "QSlider::handle:horizontal { background: %2; width: 9px; margin: -4px 0;"
-            " border-radius: 4px; }"
+            "QSlider::groove:horizontal { height: 3px; background: %1; border-radius: 0px; }"
+            "QSlider::handle:horizontal { background: %2; width: 3px; height: 11px;"
+            " margin: -4px 0; border-radius: 0px; }"
             "QSlider::handle:horizontal:hover { background: %3; }")
             .arg(ct.border.name(), ct.textMuted.name(), ct.text.name()));
         pane.zoomLabel = new QLabel(QStringLiteral("100%"), cornerWidget);
@@ -3436,7 +3601,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     pane.tabWidget->setCurrentIndex(0);
     pane.viewMode = VM_Reclass;
 
-    // Right-click on the Reclass/Code/Debug tab bar → quick split/unsplit
+    // Right-click on the Structure/Code/Debug tab bar → quick split/unsplit
     // and tab switching. The split offers go through the same splitView
     // path as Ctrl+\, so the splitter flips to vertical (south stack) and
     // a new pane appends below.
@@ -3466,7 +3631,7 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
     // Add to splitter
     tab.splitter->addWidget(pane.tabWidget);
 
-    // Connect per-pane page switching (driven by status bar buttons via setViewMode)
+    // Connect per-pane page switching (driven by the pane view tabs)
     QTabWidget* tw = pane.tabWidget;
     connect(tw, &QTabWidget::currentChanged, this, [this, tw](int index) {
         SplitPane* p = findPaneByTabWidget(tw);
@@ -3495,13 +3660,6 @@ MainWindow::SplitPane MainWindow::createSplitPane(TabState& tab) {
         else if (index == 1) p->viewMode = VM_Rendered;
         else if (index == 3) p->viewMode = VM_Both;
         else                 p->viewMode = VM_Debug;
-        if (p == findActiveSplitPane()) syncViewButtons(p->viewMode);
-
-        // Sync status bar buttons if this is the active pane
-        auto* tab = activeTab();
-        if (tab && tab->activePaneIdx >= 0 && tab->activePaneIdx < tab->panes.size()
-            && &tab->panes[tab->activePaneIdx] == p)
-            syncViewButtons(p->viewMode);
 
         // Refresh the views the new layout shows: Code render for Code/Both,
         // debug text for Debug. (The editor/Reclass side is always live.)
@@ -3783,13 +3941,6 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
         if (visible) {
             m_activeDocDock = dock;
             updateWindowTitle();
-            // Sync view toggle buttons to this tab's active pane
-            auto it = m_tabs.find(dock);
-            if (it != m_tabs.end()) {
-                auto& tab = *it;
-                if (tab.activePaneIdx >= 0 && tab.activePaneIdx < tab.panes.size())
-                    syncViewButtons(tab.panes[tab.activePaneIdx].viewMode);
-            }
             refreshBookmarksDock();
             updateSourceChip();
         }
@@ -3859,109 +4010,7 @@ QDockWidget* MainWindow::createTab(RcxDocument* doc) {
 
     connect(ctrl, &RcxController::nodeSelected,
             this, [this, ctrl, dock](int nodeIdx) {
-        if (nodeIdx >= 0 && nodeIdx < ctrl->document()->tree.nodes.size()) {
-            auto& tree = ctrl->document()->tree;
-            auto& node = tree.nodes[nodeIdx];
-
-            // Build "StructName.fieldName" — walk up to root struct
-            QString rootName;
-            if (node.parentId == 0) {
-                // Root node — use its own structTypeName or name
-                rootName = node.structTypeName.isEmpty() ? node.name : node.structTypeName;
-            } else {
-                // Walk up to root
-                int cur = nodeIdx;
-                while (cur >= 0 && tree.nodes[cur].parentId != 0)
-                    cur = tree.indexOfId(tree.nodes[cur].parentId);
-                if (cur >= 0) {
-                    auto& root = tree.nodes[cur];
-                    rootName = root.structTypeName.isEmpty() ? root.name : root.structTypeName;
-                }
-            }
-
-            auto* km = rcx::kindMeta(node.kind);
-            QString typeName = km ? QString::fromLatin1(km->typeName) : QStringLiteral("?");
-
-            int selCount = ctrl->selectedIds().size();
-            QString main;
-            if (selCount > 1) {
-                main = QStringLiteral("%1 \u00D7%2").arg(typeName).arg(selCount);
-            } else if (node.parentId == 0) {
-                main = rootName;
-            } else if (!rootName.isEmpty()) {
-                main = rootName + "." + node.name;
-            } else {
-                main = node.name;
-            }
-
-            QString dimPart;
-            if (selCount <= 1)
-                dimPart = QString("  +0x%1").arg(node.offset, 2, 16, QChar('0'));
-
-            // Show keyboard hints with variant position for non-container nodes
-            {
-                int sz = sizeForKind(node.kind);
-                if (sz > 0) {
-                    // Build filtered variant list (matches what ←→ actually cycles through)
-                    bool curIsString = rcx::isStringKind(node.kind);
-                    bool curIsVector = rcx::isVectorKind(node.kind);
-                    int pos = 0, total = 0;
-                    for (const auto& m : rcx::kKindMeta) {
-                        if (m.size != sz || rcx::isContainerKind(m.kind)) continue;
-                        if (!curIsString && rcx::isStringKind(m.kind)) continue;
-                        if (!curIsVector && rcx::isVectorKind(m.kind)) continue;
-                        total++;
-                        if (m.kind == node.kind) pos = total;
-                    }
-                    if (total > 1)
-                        dimPart += QStringLiteral("  \u2190\u2192 %1 (%2/%3)")
-                            .arg(typeName).arg(pos).arg(total);
-                    else if (total <= 1 && sz > 0)
-                        dimPart += QStringLiteral("  (no variants for %1 bytes)").arg(sz);
-                    dimPart += QStringLiteral("  P=ptr F=float S=int U=uint");
-                }
-            }
-
-            // Append struct/enum info with name
-            {
-                uint64_t sizeRootId = ctrl->viewRootId();
-                if (sizeRootId == 0) {
-                    for (const auto& n : ctrl->document()->tree.nodes)
-                        if (n.parentId == 0 && n.kind == rcx::NodeKind::Struct)
-                            { sizeRootId = n.id; break; }
-                }
-                if (sizeRootId != 0) {
-                    int ri = ctrl->document()->tree.indexOfId(sizeRootId);
-                    if (ri >= 0) {
-                        const auto& rn = ctrl->document()->tree.nodes[ri];
-                        QString rname = rn.structTypeName.isEmpty() ? rn.name : rn.structTypeName;
-                        if (rn.isEnum()) {
-                            int memberCount = rn.enumMembers.size();
-                            // Divider before the class segment - without it the
-                            // key hints ran straight into the name ("U=uintFoo: 0x88").
-                            if (!dimPart.isEmpty()) dimPart += QStringLiteral("  ·");
-                            dimPart += QStringLiteral("  %1: %2 members")
-                                .arg(rname).arg(memberCount);
-                        } else {
-                            int structSz = ctrl->document()->tree.structSpan(sizeRootId);
-                            if (structSz > 0) {
-                                if (!dimPart.isEmpty()) dimPart += QStringLiteral("  ·");
-                                dimPart += QStringLiteral("  %1: 0x%2 (%3)")
-                                    .arg(rname)
-                                    .arg(QString::number(structSz, 16).toUpper())
-                                    .arg(structSz);
-                            }
-                        }
-                    }
-                }
-            }
-
-            auto* ap = findActiveSplitPane();
-            if (ap && ap->viewMode == VM_Rendered)
-                setAppStatus(QString("Rendered: %1").arg(main));
-            else
-                setAppStatus(main, dimPart);
-        }
+        refreshSelectionStatus(ctrl, nodeIdx);
         // Update all rendered/debug panes on selection change
         auto it = m_tabs.find(dock);
         if (it != m_tabs.end()) {
@@ -4416,6 +4465,64 @@ void MainWindow::reconcileDockTabBars() {
     m_reconciling = false;
 }
 
+// A source icon on every tab says nothing when every tab has the SAME source
+// — the status chip already owns "which source am I on". Paint one only where
+// a tab DIFFERS from the active tab: a single-source session shows none, and
+// the odd tab out is impossible to miss. The raw identity stays on the dock
+// (rcxSourceIconRaw/Raw); rcxSourceIcon is the DERIVED, painted property that
+// CE_TabBarTabLabel reads.
+static void applyDocTabSourceIconVisibility(const QVector<QDockWidget*>& docks,
+                                            QDockWidget* active) {
+    const QString aIcon = active ? active->property("rcxSourceIconRaw").toString()
+                                 : QString();
+    const bool aLive = active && active->property("rcxSourceLiveRaw").toBool();
+    for (auto* d : docks) {
+        if (!d) continue;
+        const QString icon = d->property("rcxSourceIconRaw").toString();
+        const bool    live = d->property("rcxSourceLiveRaw").toBool();
+        const bool differs = (icon != aIcon) || (live != aLive);
+        d->setProperty("rcxSourceIcon", differs ? icon : QString());
+        d->setProperty("rcxSourceLive", live);
+    }
+}
+
+// ── Doc-tab close button: × only where it can be clicked ──
+// A row of five tabs used to be a row of five ×. Closing is a per-tab action,
+// so the button belongs on the tab you are on or the tab you are pointing at.
+// Only the inner button is hidden: QTabBar sizes a tab from its right widget,
+// so hiding the wrapper would make tabs twitch narrower under the cursor.
+static void updateDocTabCloseButtons(QTabBar* bar) {
+    if (!bar) return;
+    const QPoint pos = bar->mapFromGlobal(QCursor::pos());
+    const int hovered = bar->rect().contains(pos) ? bar->tabAt(pos) : -1;
+    for (int i = 0; i < bar->count(); ++i) {
+        auto* btns = qobject_cast<DockTabButtons*>(
+            bar->tabButton(i, QTabBar::RightSide));
+        if (!btns || !btns->closeBtn) continue;
+        btns->closeBtn->setVisible(i == bar->currentIndex() || i == hovered);
+    }
+}
+
+// Hover tracking for the above — a local concern, kept out of the (already
+// long) MainWindow::eventFilter. One watcher per tab bar, owned by it.
+class DocTabHoverWatcher : public QObject {
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject* o, QEvent* e) override {
+        switch (e->type()) {
+            case QEvent::HoverEnter:
+            case QEvent::HoverMove:
+            case QEvent::HoverLeave:
+            case QEvent::Leave:
+                updateDocTabCloseButtons(qobject_cast<QTabBar*>(o));
+                break;
+            default: break;
+        }
+        return QObject::eventFilter(o, e);
+    }
+};
+
 void MainWindow::refreshDocTabSourceIcon(QDockWidget* docDock) {
     if (!docDock) return;
     auto it = m_tabs.find(docDock);
@@ -4445,8 +4552,10 @@ void MainWindow::refreshDocTabSourceIcon(QDockWidget* docDock) {
     // Store on the dock object itself — survives any tab-reorder /
     // tabify event because QObject properties are bound to the dock,
     // not to a tab index. CE_TabBarTabLabel looks these up by tabText.
-    docDock->setProperty("rcxSourceIcon", iconPath);
-    docDock->setProperty("rcxSourceLive", live);
+    docDock->setProperty("rcxSourceIconRaw", iconPath);
+    docDock->setProperty("rcxSourceLiveRaw", live);
+    // The painted properties are derived from the whole set of doc tabs.
+    applyDocTabSourceIconVisibility(m_docDocks, m_activeDocDock);
     for (auto* tabBar : findChildren<QTabBar*>()) {
         if (tabBar->parent() != this) continue;
         for (int i = 0; i < tabBar->count(); ++i) {
@@ -4522,6 +4631,15 @@ void MainWindow::setupDockTabBars() {
                 break;
             }
         }
+        // The "+" is a command like any other, so it gets a command's tooltip
+        // — and a tooltip has to name what THIS button does. It calls
+        // project_new() bare (no classKeyword, forceFreshDoc = false), which
+        // appends a STRUCT to the CURRENT project; Ctrl+N is newClass(), a
+        // brand-new project with its own buffer. Advertising that shortcut
+        // here promised a different command than the click performs.
+        for (int i = 0; i < tabBar->count(); ++i)
+            if (tabBar->tabText(i) == sentinelTitle)
+                tabBar->setTabToolTip(i, QStringLiteral("New struct in this project"));
 
         // Helper: find any dock widget by title (doc tabs + sidebar docks)
         auto findDockByTitle = [this](const QString& title) -> QDockWidget* {
@@ -4548,6 +4666,9 @@ void MainWindow::setupDockTabBars() {
                 // a distinctly contrasting shade that paints visibly on
                 // top of the already-hovered tab.
                 btns->applyTheme(theme.text, theme.selected);
+                // Freeze the wrapper's size while it still contains a visible
+                // button, so hiding the × (below) never resizes the tab.
+                btns->setFixedSize(btns->sizeHint());
                 // Resolve the dock at CLICK time by the button's CURRENT tab
                 // text — never bind the dock pointer at install time. Doc
                 // docks are destroyed on close (WA_DeleteOnClose) and Qt
@@ -4592,10 +4713,37 @@ void MainWindow::setupDockTabBars() {
             if (target && m_docDocks.contains(target))
                 refreshDocTabSourceIcon(target);
         }
+        // Newly installed buttons start hidden unless their tab is current.
+        updateDocTabCloseButtons(tabBar);
 
         // Middle-click close + context menu + drag detection (install only once)
         if (tabBar->contextMenuPolicy() == Qt::CustomContextMenu) continue;
         tabBar->installEventFilter(this);
+        // × follows the current/hovered tab; the source icons follow whichever
+        // tab is current (m_activeDocDock may not have caught up yet when
+        // currentChanged fires, so resolve the reference from the bar itself).
+        tabBar->installEventFilter(new DocTabHoverWatcher(tabBar));
+        connect(tabBar, &QTabBar::currentChanged, this, [this, tabBar](int idx) {
+            updateDocTabCloseButtons(tabBar);
+            QDockWidget* cur = nullptr;
+            const QString title = (idx >= 0) ? tabBar->tabText(idx) : QString();
+            for (auto* d : m_docDocks)
+                if (d->windowTitle() == title) { cur = d; break; }
+            // ...and so does every other piece of chrome that names the active
+            // document. This is THE tab-click path: a tabified dock switch
+            // reaches m_activeDocDock through QDockWidget::visibilityChanged,
+            // which assigns the member DIRECTLY, and the focusChanged fallback
+            // is then suppressed by its own (m_activeDocDock != dk) guard — so
+            // without this the status segment kept the previous tab's text.
+            // setActiveDocDock re-derives the icons too; the else covers the
+            // sentinel / non-doc tab, where there is no active doc to name.
+            if (cur && m_tabs.contains(cur))   setActiveDocDock(cur);
+            else if (cur)                      applyDocTabSourceIconVisibility(m_docDocks, cur);
+            // cur == nullptr means this is a SIDEBAR tab bar (or the sentinel):
+            // there is no new active document, so leave the doc chrome alone
+            // rather than re-deriving the icons against "no active tab".
+            tabBar->update();
+        });
         if (m_dockDragDetector)
             tabBar->installEventFilter(m_dockDragDetector);
         tabBar->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -4740,6 +4888,19 @@ void MainWindow::setupDockTabBars() {
     if (m_borderOverlay) {
         m_borderOverlay->setGeometry(rect());
         m_borderOverlay->raise();
+    }
+
+    // Whatever just happened to the tab strip (a tab created, closed, moved,
+    // docked or undocked), the status segment has to describe the document
+    // that is on screen NOW. QTabBar::currentChanged covers a plain tab click,
+    // but not the cases where the bar itself is rebuilt or destroyed: creating
+    // the first tab left the segment EMPTY, and closing the active one left it
+    // naming the class that had just gone away. refreshSelectionStatus is a
+    // pure rebuild from the controller's current selection, so calling it on
+    // every reconcile is idempotent — it never invents or loses a selection.
+    if (m_activeDocDock) {
+        if (auto it = m_tabs.find(m_activeDocDock); it != m_tabs.end() && it->ctrl)
+            refreshSelectionStatus(it->ctrl, -1);
     }
 }
 
@@ -5259,7 +5420,7 @@ void MainWindow::duplicateNodeAction() {
 void MainWindow::splitView() {
     auto* tab = activeTab();
     if (!tab) return;
-    // Split south (Reclass on top, Code below). The splitter is created
+    // Split south (Structure on top, Code below). The splitter is created
     // Qt::Horizontal in createTab so the workspace dock layout has a
     // natural left-right metaphor; for in-tab pane splits the user
     // wants stacked vertically so they can read full-width rows of
@@ -5830,22 +5991,14 @@ void MainWindow::applyTheme(const Theme& theme) {
         }
     }
 
-    // Restyle per-pane view tab bars (Reclass / Code)
+    // Restyle per-pane view tab bars (Structure / Code / Debug / Both).
+    // The literal that used to live here disagreed with the creation-time one
+    // — chrome background instead of paper, a filled selected tab and a 3px
+    // TOP accent — so the strip changed grammar on every theme switch. Both
+    // sites call rcx::paneTabStyle now.
     {
         QString editorFont = QSettings("REECLASS", "REECLASS").value("font", "JetBrains Mono").toString();
-        QString paneTabStyle = QStringLiteral(
-            "QTabWidget::pane { border: none; }"
-            "QTabBar { border: none; }"
-            "QTabBar::tab {"
-            "  background: %1; color: %2; padding: 0px 16px; border: none; border-radius: 0px; height: 26px;"
-            "  font-family: '%7'; font-size: 10pt;"
-            "}"
-            "QTabBar::tab:selected { color: %3; background: %4;"
-            "  border-top: 3px solid %6; padding-top: -3px; }"
-            "QTabBar::tab:hover { color: %3; background: %5; }")
-            .arg(theme.background.name(), theme.textMuted.name(), theme.text.name(),
-                 theme.backgroundAlt.name(), theme.hover.name(), theme.indHoverSpan.name(),
-                 editorFont);
+        const QString tabSheet = rcx::paneTabStyle(theme, editorFont);
         QString comboStyle = QStringLiteral(
             "QComboBox { background: %1; color: %2; border: 1px solid %3;"
             " padding: 1px 6px; font-family: '%6'; font-size: 9pt; }"
@@ -5859,14 +6012,14 @@ void MainWindow::applyTheme(const Theme& theme) {
                  theme.backgroundAlt.name(), theme.hover.name(), editorFont,
                  theme.borderFocused.name());
         QString gearStyle = QStringLiteral(
-            "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 2px; }"
+            "QToolButton { background: %1; color: %2; border: 1px solid %3; border-radius: 0px; }"
             "QToolButton:hover { background: %4; }")
             .arg(theme.background.name(), theme.textMuted.name(), theme.border.name(),
                  theme.hover.name());
         for (auto it = m_tabs.begin(); it != m_tabs.end(); ++it) {
             for (auto& pane : it->panes) {
                 if (pane.tabWidget)
-                    pane.tabWidget->setStyleSheet(paneTabStyle);
+                    pane.tabWidget->setStyleSheet(tabSheet);
                 if (pane.fmtCombo)
                     pane.fmtCombo->setStyleSheet(comboStyle);
                 if (pane.scopeCombo)
@@ -5898,11 +6051,12 @@ void MainWindow::applyTheme(const Theme& theme) {
         m_statusLabel->colDim    = theme.textMuted;
         m_statusLabel->colBright = theme.indHoverSpan;
         m_statusLabel->colSep    = theme.border;
+        m_statusLabel->colHover  = theme.text;
     }
     // Status bar chrome
     {
         auto* fsb = static_cast<FlatStatusBar*>(statusBar());
-        fsb->setTopLineColor(theme.border);
+        fsb->setTopLineColor(rcx::containerBorderColor(theme));
         fsb->setDividerColor(theme.border);
     }
     // Resize grip (direct child of main window, not in status bar)
@@ -5937,89 +6091,24 @@ void MainWindow::applyTheme(const Theme& theme) {
             .arg(wsPaper.name()));
         m_workspaceTree->viewport()->update();
     }
-    if (m_workspaceSearch) {
-        m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2;"
-            " border: none;"
-            " padding: 4px 8px 4px 2px; }"
-            "QLineEdit QToolButton { padding: 0px 8px; }"
-            "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(wsPaper.name(), theme.textDim.name(),
-                 theme.hover.name()));
-    }
+    if (m_workspaceSearch) m_workspaceSearch->applyTheme(theme);
 
     // Bookmarks panel shares the editor-paper surface (same as the workspace).
     themeBookmarksContent();
 
-    // Workspace separator theme update. (A "workspaceTabBar" lookup used to
-    // live here from the pre-dock-unification layout, but no widget carries
-    // that objectName anymore — the dock content is just the search box +
-    // tree + separators — so the block never executed and was removed.)
-    if (m_workspaceDock) {
-        if (auto* sep = m_workspaceDock->findChild<HairlineSeparator*>("workspaceSep")) {
-            sep->setColor(theme.border);
-        }
-        if (auto* sep = m_workspaceDock->findChild<HairlineSeparator*>("workspaceSepTop")) {
-            sep->setColor(theme.border);
-        }
-    }
-
-    // Dock header: restyle title label, header background, close button, grip
-    if (m_dockTitleLabel)
-        m_dockTitleLabel->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.textDim.name()));
-    if (auto* header = m_workspaceDock ? m_workspaceDock->findChild<DockTitleBar*>("workspaceHeader") : nullptr) {
-        header->setBackground(theme.background);
-    }
+    // Dock headers: one shared control, so one call each. (This block used to
+    // be ~55 lines of four divergent hand-rolled title bars — including two
+    // U+2715 text-glyph close buttons that turned indHoverSpan on hover, i.e.
+    // purple spent on an ordinary close affordance.)
+    for (auto* h : {m_workspaceHeader, m_scanDockHeader, m_symDockHeader, m_bmDockHeader})
+        if (h) h->applyTheme(theme);
     updateWorkspaceDockEdge();  // re-arm the docked-only right hairline in the new theme
-    if (m_dockCloseBtn)
-        m_dockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { border: none; padding: 0px; }"
-            "QToolButton:hover { background: %1; }")
-            .arg(theme.hover.name()));
-    if (m_dockGrip)
-        m_dockGrip->setGripColor(theme.textFaint);
 
     // Scanner dock
     if (m_scannerPanel)
         m_scannerPanel->applyTheme(theme);
-    if (m_scanDockTitle)
-        m_scanDockTitle->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.textDim.name()));
-    if (auto* titleBar = m_scannerDock ? m_scannerDock->titleBarWidget() : nullptr) {
-        QPalette tbPal = titleBar->palette();
-        tbPal.setColor(QPalette::Window, theme.backgroundAlt);
-        titleBar->setPalette(tbPal);
-    }
-    if (m_scanDockCloseBtn)
-        m_scanDockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(theme.textDim.name(), theme.indHoverSpan.name()));
-    if (m_scanDockGrip)
-        m_scanDockGrip->setGripColor(theme.textFaint);
 
     // Symbols dock
-    if (m_symDockTitle)
-        m_symDockTitle->setStyleSheet(
-            QStringLiteral("color: %1;").arg(theme.textDim.name()));
-    if (auto* titleBar = m_symbolsDock ? m_symbolsDock->titleBarWidget() : nullptr) {
-        QPalette tbPal = titleBar->palette();
-        tbPal.setColor(QPalette::Window, theme.backgroundAlt);
-        titleBar->setPalette(tbPal);
-    }
-    if (m_symDockCloseBtn)
-        m_symDockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(theme.textDim.name(), theme.indHoverSpan.name()));
-    if (m_symDownloadBtn)
-        m_symDownloadBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { border: none; padding: 2px 4px; }"
-            "QToolButton:hover { background: %1; }")
-            .arg(theme.hover.name()));
-    if (m_symDockGrip)
-        m_symDockGrip->setGripColor(theme.textFaint);
     if (m_unifiedSymbols)
         m_unifiedSymbols->applyTheme(theme);
 
@@ -6221,10 +6310,12 @@ void MainWindow::setEditorFont(const QString& fontName) {
         wf.setFixedPitch(true);
         if (m_workspaceTree)
             m_workspaceTree->setFont(wf);
-        if (m_dockTitleLabel)
-            m_dockTitleLabel->setFont(wf);
+        // Both shared panel filter boxes; PanelSearchField re-reads the same
+        // face from QSettings on applyTheme, this just keeps them in step now.
         if (m_workspaceSearch)
             m_workspaceSearch->setFont(wf);
+        if (m_bookmarksFilter)
+            m_bookmarksFilter->setFont(wf);
         if (m_statusLabel) {
             m_statusLabel->setFont(wf);
             auto* fsb = static_cast<FlatStatusBar*>(statusBar());
@@ -6234,10 +6325,11 @@ void MainWindow::setEditorFont(const QString& fontName) {
     // Sync scanner panel font
     if (m_scannerPanel)
         m_scannerPanel->setEditorFont(f);
-    if (m_scanDockTitle)
-        m_scanDockTitle->setFont(f);
-    if (m_symDockTitle)
-        m_symDockTitle->setFont(f);
+    // Dock TITLES are chrome, not document text — they follow the face but
+    // never the 12-pt editor size (the scanner title used to, which is why it
+    // sat two sizes above every other dock title).
+    for (auto* h : {m_workspaceHeader, m_scanDockHeader, m_symDockHeader, m_bmDockHeader})
+        if (h) h->applyTheme(ThemeManager::instance().current());
     if (m_unifiedSymbols)
         m_unifiedSymbols->applyTheme(ThemeManager::instance().current());
     // Sync doc dock float title fonts
@@ -6255,7 +6347,7 @@ void MainWindow::setEditorFont(const QString& fontName) {
                 tabBar->update();
             }
         }
-        // Pane tab bars (Reclass / Code) — re-apply stylesheet with new font
+        // Pane tab bars (Structure / Code) — re-apply stylesheet with new font
         // (stylesheet overrides setFont, so font must be in the CSS)
         applyTheme(ThemeManager::instance().current());
     }
@@ -6327,13 +6419,17 @@ void MainWindow::createRibbon() {
     m_ribbon = new RibbonBar(this);
     m_ribbon->setLabelMode(RibbonBar::LabelMode(
         s.value("ribbonLabels", int(RibbonBar::LabelMode::Auto)).toInt()));
-    m_ribbon->setCurrentTab(s.value("ribbonTab", QStringLiteral("modify")).toString());
-    m_ribbon->setMinimized(s.value("ribbonMinimized", false).toBool());
+    // Home is the first-run tab (it is what a new user needs); a persisted
+    // choice still wins.
+    m_ribbon->setCurrentTab(s.value("ribbonTab", QStringLiteral("home")).toString());
     connect(m_ribbon, &RibbonBar::currentTabChanged, this, [](const QString& id) {
         QSettings("REECLASS", "REECLASS").setValue("ribbonTab", id);
     });
-    connect(m_ribbon, &RibbonBar::minimizedChanged, this, [](bool on) {
-        QSettings("REECLASS", "REECLASS").setValue("ribbonMinimized", on);
+    // The chevron and the tab double-click go through the SAME helper as the
+    // menu, so all three write the one `ribbonState` key.
+    connect(m_ribbon, &RibbonBar::minimizedChanged, this, [this](bool on) {
+        if (m_ribbonState == rcx::RibbonHidden) return;
+        applyRibbonState(on ? int(rcx::RibbonCollapsed) : int(rcx::RibbonFull));
     });
 
     m_ribbonHost = new QToolBar(QStringLiteral("Ribbon"), this);
@@ -6341,14 +6437,23 @@ void MainWindow::createRibbon() {
     m_ribbonHost->setMovable(false);
     m_ribbonHost->setFloatable(false);
     m_ribbonHost->setAllowedAreas(Qt::TopToolBarArea);
-    m_ribbonHost->setContextMenuPolicy(Qt::PreventContextMenu);
     m_ribbonHost->setFocusPolicy(Qt::NoFocus);
     m_ribbonHost->addWidget(m_ribbon);
     addToolBar(Qt::TopToolBarArea, m_ribbonHost);
+    // Right-click anywhere on the strip = the View > Ribbon submenu. The host
+    // used to swallow the click entirely (PreventContextMenu) to keep Qt's
+    // stock toolbar menu away; routing it to our own submenu is what the user
+    // expects from a ribbon.
+    for (QWidget* w : {static_cast<QWidget*>(m_ribbonHost), static_cast<QWidget*>(m_ribbon)}) {
+        w->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(w, &QWidget::customContextMenuRequested, this, [this, w](const QPoint& pos) {
+            if (m_ribbonMenu) m_ribbonMenu->popup(w->mapToGlobal(pos));
+        });
+    }
     // Qt's default createPopupMenu() would list the host's own toggle action
-    // (bypassing View > Ribbon and the showRibbon setting) - keep it out.
+    // (bypassing View > Ribbon and the persisted state) - keep it out.
     m_ribbonHost->toggleViewAction()->setVisible(false);
-    m_ribbonHost->setVisible(s.value("showRibbon", true).toBool());
+    applyRibbonState(rcx::ribbonStateFromSettings(s), /*persist=*/false);
 #ifdef __APPLE__
     setUnifiedTitleAndToolBarOnMac(false);   // would swallow the ribbon into the native title bar
 #endif
@@ -6368,23 +6473,22 @@ void MainWindow::createRibbon() {
         if (act) m_ribbon->setAction(QLatin1String(id), act);
         else if (QAction* own = m_ribbon->action(QLatin1String(id))) own->setVisible(false);
     };
-    bind("home.project.newclass",  m_actNewClass);
-    bind("home.project.open",      m_actOpen);
-    bind("home.project.save",      m_actSave);
-    bind("home.project.newstruct", m_actNewStruct);
-    bind("home.project.newenum",   m_actNewEnum);
-    bind("home.project.close",     m_actClose);
-    bind("home.process.refresh",   m_actRefresh);
-    bind("home.process.goto",      m_actGoto);
-    bind("home.code.split",        m_actSplit);
-    bind("home.tools.scanner",     m_actScanner);
-    bind("home.tools.symbols",     m_actSymbols);
-    bind("home.tools.bookmarks",   m_actBookmarks);
-    bind("home.tools.console",     m_actConsole);
-    bind("home.tools.rtti",        m_actRtti);
+    bind("home.class.newclass",   m_actNewClass);
+    bind("home.class.newstruct",  m_actNewStruct);
+    bind("home.class.newenum",    m_actNewEnum);
+    bind("home.file.open",        m_actOpen);
+    bind("home.file.save",        m_actSave);
+    bind("home.file.close",       m_actClose);
+    bind("home.source.refresh",   m_actRefresh);
+    bind("home.source.goto",      m_actGoto);
+    bind("home.panels.split",     m_actSplit);
+    bind("home.panels.scanner",   m_actScanner);
+    bind("home.panels.symbols",   m_actSymbols);
+    bind("home.panels.bookmarks", m_actBookmarks);
+    bind("home.panels.console",   m_actConsole);
 
-    // Drop-downs anchored under their buttons: Attach -> Data Source menu,
-    // Generate -> Export menu.
+    // Drop-downs anchored under their ▾ buttons: Source -> Data Source menu,
+    // Export -> Export menu.
     auto popupUnder = [this](const char* id, QMenu* menu) {
         if (!menu) return;
         const QRect r = m_ribbon->itemRect(QLatin1String(id));
@@ -6392,26 +6496,42 @@ void MainWindow::createRibbon() {
                                      : m_ribbon->mapToGlobal(r.bottomLeft() + QPoint(0, 1));
         menu->popup(at);
     };
-    if (QAction* a = m_ribbon->action(QStringLiteral("home.process.attach")))
+    if (QAction* a = m_ribbon->action(QStringLiteral("home.source.attach")))
         connect(a, &QAction::triggered, this,
-                [this, popupUnder]() { popupUnder("home.process.attach", m_sourceMenu); });
-    if (QAction* a = m_ribbon->action(QStringLiteral("home.code.generate")))
+                [this, popupUnder]() { popupUnder("home.source.attach", m_sourceMenu); });
+    if (QAction* a = m_ribbon->action(QStringLiteral("home.file.export")))
         connect(a, &QAction::triggered, this,
-                [this, popupUnder]() { popupUnder("home.code.generate", m_exportMenu); });
+                [this, popupUnder]() { popupUnder("home.file.export", m_exportMenu); });
 
-    // View-mode buttons have no menu equivalent today.
-    m_actCodeView = new QAction(QStringLiteral("Code"), this);
-    m_actCodeView->setCheckable(true);   // checked state = the ribbon's underline
-    m_actCodeView->setToolTip(QStringLiteral("Show the generated C++ for the active class"));
-    connect(m_actCodeView, &QAction::triggered, this, [this]() { setViewMode(VM_Rendered); });
-    m_actBothView = new QAction(QStringLiteral("Both"), this);
-    m_actBothView->setCheckable(true);
-    m_actBothView->setToolTip(QStringLiteral("Structure and generated code side by side"));
-    connect(m_actBothView, &QAction::triggered, this, [this]() { setViewMode(VM_Both); });
-    bind("home.code.codeview", m_actCodeView);
-    bind("home.code.bothview", m_actBothView);
+    // RTTI moved to Modify > Selection (it acts on the selected pointer, not
+    // on the project). RibbonActions owns the id so it gets an enabled
+    // predicate; the op stays on the Tools menu action.
+    connect(m_ribbonActions, &RibbonActions::rttiRequested, this,
+            [this]() { if (m_actRtti) m_actRtti->trigger(); });
+
+    // Undo / Redo live in the title strip now — same actions, no ribbon panel.
+    if (m_titleBar)
+        m_titleBar->setQuickActions(m_ribbonActions->action(QStringLiteral("edit.undo")),
+                                    m_ribbonActions->action(QStringLiteral("edit.redo")));
 
     syncRibbonController();
+}
+
+// The one place ribbon visibility / collapse is decided: menu radios, the
+// Ctrl+F1 toggle, the strip's chevron and the tab double-click all land here,
+// so the persisted `ribbonState` can never disagree with what is on screen.
+void MainWindow::applyRibbonState(int state, bool persist) {
+    if (state < rcx::RibbonFull || state > rcx::RibbonHidden) state = rcx::RibbonFull;
+    m_ribbonState = state;
+    if (m_ribbon) {
+        QSignalBlocker block(m_ribbon);   // minimizedChanged would re-enter
+        m_ribbon->setMinimized(state != rcx::RibbonFull);
+    }
+    if (m_ribbonHost) m_ribbonHost->setVisible(state != rcx::RibbonHidden);
+    if (m_ribbonStateGroup)
+        for (QAction* a : m_ribbonStateGroup->actions())
+            a->setChecked(a->data().toInt() == state);
+    if (persist) QSettings("REECLASS", "REECLASS").setValue("ribbonState", state);
 }
 
 // Point the ribbon's enabled-state tracking at the active tab's controller.
@@ -6421,17 +6541,21 @@ void MainWindow::syncRibbonController() {
     RcxController* c = activeController();
     if (m_ribbonActions->activeController() != c)
         m_ribbonActions->setActiveController(c);
-    const bool hasTab = (c != nullptr);
-    if (m_actCodeView) m_actCodeView->setEnabled(hasTab);
-    if (m_actBothView) m_actBothView->setEnabled(hasTab);
-    // Mirror the active pane's view mode into the checkable Code / Both pair.
-    auto* pane = hasTab ? findActiveSplitPane() : nullptr;
-    syncViewButtons(pane ? pane->viewMode : VM_Reclass);
 }
 
 void MainWindow::setActiveDocDock(QDockWidget* dock) {
     m_activeDocDock = dock;
     updateWindowTitle();      // chains updateScannerTitle() + updateSourceChip()
+    // ...and so does the status segment: without this it kept the last
+    // selection ANY tab made and went stale the moment you switched tabs.
+    if (auto it = m_tabs.find(dock); it != m_tabs.end() && it->ctrl)
+        refreshSelectionStatus(it->ctrl, -1);
+    // The painted source icons are DERIVED from "differs from the active tab",
+    // so they go stale the moment the active tab changes — including on the
+    // paths that never touch a tab bar (focus into a side-by-side doc dock,
+    // workspace navigation), which used to leave icons describing a tab the
+    // user had already left.
+    applyDocTabSourceIconVisibility(m_docDocks, dock);
     refreshBookmarksDock();
     scheduleSessionSave();    // active-tab changes persist too
 }
@@ -6451,13 +6575,13 @@ void MainWindow::updateScannerTitle() {
     QString text;
     if (sourceName.isEmpty()) {
         // No provider attached on the active tab — be explicit about it
-        // rather than leaving a stale "Memory Scanner (notepad.exe)" lying
+        // rather than leaving a stale "Scanner (notepad.exe)" lying
         // around from a previously-active tab.
-        text = QStringLiteral("Memory Scanner — no source on active tab");
+        text = QStringLiteral("Scanner — no source on active tab");
     } else if (sourceKind.isEmpty()) {
-        text = QStringLiteral("Memory Scanner — %1").arg(sourceName);
+        text = QStringLiteral("Scanner — %1").arg(sourceName);
     } else {
-        text = QStringLiteral("Memory Scanner — %1 (%2)")
+        text = QStringLiteral("Scanner — %1 (%2)")
             .arg(sourceName, sourceKind);
     }
     m_scanDockTitle->setText(text);
@@ -6470,7 +6594,7 @@ void MainWindow::updateScannerTitle() {
     // following-the-active-tab behaviour so the source name in the title
     // is never read as a static binding to a particular file/process.
     QString tip = QStringLiteral(
-        "The Memory Scanner runs against the source of whichever editor "
+        "The Scanner runs against the source of whichever editor "
         "tab is currently active.\n"
         "Switch tabs (or open a new one) and the scanner re-targets to "
         "that tab's source automatically.\n\n"
@@ -6647,15 +6771,6 @@ void MainWindow::setViewMode(ViewMode mode) {
     int idx = (mode == VM_Both) ? 3 : (mode == VM_Debug) ? 2
             : (mode == VM_Rendered) ? 1 : 0;
     pane->tabWidget->setCurrentIndex(idx);
-    syncViewButtons(mode);
-}
-
-void MainWindow::syncViewButtons(ViewMode mode) {
-    // The per-pane view toggle lives in the pane's QTabWidget tab bar; the
-    // only global mirror is the ribbon's Code / Both pair, whose checked
-    // state paints the accent underline.
-    if (m_actCodeView) m_actCodeView->setChecked(mode == VM_Rendered);
-    if (m_actBothView) m_actBothView->setChecked(mode == VM_Both);
 }
 
 // ── Find the root-level struct ancestor for a node ──
@@ -8549,7 +8664,14 @@ void MainWindow::applyLayoutPreset(int preset) {
     // their own toggles — we don't touch them here.
     if (!m_workspaceDock) return;
     const bool showWorkspace = (preset == Layout_Workspace);
+    m_workspaceClosed = !showWorkspace;   // drives the collapsed-rail handle
     m_workspaceDock->setVisible(showWorkspace);
+    // setVisible() on a dock that is ALREADY in that state (Project deselected
+    // inside a tab group is already hidden) emits nothing, so the rail would
+    // keep the stale visibility the flag just invalidated. Reconcile directly.
+    if (m_workspaceRailDock)
+        m_workspaceRailDock->setVisible(
+            rcx::railVisibleFor(m_workspaceDock->isVisible(), m_workspaceClosed));
 
     // Re-install tab bar buttons — a newly revealed tab bar needs them.
     reconcileDockTabBars();
@@ -8563,7 +8685,7 @@ void MainWindow::applyLayoutPreset(int preset) {
 
 // Right-edge hairline on the Project dock — shown ONLY while it sits docked
 // in the main window (a floating dock has its own window chrome instead).
-// Spans the header (DockTitleBar) and the content panel (WorkspacePanel);
+// Spans the header (rcx::DockHeader) and the content panel (WorkspacePanel);
 // both paint a device-exact 1px column so it stays a single crisp line at
 // fractional display scaling. The content layout frees its right-most
 // logical px while the line is on so the search box / tree don't cover it.
@@ -8571,9 +8693,10 @@ void MainWindow::updateWorkspaceDockEdge() {
     if (!m_workspaceDock) return;
     const bool docked = !m_workspaceDock->isFloating();
     const auto& t = ThemeManager::instance().current();
-    const QColor edge = docked ? t.border : QColor();
-    if (auto* header = m_workspaceDock->findChild<DockTitleBar*>("workspaceHeader"))
-        header->setBorderRight(edge);
+    // containerBorderColor, not t.border: this seam touches the document
+    // column, and the editor container beside it paints the same tone.
+    const QColor edge = docked ? rcx::containerBorderColor(t) : QColor();
+    if (m_workspaceHeader) m_workspaceHeader->setBorderRight(edge);
     if (auto* cont = m_workspaceDock->findChild<WorkspacePanel*>("workspaceContainer")) {
         cont->setRightLine(edge);
         if (auto* lay = cont->layout()) {
@@ -8584,72 +8707,78 @@ void MainWindow::updateWorkspaceDockEdge() {
     }
 }
 
+// One dock header for Project, Scanner, Symbols and Bookmarks: builds the
+// shared rcx::DockHeader, installs it as the title bar, and wires the floating
+// chrome (BorderOverlay + ResizeGrip + DockBorderFilter) that the scanner and
+// symbols docks each carried their own copy of. Every dock therefore shows the
+// same height, ground, title tone, close button AND float outline. The caller
+// connects the close button, because "closed" means something slightly
+// different per dock (the Project dock also arms the collapsed-rail flag).
+rcx::DockHeader* MainWindow::makeDockHeader(QDockWidget* dock, const QString& title) {
+    auto* header = new rcx::DockHeader(title, dock);
+    dock->setTitleBarWidget(header);
+
+    auto* border = new BorderOverlay(dock);
+    border->color = ThemeManager::instance().current().borderFocused;
+    border->hide();
+    auto* grip = new ResizeGrip(dock);
+    grip->hide();
+    connect(dock, &QDockWidget::topLevelChanged, this,
+            [dock, border, grip](bool floating) {
+        if (floating) {
+            border->setGeometry(0, 0, dock->width(), dock->height());
+            border->raise();
+            border->show();
+            grip->reposition();
+            grip->raise();
+            grip->show();
+        } else {
+            border->hide();
+            grip->hide();
+        }
+    });
+    dock->installEventFilter(new DockBorderFilter(border, grip, dock));
+    return header;
+}
+
 void MainWindow::createWorkspaceDock() {
     m_workspaceDock = new QDockWidget("Project", this);
     m_workspaceDock->setObjectName("WorkspaceDock");
     m_workspaceDock->setAllowedAreas(Qt::AllDockWidgetAreas);
     m_workspaceDock->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable | QDockWidget::DockWidgetFloatable);
 
-    // Custom titlebar — Qt handles drag/dock natively via setTitleBarWidget
+    // Shared dock header (rcx::DockHeader) — identical height, ground, title
+    // tone and close button on all four docks, and Qt still handles
+    // drag/dock natively because the header never consumes mouse events.
     const auto& t = ThemeManager::instance().current();
+    m_workspaceHeader = makeDockHeader(m_workspaceDock, QStringLiteral("Project"));
+    m_dockTitleLabel  = m_workspaceHeader->titleLabel();
+    connect(m_workspaceHeader->closeButton(), &QToolButton::clicked, this, [this] {
+        m_workspaceClosed = true;          // an explicit user close → show the rail
+        m_workspaceDock->close();
+    });
+
+    // ...and every OTHER route to the same place. A middle-click on the Project
+    // tab, the tab's own x button and the tab context menu's Close all call
+    // QDockWidget::close() directly, none of them knowing about the rail flag —
+    // so each one used to hide the dock and leave no handle to get it back.
+    // They all raise a QEvent::Close on the dock first, which is the one thing
+    // they have in common. (Hiding via View > Project or a layout preset is a
+    // Hide, not a Close, so those two still set the flag themselves.)
     {
-        // Height must match the editor's document tabs so the separator line
-        // under "Project" lines up to the pixel with the line under the editor
-        // tab — they're separate controls. Empirically the left dock's title bar
-        // starts 1px lower than the central tab bar, which exactly cancels the
-        // 1px a QTabBar renders below its tab content, so the header matches at
-        // precisely kDocTabBarHeight. Verified by pixel scan (both borders y=87).
-        auto* titleBar = new DockTitleBar(kDocTabBarHeight, t.background, m_workspaceDock);
-        titleBar->setObjectName(QStringLiteral("workspaceHeader"));
-        auto* headerLayout = new QHBoxLayout(titleBar);
-        headerLayout->setContentsMargins(6, 0, 4, 0);
-        headerLayout->setSpacing(4);
-
-        m_dockGrip = new DockGripWidget(titleBar);
-        headerLayout->addWidget(m_dockGrip);
-
-        m_dockTitleLabel = new QLabel("Project", titleBar);
-        m_dockTitleLabel->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        // CRITICAL: the label's natural minimumSizeHint is the full text
-        // width (harmless for the short "Project" title today, but this
-        // bit us when the title carried struct/enum counts ≈ 250 px in
-        // IBM Plex Mono 10pt). QHBoxLayout sums this into the title bar's
-        // minimumSize, which propagates UP to the QDockWidget as its
-        // effective minimum width — silently outranking the explicit
-        // setMinimumWidth(180) on the dock. That's why the separator
-        // drag "fights back" at ~300 px and why the dock opens huge:
-        // QDockWidget::sizeHint() falls back to the title bar's hint
-        // when the content has nothing better to suggest. Force the
-        // label to be horizontally elastic so the layout stops
-        // broadcasting a text-width floor.
-        m_dockTitleLabel->setSizePolicy(QSizePolicy::Ignored,
-                                         QSizePolicy::Preferred);
-        m_dockTitleLabel->setMinimumWidth(0);
-        m_dockTitleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
-        {
-            m_dockTitleLabel->setStyleSheet(
-                QStringLiteral("color: %1;").arg(t.textDim.name()));
-            QSettings s("REECLASS", "REECLASS");
-            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
-            f.setFixedPitch(true);
-            m_dockTitleLabel->setFont(f);
-        }
-        headerLayout->addWidget(m_dockTitleLabel, /*stretch=*/1);
-
-        m_dockCloseBtn = new QToolButton(titleBar);
-        m_dockCloseBtn->setIcon(QIcon(QStringLiteral(":/vsicons/close.svg")));
-        m_dockCloseBtn->setIconSize(QSize(14, 14));
-        m_dockCloseBtn->setFixedSize(22, 22);
-        m_dockCloseBtn->setAutoRaise(true);
-        m_dockCloseBtn->setCursor(Qt::PointingHandCursor);
-        m_dockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { border: none; padding: 0px; }"
-            "QToolButton:hover { background: %1; }")
-            .arg(t.hover.name()));
-        connect(m_dockCloseBtn, &QToolButton::clicked, m_workspaceDock, &QDockWidget::close);
-        headerLayout->addWidget(m_dockCloseBtn, 0, Qt::AlignVCenter);
-
-        m_workspaceDock->setTitleBarWidget(titleBar);
+        class WorkspaceCloseWatcher : public QObject {
+        public:
+            WorkspaceCloseWatcher(bool* flag, QObject* parent)
+                : QObject(parent), m_flag(flag) {}
+        protected:
+            bool eventFilter(QObject* o, QEvent* e) override {
+                if (e->type() == QEvent::Close) *m_flag = true;
+                return QObject::eventFilter(o, e);
+            }
+            bool* m_flag;
+        };
+        m_workspaceDock->installEventFilter(
+            new WorkspaceCloseWatcher(&m_workspaceClosed, m_workspaceDock));
     }
 
     // Content container: search + tree. Custom-painted (editor-paper bg +
@@ -8661,77 +8790,14 @@ void MainWindow::createWorkspaceDock() {
     dockLayout->setContentsMargins(0, 0, 0, 0);
     dockLayout->setSpacing(0);
 
-    // Separator above search — hairline (exactly ONE device px at any DPR).
-    // A 1-logical-px QFrame rendered as TWO device rows at 125% scaling,
-    // reading as a double line next to the editor's device-exact tab-bar
-    // border (EditorContainer paints in device pixels; this must match).
-    {
-        auto* sep = new HairlineSeparator(t.border, dockContainer);
-        sep->setObjectName(QStringLiteral("workspaceSepTop"));
-        dockLayout->addWidget(sep);
-    }
-
-    m_workspaceSearch = new QLineEdit(dockContainer);
-    m_workspaceSearch->setPlaceholderText(QStringLiteral("Filter types..."));
-    // Clear button uses our close.svg icon instead of Qt's default circle-X
-    {
-        QSettings s("REECLASS", "REECLASS");
-        QFont f(s.value("font", "JetBrains Mono").toString(), 10);
-        f.setFixedPitch(true);
-        m_workspaceSearch->setFont(f);
-    }
-    {
-        auto* searchAction = m_workspaceSearch->addAction(
-            QIcon(QStringLiteral(":/vsicons/filter.svg")),
-            QLineEdit::LeadingPosition);
-        for (auto* btn : m_workspaceSearch->findChildren<QToolButton*>()) {
-            if (btn->defaultAction() == searchAction) {
-                btn->setIconSize(QSize(12, 12));
-                break;
-            }
-        }
-    }
-    {
-        auto* clearAction = m_workspaceSearch->addAction(
-            QIcon(QStringLiteral(":/vsicons/close.svg")),
-            QLineEdit::TrailingPosition);
-        clearAction->setVisible(false);
-        connect(clearAction, &QAction::triggered,
-                m_workspaceSearch, &QLineEdit::clear);
-        connect(m_workspaceSearch, &QLineEdit::textChanged,
-                clearAction, [clearAction](const QString& text) {
-            clearAction->setVisible(!text.isEmpty());
-        });
-        for (auto* btn : m_workspaceSearch->findChildren<QToolButton*>()) {
-            if (btn->defaultAction() == clearAction) {
-                btn->setIconSize(QSize(14, 14));
-                break;
-            }
-        }
-    }
-    {
-        const auto& t = ThemeManager::instance().current();
-        m_workspaceSearch->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2;"
-            " border: none;"
-            " padding: 2px 8px 2px 2px; }"
-            "QLineEdit QToolButton { padding: 0px 8px; }"
-            "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(rcx::editorPaperColor(t).name(), t.textDim.name(),
-                 t.hover.name()));
-    }
-    m_workspaceSearch->setFixedHeight(26);
-    m_workspaceSearch->setContentsMargins(4, 0, 4, 0);
+    // Shared panel filter box — paper ground, no box at rest, ONE device-exact
+    // hairline underneath (which turns borderFocused on focus). The two
+    // HairlineSeparator widgets that used to frame a bordered QLineEdit are
+    // gone: the header owns the line above, the field owns the line below.
+    m_workspaceSearch = new rcx::PanelSearchField(
+        QStringLiteral(":/vsicons/filter.svg"),
+        QStringLiteral("Filter types…"), dockContainer);
     dockLayout->addWidget(m_workspaceSearch);
-    // Separator below search — same device-exact hairline as the one above
-    // it, or the two lines framing the search box render different weights
-    // at fractional DPR (1 vs 2 device rows).
-    {
-        const auto& t = ThemeManager::instance().current();
-        auto* sep = new HairlineSeparator(t.border, dockContainer);
-        sep->setObjectName(QStringLiteral("workspaceSep"));
-        dockLayout->addWidget(sep);
-    }
 
     auto* wsTree = new EmptyHintTreeView(dockContainer);
     wsTree->placeholder = QStringLiteral("No types yet");
@@ -9220,8 +9286,7 @@ void MainWindow::createWorkspaceDock() {
     // north/south tab bars sit to its right instead of being overlaid. No
     // title bar, not movable/closable.
     {
-        auto* rail = new WorkspaceRail(this);
-        rail->setFixedWidth(22);
+        auto* rail = new WorkspaceRail(this);   // fixed 22 px, set in the class
         connect(rail, &WorkspaceRail::clicked, this,
                 [this]() { applyLayoutPreset(Layout_Workspace); });
         m_workspaceRailDock = new QDockWidget(this);
@@ -9233,13 +9298,25 @@ void MainWindow::createWorkspaceDock() {
         m_workspaceRailDock->setTitleBarWidget(emptyTitle);
         m_workspaceRailDock->setWidget(rail);
         addDockWidget(Qt::LeftDockWidgetArea, m_workspaceRailDock);
-        m_workspaceRailDock->setVisible(!m_workspaceDock->isVisible());
+        // Hidden-by-default at launch IS the closed state, so the rail shows
+        // on first run.
+        m_workspaceRailDock->setVisible(
+            rcx::railVisibleFor(m_workspaceDock->isVisible(), m_workspaceClosed));
     }
+    // View ▸ Project toggles visibility without ever raising a Close event,
+    // so the flag has to be maintained here too.
+    connect(m_workspaceDock->toggleViewAction(), &QAction::triggered, this,
+            [this](bool checked) { m_workspaceClosed = !checked; });
     connect(m_workspaceDock, &QDockWidget::visibilityChanged, this,
             [this](bool visible) {
-        if (visible) rebuildWorkspaceModel();
-        // The rail reserves the left column only while the dock is hidden.
-        if (m_workspaceRailDock) m_workspaceRailDock->setVisible(!visible);
+        if (visible) { m_workspaceClosed = false; rebuildWorkspaceModel(); }
+        // The rail is the handle back to a dock the user CLOSED. QDockWidget
+        // also emits visibilityChanged(false) when the dock is merely
+        // DESELECTED inside a tab group, and keying the rail off that alone
+        // made it pop into the left column on every Bookmarks tab click.
+        if (m_workspaceRailDock)
+            m_workspaceRailDock->setVisible(
+                rcx::railVisibleFor(visible, m_workspaceClosed));
     });
 
     // Right hairline only while docked — drop it the moment the dock floats.
@@ -9276,6 +9353,10 @@ void MainWindow::createWorkspaceDock() {
             tab.ctrl->setViewRootId(parentId);
             scheduleSessionSave();  // view-root switch inside a tab persists
             tab.ctrl->scrollToNodeId(structId);
+            // setActiveDocDock refreshed the status segment BEFORE the drill-down
+            // above changed the view root, so it described the pre-drill class.
+            // Re-derive it now that the controller is on the target member.
+            refreshSelectionStatus(tab.ctrl, -1);
             QPointer<QDockWidget> dockRef = ownerDock;
             QTimer::singleShot(0, this, [this, dockRef]() {
                 if (!dockRef || !m_tabs.contains(dockRef)) return;
@@ -9350,6 +9431,10 @@ void MainWindow::createWorkspaceDock() {
             tab.ctrl->setViewRootId(parentId);
             scheduleSessionSave();  // view-root switch inside a tab persists
             tab.ctrl->scrollToNodeId(structId);
+            // setActiveDocDock refreshed the status segment BEFORE the drill-down
+            // above changed the view root, so it described the pre-drill class.
+            // Re-derive it now that the controller is on the target member.
+            refreshSelectionStatus(tab.ctrl, -1);
             QPointer<QDockWidget> dockRef = ownerDock;
             QTimer::singleShot(0, this, [this, dockRef]() {
                 if (!dockRef || !m_tabs.contains(dockRef)) return;
@@ -9377,7 +9462,7 @@ void MainWindow::createWorkspaceDock() {
 // ── Scanner Dock ──
 
 void MainWindow::createScannerDock() {
-    m_scannerDock = new QDockWidget("Memory Scanner", this);
+    m_scannerDock = new QDockWidget("Scanner", this);
     m_scannerDock->setObjectName("ScannerDock");
     // Allow Top in addition to Bottom and Left. The previous restriction
     // assumed the scanner only ever made sense under the code or beside
@@ -9391,54 +9476,14 @@ void MainWindow::createScannerDock() {
         QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable |
         QDockWidget::DockWidgetFloatable);
 
-    // Custom titlebar \u2014 same pattern as the Project dock (which has working
-    // drag-to-redock). Key insight: Qt's native drag/dock handler runs on
-    // the QDockWidget when mouse events on the title bar bubble up
-    // unconsumed. As long as we don't install an event filter that swallows
-    // press/move events, Qt's drag-to-redock works natively. The workspace
-    // dock proves this \u2014 its DockTitleBar is just a paint-only QWidget.
-    {
-        const auto& t = ThemeManager::instance().current();
-        auto* titleBar = new DockTitleBar(24, t.backgroundAlt, m_scannerDock);
-        titleBar->setObjectName(QStringLiteral("scannerHeader"));
-        auto* layout = new QHBoxLayout(titleBar);
-        layout->setContentsMargins(6, 0, 4, 0);
-        layout->setSpacing(4);
-
-        m_scanDockGrip = new DockGripWidget(titleBar);
-        layout->addWidget(m_scanDockGrip);
-
-        m_scanDockTitle = new QLabel("Memory Scanner", titleBar);
-        m_scanDockTitle->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
-        {
-            m_scanDockTitle->setStyleSheet(
-                QStringLiteral("color: %1;").arg(t.textDim.name()));
-            QSettings s("REECLASS", "REECLASS");
-            QFont f(s.value("font", "JetBrains Mono").toString(), 10);
-            f.setFixedPitch(true);
-            m_scanDockTitle->setFont(f);
-        }
-        // Elide-on-overflow so a long process name doesn't push the close
-        // button off the right edge. Full source name lives in the tooltip.
-        m_scanDockTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        m_scanDockTitle->setMinimumWidth(0);
-        layout->addWidget(m_scanDockTitle, /*stretch*/ 1);
-
-        m_scanDockCloseBtn = new QToolButton(titleBar);
-        m_scanDockCloseBtn->setIcon(QIcon(QStringLiteral(":/vsicons/close.svg")));
-        m_scanDockCloseBtn->setIconSize(QSize(14, 14));
-        m_scanDockCloseBtn->setFixedSize(22, 22);
-        m_scanDockCloseBtn->setAutoRaise(true);
-        m_scanDockCloseBtn->setCursor(Qt::PointingHandCursor);
-        m_scanDockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { border: none; padding: 0px; }"
-            "QToolButton:hover { background: %1; }")
-            .arg(t.hover.name()));
-        connect(m_scanDockCloseBtn, &QToolButton::clicked, m_scannerDock, &QDockWidget::close);
-        layout->addWidget(m_scanDockCloseBtn, 0, Qt::AlignVCenter);
-
-        m_scannerDock->setTitleBarWidget(titleBar);
-    }
+    // Shared dock header — same height/ground/title tone as Project, Symbols
+    // and Bookmarks. Qt's native drag-to-redock still runs because the header
+    // never consumes the mouse events (the old hand-rolled DockTitleBar proved
+    // the mechanism; this one just does it in one place).
+    m_scanDockHeader = makeDockHeader(m_scannerDock, QStringLiteral("Scanner"));
+    m_scanDockTitle  = m_scanDockHeader->titleLabel();
+    connect(m_scanDockHeader->closeButton(), &QToolButton::clicked,
+            m_scannerDock, &QDockWidget::close);
 
     // Placeholder widget so the dock has *something* to show until the
     // real ScannerPanel is built lazily by ensureScannerPanel(). The
@@ -9451,61 +9496,45 @@ void MainWindow::createScannerDock() {
     // the table real room and the chrome stops competing with results.
     m_scannerDock->setMinimumHeight(320);
     addDockWidget(Qt::BottomDockWidgetArea, m_scannerDock);
-    // Default size: 360 px tall on initial show. Qt resolves this against
-    // the layout so it acts as a request, not a hard floor.
-    resizeDocks({m_scannerDock}, {360}, Qt::Vertical);
     m_scannerDock->hide();
     m_scannerDock->installEventFilter(this);
 
-    // Border overlay and resize grip for floating state
-    {
-        auto* border = new BorderOverlay(m_scannerDock);
-        border->color = ThemeManager::instance().current().borderFocused;
-        border->hide();
-        auto* grip = new ResizeGrip(m_scannerDock);
-        grip->hide();
-
-        connect(m_scannerDock, &QDockWidget::topLevelChanged,
-                this, [this, border, grip](bool floating) {
-            if (floating) {
-                border->setGeometry(0, 0, m_scannerDock->width(), m_scannerDock->height());
-                border->raise();
-                border->show();
-                grip->reposition();
-                grip->raise();
-                grip->show();
-            } else {
-                border->hide();
-                grip->hide();
-            }
+    // Default size on initial show. resizeDocks() issued HERE is silently
+    // dropped — the dock is still hidden and still holds the empty placeholder,
+    // so QMainWindow re-resolves its height from the real panel's size hint on
+    // the first show. Re-issue it once, on the first real show, after the panel
+    // has landed and the layout pass has settled. A size the user dragged and
+    // saved now wins over the default, which on this path it never did before
+    // (only a drag-PLACED dock ever restored its saved size), and a floating
+    // scanner is left alone.
+    //
+    // MEASURED CAVEAT: this is a floor-clamped REQUEST, not a size. With SCAN
+    // FOR expanded ScannerPanel::minimumSizeHint() is 408 px, so the dock
+    // cannot go below 408 + kDockHeaderHeight = 440 and the 360 asked for here
+    // is clamped to that. An actual 360 needs the panel's own minimum to come
+    // down (its results table) — panel internals, not dock chrome. The request
+    // stays so it takes effect the moment that happens.
+    connect(m_scannerDock, &QDockWidget::visibilityChanged, this,
+            [this](bool visible) {
+        if (!visible || m_scannerSizedOnce) return;
+        m_scannerSizedOnce = true;
+        // Swap the placeholder for the real panel FIRST: setWidget() re-runs
+        // the dock layout off the new widget's size hint, so a resize issued
+        // before it is undone the moment the panel lands.
+        ensureScannerPanel();
+        QPointer<QDockWidget> dockPtr(m_scannerDock);
+        const int sz = loadDockSize(m_scannerDock, kScannerDockDefaultH);
+        QTimer::singleShot(0, this, [this, dockPtr, sz]() {
+            if (!dockPtr || dockPtr->isFloating() || !dockPtr->isVisible()) return;
+            resizeDocks({dockPtr}, {sz}, Qt::Vertical);
         });
-        m_scannerDock->installEventFilter(new DockBorderFilter(border, grip, m_scannerDock));
+    });
 
-        // Default to floating AFTER the topLevelChanged connect so the
-        // BorderOverlay receives the initial signal — otherwise the dock
-        // pops out without the VS-style border outline. The View action
-        // also calls setFloating(true) but starting floating here means
-        // restored layouts begin in the right place.
-        m_scannerDock->setFloating(true);
-        // Initial floating geometry — centred on the main window, sized to
-        // comfortably fit the form rows + a few hundred result lines.
-        // 700 px tall = 25% taller than the previous 560.
-        const QSize defaultSize(720, 700);
-        QRect host = geometry();
-        QPoint topLeft(host.center().x() - defaultSize.width() / 2,
-                       host.center().y() - defaultSize.height() / 2);
-        m_scannerDock->setGeometry(QRect(topLeft, defaultSize));
-        // The topLevelChanged signal fired during setFloating(true) above
-        // sized the border with the dock's pre-geometry width/height —
-        // re-sync after we've set the real default geometry.
-        border->setGeometry(0, 0, m_scannerDock->width(), m_scannerDock->height());
-        border->raise();
-        border->show();
-        grip->reposition();
-        grip->raise();
-        grip->show();
-    }
-
+    // Floating chrome (BorderOverlay + ResizeGrip) is wired by makeDockHeader,
+    // which every dock shares. The scanner used to force setFloating(true) and
+    // centre itself at 720x700 in the ctor, which overrode the Bottom
+    // placement + the size request above on EVERY first show; floating is one
+    // header drag away, and a saved layout that WAS floating still restores.
 }
 
 // Build the heavy ScannerPanel widget on demand. Pulled out of
@@ -9518,7 +9547,7 @@ void MainWindow::createScannerDock() {
 //
 // Idempotent: subsequent calls are no-ops. Triggers:
 //   * QTimer::singleShot(0, …) after window.show() in main()
-//   * View > Memory Scanner toggle (in case the user beats the timer)
+//   * View > Scanner toggle (in case the user beats the timer)
 //   * Anything in MainWindow that touches m_scannerPanel directly
 void MainWindow::ensureScannerPanel() {
     if (m_scannerPanel || !m_scannerDock) return;
@@ -9531,7 +9560,6 @@ void MainWindow::ensureScannerPanel() {
         QFont f(fontName, 12);
         f.setFixedPitch(true);
         m_scannerPanel->setEditorFont(f);
-        if (m_scanDockTitle) m_scanDockTitle->setFont(f);
     }
     m_scannerDock->setWidget(m_scannerPanel);  // replaces placeholder
 
@@ -9588,63 +9616,23 @@ void MainWindow::createSymbolsDock() {
         QDockWidget::DockWidgetFloatable);
 
     const auto& t = ThemeManager::instance().current();
-    QSettings s("REECLASS", "REECLASS");
-    QFont monoFont(s.value("font", "JetBrains Mono").toString(), 10);
-    monoFont.setFixedPitch(true);
 
-    // Custom titlebar (matches scanner dock)
-    {
-        auto* titleBar = new QWidget(m_symbolsDock);
-        titleBar->setFixedHeight(24);
-        titleBar->setAutoFillBackground(true);
-        {
-            QPalette tbPal = titleBar->palette();
-            tbPal.setColor(QPalette::Window, t.backgroundAlt);
-            titleBar->setPalette(tbPal);
-        }
-        auto* layout = new QHBoxLayout(titleBar);
-        layout->setContentsMargins(4, 2, 2, 2);
-        layout->setSpacing(4);
-
-        m_symDockGrip = new DockGripWidget(titleBar);
-        layout->addWidget(m_symDockGrip);
-
-        m_symDockTitle = new QLabel("Symbols", titleBar);
-        m_symDockTitle->setStyleSheet(
-            QStringLiteral("color: %1;").arg(t.textDim.name()));
-        m_symDockTitle->setFont(monoFont);
-        layout->addWidget(m_symDockTitle);
-
-        layout->addStretch();
-
-        m_symDownloadBtn = new QToolButton(titleBar);
-        m_symDownloadBtn->setIcon(QIcon(QStringLiteral(":/vsicons/cloud-download.svg")));
-        m_symDownloadBtn->setIconSize(QSize(14, 14));
-        m_symDownloadBtn->setText(QStringLiteral("Download All"));
-        m_symDownloadBtn->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-        m_symDownloadBtn->setAutoRaise(true);
-        m_symDownloadBtn->setCursor(Qt::PointingHandCursor);
-        m_symDownloadBtn->setToolTip(QStringLiteral("Load/Download all symbols"));
-        m_symDownloadBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { border: none; padding: 2px 4px; }"
-            "QToolButton:hover { background: %1; }")
-            .arg(t.hover.name()));
-        connect(m_symDownloadBtn, &QToolButton::clicked, this, &MainWindow::downloadSymbolsForProcess);
-        layout->addWidget(m_symDownloadBtn);
-
-        m_symDockCloseBtn = new QToolButton(titleBar);
-        m_symDockCloseBtn->setText(QStringLiteral("\u2715"));
-        m_symDockCloseBtn->setAutoRaise(true);
-        m_symDockCloseBtn->setCursor(Qt::PointingHandCursor);
-        m_symDockCloseBtn->setStyleSheet(QStringLiteral(
-            "QToolButton { color: %1; border: none; padding: 0px 4px 2px 4px; font-size: 12px; }"
-            "QToolButton:hover { color: %2; }")
-            .arg(t.textDim.name(), t.indHoverSpan.name()));
-        connect(m_symDockCloseBtn, &QToolButton::clicked, m_symbolsDock, &QDockWidget::close);
-        layout->addWidget(m_symDockCloseBtn);
-
-        m_symbolsDock->setTitleBarWidget(titleBar);
-    }
+    // Shared dock header. The old one was a bare 24-px QWidget whose
+    // background came from an autoFillBackground palette hack that applyTheme
+    // re-set but never repainted, so the Symbols header colour effectively
+    // never applied. "Download All" is icon-only in the header right slot;
+    // the label lives in its tooltip.
+    m_symDockHeader = makeDockHeader(m_symbolsDock, QStringLiteral("Symbols"));
+    m_symDockTitle  = m_symDockHeader->titleLabel();
+    m_symDownloadBtn = rcx::makeHeaderToolButton(
+        QStringLiteral(":/vsicons/cloud-download.svg"),
+        QStringLiteral("Download all symbols"), m_symDockHeader);
+    connect(m_symDownloadBtn, &QToolButton::clicked,
+            this, &MainWindow::downloadSymbolsForProcess);
+    m_symDockHeader->addRightWidget(m_symDownloadBtn);
+    m_symDockHeader->applyTheme(t);     // tint the freshly added right-slot icon
+    connect(m_symDockHeader->closeButton(), &QToolButton::clicked,
+            m_symbolsDock, &QDockWidget::close);
 
     // Container hosting the unified Symbols panel (no tab widget — one list).
     auto* container = new QWidget(m_symbolsDock);
@@ -9706,35 +9694,15 @@ void MainWindow::createSymbolsDock() {
 
     m_symbolsDock->setWidget(container);
     // Symbols dock is taller and needs room for module list + symbol tree.
-    m_symbolsDock->setMinimumWidth(220);
+    // 260 = the panel's narrow-chip breakpoint, so the default width always
+    // yields one chip row + the count instead of a two-column chip grid.
+    m_symbolsDock->setMinimumWidth(260);
     addDockWidget(Qt::RightDockWidgetArea, m_symbolsDock);
     m_symbolsDock->hide();
     m_symbolsDock->installEventFilter(this);
 
-    // Border overlay and resize grip for floating state
-    {
-        auto* border = new BorderOverlay(m_symbolsDock);
-        border->color = t.borderFocused;
-        border->hide();
-        auto* grip = new ResizeGrip(m_symbolsDock);
-        grip->hide();
-
-        connect(m_symbolsDock, &QDockWidget::topLevelChanged,
-                this, [this, border, grip](bool floating) {
-            if (floating) {
-                border->setGeometry(0, 0, m_symbolsDock->width(), m_symbolsDock->height());
-                border->raise();
-                border->show();
-                grip->reposition();
-                grip->raise();
-                grip->show();
-            } else {
-                border->hide();
-                grip->hide();
-            }
-        });
-        m_symbolsDock->installEventFilter(new DockBorderFilter(border, grip, m_symbolsDock));
-    }
+    // Floating chrome (BorderOverlay + ResizeGrip + DockBorderFilter) is wired
+    // by makeDockHeader — one copy for all four docks.
 }
 
 int MainWindow::loadPdbAndCacheTypes(const QString& pdbPath) {
@@ -9788,6 +9756,12 @@ void MainWindow::createBookmarksDock() {
     // Minimum width stops Qt's splitter from crushing the dock below the
     // point where content is readable when other docks share the area.
     m_bookmarksDock->setMinimumWidth(180);
+    // Shared dock header. Bookmarks was the one dock still on Fusion's stock
+    // title bar, so tabifying it with Project visibly changed the header
+    // height (and font) on every tab switch.
+    m_bmDockHeader = makeDockHeader(m_bookmarksDock, QStringLiteral("Bookmarks"));
+    connect(m_bmDockHeader->closeButton(), &QToolButton::clicked,
+            m_bookmarksDock, &QDockWidget::close);
     addDockWidget(Qt::LeftDockWidgetArea, m_bookmarksDock);
     m_bookmarksDock->hide();  // hidden by default; toggle via View menu
     m_bookmarksDock->installEventFilter(this);
@@ -9814,14 +9788,18 @@ void MainWindow::populateBookmarksDock() {
     auto* container = new QWidget(m_bookmarksDock);
     container->setObjectName(QStringLiteral("bookmarksContainer"));
     auto* layout = new QVBoxLayout(container);
-    layout->setContentsMargins(4, 4, 4, 4);
-    layout->setSpacing(4);
+    // Flush like the Project dock: the panel's own hairlines delineate the
+    // rows, so an inset frame of empty paper around them is just noise.
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
 
-    m_bookmarksFilter = new QLineEdit(container);
-    m_bookmarksFilter->setPlaceholderText("Filter bookmarks...");
+    m_bookmarksFilter = new rcx::PanelSearchField(
+        QStringLiteral(":/vsicons/filter.svg"),
+        QStringLiteral("Filter bookmarks\u2026"), container);
     layout->addWidget(m_bookmarksFilter);
 
     auto* bmList = new EmptyHintListWidget(container);
+    bmList->setFont(rcx::chromeFont());
     bmList->placeholder = QStringLiteral("No bookmarks");
     bmList->hint        = QStringLiteral("Right-click a field ▸ Bookmark this address…");
     m_bookmarksList = bmList;
@@ -9829,6 +9807,7 @@ void MainWindow::populateBookmarksDock() {
     layout->addWidget(m_bookmarksList, 1);
 
     auto* btnRow = new QHBoxLayout();
+    btnRow->setContentsMargins(rcx::kGutter, 6, rcx::kGutter, 6);
     auto* addBtn = new rcx::DialogButton(QStringLiteral("Add"),
         rcx::DialogButton::Primary, container);
     auto* removeBtn = new rcx::DialogButton(QStringLiteral("Remove"),
@@ -9894,12 +9873,11 @@ void MainWindow::themeBookmarksContent() {
     QPalette lp = m_bookmarksList->palette();
     lp.setColor(QPalette::Base, paper);                 // item rows → editor paper
     m_bookmarksList->setPalette(lp);
+    m_bookmarksList->setFont(rcx::chromeFont());
     m_bookmarksList->setStyleSheet(QStringLiteral(
         "QListWidget { background: %1; border: none; }").arg(paper.name()));
-    if (m_bookmarksFilter)
-        m_bookmarksFilter->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: none; padding: 4px 8px; }")
-            .arg(paper.name(), theme.textDim.name()));
+    if (m_bookmarksFilter) m_bookmarksFilter->applyTheme(theme);
+    if (m_bmDockHeader)    m_bmDockHeader->applyTheme(theme);
 }
 
 void MainWindow::refreshBookmarksDock() {
@@ -11254,17 +11232,17 @@ static QJsonArray themeColorsForKeys(const QStringList& keys) {
 // Region → theme field keys mapping
 static QStringList themeKeysForRegion(const QString& region) {
     static const QHash<QString, QStringList> map = {
-        {"editor.typeColumn",  {"syntaxKeyword", "syntaxType", "text"}},
+        {"editor.typeColumn",  {"syntaxKeyword", "syntaxType", "text", "textDim"}},
         {"editor.nameColumn",  {"text"}},
         {"editor.valueColumn", {"text", "syntaxNumber", "indHeatCold", "indHeatWarm", "indHeatHot"}},
-        {"editor.hexBytes",    {"textFaint"}},
+        {"editor.hexBytes",    {"text"}},
         {"editor.foldArrow",   {"textFaint"}},
         {"editor.margin",      {"textFaint", "background"}},
-        {"editor.asciiPreview", {"textFaint"}},
+        {"editor.asciiPreview", {"textMuted"}},
         {"editor.commandRow",  {"indCmdPill", "textFaint", "indHoverSpan", "syntaxType"}},
-        {"editor.footer",      {"textFaint", "indCmdPill"}},
+        {"editor.footer",      {"textFaint", "textDim", "border", "indCmdPill"}},
         {"editor.header",      {"background", "text", "textFaint"}},
-        {"editor.treeLines",   {"textFaint"}},
+        {"editor.treeLines",   {"textMuted"}},
         {"editor.background",  {"background"}},
         {"workspace.tree",     {"background", "text", "textDim", "hover", "selected"}},
         {"dockTabBar",         {"background", "text", "textDim", "hover", "border", "indHoverSpan"}},
@@ -11728,6 +11706,14 @@ int main(int argc, char* argv[]) {
         QSettings settings("REECLASS", "REECLASS");
         QString savedFont = settings.value("font", "JetBrains Mono").toString();
         rcx::RcxEditor::setGlobalFontName(savedFont);
+        // One chrome font for the whole app: the menu bar, menu popups, every
+        // QLabel/QToolButton, the breadcrumb and the rail inherit mono 10 pt
+        // instead of each re-deriving it (or silently falling back to the
+        // system UI font at a different size). The per-widget 10-pt setFont
+        // calls scattered through MainWindow become no-ops.
+        QFont base(savedFont, 10);
+        base.setFixedPitch(true);
+        app.setFont(base);
     }
 
     // Global theme — first call is intentionally a no-op-on-empty-app
@@ -11772,7 +11758,7 @@ int main(int argc, char* argv[]) {
     // gate the user seeing the window. The dock shell already exists
     // (built by createScannerDock during MainWindow::ctor) so menu
     // wiring + layout are already correct; we're just lazy-filling
-    // the dock's content. View > Memory Scanner triggers the same
+    // the dock's content. View > Scanner triggers the same
     // build immediately if the user beats this timer to the punch.
     QTimer::singleShot(0, &window, [&window]() {
         window.ensureScannerPanel();
@@ -11806,10 +11792,11 @@ int main(int argc, char* argv[]) {
         });
     }
 
-    // --screenshot <path> [scanner|workspace|both]: open default project
-    // (optionally also show the scanner dock, expand the Project workspace
-    // dock, or lay out the "Both" Reclass|Code split), grab the window,
-    // save, exit.
+    // --screenshot <path> [scanner|workspace|both|closetest|code|splash|
+    //                      symbols|home|modify|collapsed]: open the default
+    // project (optionally also show the scanner dock, expand the Project
+    // workspace dock, lay out the "Both" Reclass|Code split, or force a
+    // ribbon tab / the collapsed ribbon), grab the window, save, exit.
     {
         QStringList args = app.arguments();
         int ssIdx = args.indexOf("--screenshot");
@@ -11829,7 +11816,19 @@ int main(int argc, char* argv[]) {
                                  && args[ssIdx + 2] == "splash");
             bool showSymbols = (ssIdx + 2 < args.size()
                                  && args[ssIdx + 2] == "symbols");
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols]() {
+            // Ribbon captures: force a tab / the collapsed state for the shot.
+            // The pre-existing settings are restored before quitting so a
+            // screenshot run never rewrites the user's ribbon preferences.
+            const QString ribbonMode = (ssIdx + 2 < args.size()) ? args[ssIdx + 2] : QString();
+            const bool ribbonShot = (ribbonMode == "home" || ribbonMode == "modify"
+                                     || ribbonMode == "collapsed");
+            QVariant savedTab, savedState;
+            if (ribbonShot) {
+                QSettings rs("REECLASS", "REECLASS");
+                savedTab = rs.value("ribbonTab");
+                savedState = rs.value("ribbonState");
+            }
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, ribbonMode, ribbonShot, savedTab, savedState]() {
                 if (showSplash) {
                     // Capture the start page itself — skip project_new so it
                     // shows the no-tabs landing.
@@ -11848,10 +11847,14 @@ int main(int argc, char* argv[]) {
                         window.previewCloseViaX();
                     if (showSymbols)
                         window.previewSymbolsDock();
+                    if (ribbonShot && window.ribbon()) {
+                        if (ribbonMode == "collapsed") window.ribbon()->setMinimized(true);
+                        else window.ribbon()->setCurrentTab(ribbonMode);
+                    }
                 }
                 // Defer the grab so the dock layout settles + the panel
                 // paints its initial state before we capture.
-                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash]() {
+                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, ribbonShot, savedTab, savedState]() {
                     QPixmap px;
                     if (showSplash) {
                         if (auto* sp = window.findChild<rcx::StartPageWidget*>())
@@ -11878,6 +11881,15 @@ int main(int argc, char* argv[]) {
                                     qPrintable(rb->font().family()), rb->font().pointSize(),
                                     rb->devicePixelRatioF());
                         }
+                    }
+                    // Put the user's ribbon preferences back: a capture run
+                    // must not leave the app on the tab it photographed.
+                    if (ribbonShot) {
+                        QSettings rs("REECLASS", "REECLASS");
+                        if (savedTab.isValid()) rs.setValue("ribbonTab", savedTab);
+                        else rs.remove("ribbonTab");
+                        if (savedState.isValid()) rs.setValue("ribbonState", savedState);
+                        else rs.remove("ribbonState");
                     }
                     // `--profile --screenshot`: emit the init-path timings we
                     // recorded (no-op if profiling wasn't enabled).

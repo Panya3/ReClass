@@ -13,6 +13,7 @@
 #include <QInputDialog>
 #include "widgets/themed_inputdialog.h"
 #include "widgets/empty_overlay.h"
+#include "widgets/section_header.h"
 #include <QPainter>
 #include <QEventLoop>
 #include <QFileDialog>
@@ -271,14 +272,13 @@ ScannerPanel::ScannerPanel(QWidget* parent)
         v->setContentsMargins(0, 4, 0, 4);
         v->setSpacing(6);
         if (!title.isEmpty()) {
-            auto* hdr = new QLabel(title, frame);
+            // Shared section-header spec (rcx::sectionHeaderFont) + a
+            // device-exact hairline the widget paints itself, so the divider
+            // is ONE device row at any DPR instead of the two the old QSS
+            // `border-bottom: 1px` produced at 125 %.
+            auto* hdr = new rcx::SectionHeaderLabel(title, frame);
             hdr->setProperty("scannerHeader", true);   // textDim (dimmer than content)
-            QFont f = hdr->font();
-            f.setPointSize(qMax(8, resolvedPointSize(f) - 2));
-            f.setCapitalization(QFont::AllUppercase);
-            f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
-            f.setWeight(QFont::DemiBold);
-            hdr->setFont(f);
+            hdr->setFont(rcx::sectionHeaderFont(hdr->font()));
             v->addWidget(hdr);
         }
         *outContent = v;
@@ -298,20 +298,13 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // Clickable header: chevron + "SCAN FOR". Same visual language as the
     // scannerHeader labels (uppercase, letter-spaced, demibold, dim, full-width
     // underline divider) but it toggles the criteria body below it.
-    m_scanForHeader = new QPushButton(scanSection);
+    m_scanForHeader = new rcx::SectionHeaderButton(scanSection);
     m_scanForHeader->setProperty("scanForHeader", true);   // styled in applyTheme
     m_scanForHeader->setText(QString::fromUtf8("\xE2\x96\xBE  SCAN FOR"));  // ▾
     m_scanForHeader->setCursor(Qt::PointingHandCursor);
     m_scanForHeader->setFlat(true);
     m_scanForHeader->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    {
-        QFont f = m_scanForHeader->font();
-        f.setPointSize(qMax(8, resolvedPointSize(f) - 2));
-        f.setCapitalization(QFont::AllUppercase);
-        f.setLetterSpacing(QFont::AbsoluteSpacing, 1.5);
-        f.setWeight(QFont::DemiBold);
-        m_scanForHeader->setFont(f);
-    }
+    m_scanForHeader->setFont(rcx::sectionHeaderFont(m_scanForHeader->font()));
     connect(m_scanForHeader, &QPushButton::clicked, this,
             [this]() { setScanForCollapsed(!m_scanForCollapsed); });
     scanContent->addWidget(m_scanForHeader);
@@ -2435,18 +2428,21 @@ void ScannerPanel::applyTheme(const Theme& theme) {
         "QFrame#scanSection { background: transparent; border: none; }"
         // Section header: dimmer than its content, with a hairline divider under
         // it spanning the panel width — matches the main window's section style.
+        // The divider under each header is a device-exact row painted by
+        // rcx::SectionHeaderLabel / SectionHeaderButton, not a QSS border
+        // (which renders as TWO device rows at fractional scaling).
         "QLabel[scannerHeader=\"true\"] { color:%1; padding:1px 0 3px 0;"
-        "   border-bottom:1px solid %2; margin-bottom:2px; }"
+        "   margin-bottom:2px; }"
         // Collapsible SCAN FOR header: same look as scannerHeader but a clickable
         // QToolButton — left-aligned, no button chrome, brightens on hover so the
         // toggle affordance is felt.
         "QPushButton[scanForHeader=\"true\"] { color:%1; padding:1px 0 3px 0;"
-        "   border:none; border-bottom:1px solid %2; margin-bottom:2px;"
+        "   border:none; margin-bottom:2px;"
         "   background:transparent; text-align:left; }"
-        "QPushButton[scanForHeader=\"true\"]:hover { color:%3; }"
+        "QPushButton[scanForHeader=\"true\"]:hover { color:%2; }"
         "QLabel[scannerSection=\"true\"] { color:%1; padding:0 4px 0 0; }"
-        "QLabel[scannerStatus=\"true\"] { color:%3; padding:2px 4px; }")
-        .arg(theme.textDim.name(), theme.border.name(), theme.text.name());
+        "QLabel[scannerStatus=\"true\"] { color:%2; padding:2px 4px; }")
+        .arg(theme.textDim.name(), theme.text.name());
     setStyleSheet((styleSheet().isEmpty() ? QString() : styleSheet() + " ")
                    + sectionStyle);
 

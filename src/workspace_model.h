@@ -1,6 +1,9 @@
 #pragma once
 #include "core.h"
 #include "themes/theme.h"
+#include "themes/thememanager.h"
+#include "widgets/section_header.h"
+#include <QAbstractItemView>
 #include <QIcon>
 #include <QStandardItemModel>
 #include <QStandardItem>
@@ -241,7 +244,10 @@ public:
         m_syntaxType = t.syntaxType;
         m_hover     = t.hover;
         m_selected  = t.selected;
-        m_accent    = t.borderFocused; // left accent bar
+        // indHoverSpan: the accent that means "current / selected" everywhere
+        // else in the window. borderFocused is the FOCUS RING colour and owes
+        // its meaning to window frames and input focus, not row selection.
+        m_accent    = t.indHoverSpan;  // left accent bar
         m_bg        = editorPaperColor(t);  // section-header bg → editor paper
         m_badgeBg   = t.backgroundAlt;
         m_badgeText = t.textDim;
@@ -249,12 +255,20 @@ public:
         m_border    = t.border;
     }
 
+    // Exposed so tests can pin the accent token (tests/test_workspace.cpp).
+    QColor accentColor() const { return m_accent; }
+
     QSize sizeHint(const QStyleOptionViewItem& option,
                    const QModelIndex& index) const override {
         // Section headers get extra vertical space
         if (!index.data(RoleSectionHeader).toString().isEmpty()) {
             QSize s = QStyledItemDelegate::sizeHint(option, index);
-            s.setHeight(option.fontMetrics.height() + 16);
+            // Metrics of the font the row is actually PAINTED with (8 pt), not
+            // the 10 pt base — measuring the base gave the Project tree ~24 px
+            // section bands next to the scanner's ~20 px ones, so the "one
+            // shared spec" still rendered two different heights in one window.
+            s.setHeight(sectionHeaderHeight(
+                QFontMetrics(sectionHeaderFont(option.font))));
             return s;
         }
         QSize s = QStyledItemDelegate::sizeHint(option, index);
@@ -270,32 +284,25 @@ public:
         // ── Section header rendering ──
         QString sectionLabel = index.data(RoleSectionHeader).toString();
         if (!sectionLabel.isEmpty()) {
-            painter->fillRect(option.rect, m_bg);
-
-            QFont sf = option.font;
-            sf.setPointSizeF(sf.pointSizeF() * 0.67);
-            sf.setBold(false);
-            sf.setLetterSpacing(QFont::AbsoluteSpacing, 1.2);
-            painter->setFont(sf);
-            QFontMetrics sfm(sf);
-
-            QRect textRect = option.rect.adjusted(4, 0, -4, 0);
-            int textW = sfm.horizontalAdvance(sectionLabel);
-            int textY = textRect.y() + (textRect.height() + sfm.ascent() - sfm.descent()) / 2;
-
-            painter->setPen(m_textMuted);
-            painter->drawText(textRect.x(), textY, sectionLabel);
-
-            // Hairline extending right from label
-            int lineY = textRect.y() + textRect.height() / 2;
-            int lineStart = textRect.x() + textW + 8;
-            if (lineStart < textRect.right()) {
-                QPen hp(m_border);
-                hp.setWidthF(0.5);
-                painter->setPen(hp);
-                painter->drawLine(lineStart, lineY, textRect.right(), lineY);
+            // One shared spec with the scanner's SCAN FOR / RESULTS headers.
+            // The old local one used a 0.67x font (which collapsed under a
+            // pixel-sized base) and a 0.5-width QPen line that started AFTER
+            // the label, so two adjacent sections drew two grey smears of
+            // different lengths at different vertical offsets.
+            painter->setFont(option.font);
+            // option.rect starts after the tree's indent column, so painting
+            // the divider into it produced a hairline that began ~16 px right
+            // of the search field's — two rules 25 px apart with visibly
+            // different left origins. Span the whole viewport instead. (The
+            // remaining ~4 px is the tree's own QSS padding-left, which every
+            // row in the panel shares, so the two rules now read as aligned.)
+            QRect rowRect = option.rect;
+            if (auto* view = qobject_cast<const QAbstractItemView*>(option.widget)) {
+                rowRect.setLeft(0);
+                rowRect.setRight(view->viewport()->width() - 1);
             }
-
+            paintSectionHeaderRow(*painter, rowRect, sectionLabel,
+                                  ThemeManager::instance().current());
             painter->restore();
             return;
         }
@@ -330,11 +337,14 @@ public:
             int sz = opt.fontMetrics.height();
             int y = textRect.y() + (textRect.height() - sz) / 2;
             QRect badge(textRect.x(), y, sz, sz);
-            painter->setRenderHint(QPainter::Antialiasing, true);
+            // Square, AA off: a 3-px rounded rect at this size is four grey
+            // smudges at the corners, and it is the only rounded thing left in
+            // the window.
+            painter->setRenderHint(QPainter::Antialiasing, false);
             painter->setRenderHint(QPainter::TextAntialiasing, true);
             painter->setPen(Qt::NoPen);
             painter->setBrush(m_badgeBg);
-            painter->drawRoundedRect(badge, 3, 3);
+            painter->drawRect(badge);
             QColor letterCol = m_badgeText;
             if (!isChild && !index.data(Qt::UserRole + 3).toBool())
                 letterCol.setAlpha(100);
@@ -343,7 +353,6 @@ public:
             bf.setBold(true);
             painter->setFont(bf);
             painter->drawText(badge, Qt::AlignCenter, letter);
-            painter->setRenderHint(QPainter::Antialiasing, false);
             textRect.setLeft(textRect.left() + sz + 4);
         }
 

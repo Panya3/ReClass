@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QStandardItemModel>
 #include <QTemporaryDir>
+#include <QStyleOptionViewItem>
 
 using namespace rcx;
 
@@ -272,6 +273,46 @@ private slots:
         QCOMPARE(rcx::sessionDocIndexForPath(s, QStringLiteral("C:/proj/foo.rcx")), 1);
         QCOMPARE(rcx::sessionDocIndexForPath(s, QStringLiteral("C:/proj/other.rcx")), -1);
         QCOMPARE(rcx::sessionDocIndexForPath(s, QStringLiteral("")), -1);   // untitled never matches
+    }
+
+    // Section rows follow the ONE shared SectionHeader spec (8 pt regular
+    // uppercase, height fm.height() + 8). The delegate used to carry its own
+    // 0.67x font and a fm.height() + 16 row, so the Project tree's dividers
+    // never matched the scanner's.
+    void testSectionRowUsesTheSharedHeaderSpec() {
+        WorkspaceDelegate d;
+        QStandardItemModel model;
+        NodeTree tree;
+        Node s; s.kind = NodeKind::Struct;
+        s.structTypeName = QStringLiteral("MyType"); s.parentId = 0;
+        tree.addNode(s);
+        QVector<TabInfo> tabs{ TabInfo{ &tree, QStringLiteral("T"), nullptr } };
+        buildProjectExplorer(&model, tabs, {});
+
+        QStyleOptionViewItem opt;
+        opt.font = QFont(QStringLiteral("JetBrains Mono"), 10);
+        opt.fontMetrics = QFontMetrics(opt.font);
+        const int h = d.sizeHint(opt, model.index(0, 0)).height();
+        // Measured with the metrics of the font the row is PAINTED with (the
+        // derived 8 pt), not the 10 pt base — that mismatch is what made the
+        // Project tree's bands taller than the scanner's.
+        QCOMPARE(h, sectionHeaderHeight(
+                        QFontMetrics(sectionHeaderFont(opt.font))));
+        QVERIFY(h != sectionHeaderHeight(opt.fontMetrics));
+        // ... and a data row is NOT that height (the two must stay distinct).
+        QVERIFY(d.sizeHint(opt, model.index(1, 0)).height() != h);
+    }
+
+    // Selection accent = indHoverSpan, the one "current / selected" hue.
+    // borderFocused is the FOCUS RING colour (window frames, input focus) and
+    // meant the selected row read as a second, competing accent.
+    void testSelectionAccentIsTheSharedAccent() {
+        Theme t = ThemeManager::instance().current();
+        t.indHoverSpan  = QColor(11, 22, 33);
+        t.borderFocused = QColor(44, 55, 66);
+        WorkspaceDelegate d;
+        d.setThemeColors(t);
+        QCOMPARE(d.accentColor(), t.indHoverSpan);
     }
 };
 

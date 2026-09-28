@@ -8,6 +8,8 @@
 #include "generator.h"
 #include "workspace_model.h"
 #include "session.h"
+#include "widgets/dock_header.h"
+#include "widgets/panel_search_field.h"
 #include "names/name_provider.h"
 namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; }
 namespace rcx { class RibbonBar; class RibbonActions; }
@@ -235,8 +237,10 @@ private:
     RibbonBar*      m_ribbon        = nullptr;
     QToolBar*       m_ribbonHost    = nullptr;   // QMainWindow layout slot only
     RibbonActions*  m_ribbonActions = nullptr;
-    QAction*        m_actShowRibbon = nullptr;
+    QMenu*          m_ribbonMenu    = nullptr;   // View > Ribbon (also the strip's context menu)
+    QActionGroup*   m_ribbonStateGroup = nullptr;  // Full / Collapsed / Hidden radios
     QActionGroup*   m_ribbonLabelGroup = nullptr;
+    int             m_ribbonState   = 0;         // rcx::RibbonState, mirrors the one QSettings key
     // Menu actions the ribbon's Home tab reuses (captured in createMenus so
     // the ribbon and the menus share one object -> one shortcut, no double-fire).
     QAction*        m_actNewClass  = nullptr;
@@ -254,8 +258,6 @@ private:
     QAction*        m_actBookmarks = nullptr;
     QAction*        m_actRtti      = nullptr;
     QAction*        m_actSplit     = nullptr;
-    QAction*        m_actCodeView  = nullptr;   // ribbon-only: setViewMode(VM_Rendered)
-    QAction*        m_actBothView  = nullptr;   // ribbon-only: setViewMode(VM_Both)
     QMenu*          m_recentFilesMenu = nullptr;
     QTimer*         m_autosaveTimer   = nullptr;
 
@@ -343,6 +345,8 @@ private:
     void createStatusBar();
     void createRibbon();
     void syncRibbonController();
+    // Single owner of ribbon visibility + collapse (rcx::RibbonState).
+    void applyRibbonState(int state, bool persist = true);
     void showPluginsDialog();
     void populateSourceMenu();
     void addRecentFile(const QString& path);
@@ -370,9 +374,13 @@ private:
     // switches the active doc should call this instead of assigning
     // m_activeDocDock directly, so chrome never goes stale.
     void setActiveDocDock(QDockWidget* dock);
-    // Refresh the floating Memory Scanner dock's title bar so it shows the
-    // active editor tab's source name + kind in parentheses, e.g.
-    // "Memory Scanner — notepad.exe (Process)". Called whenever the active
+    // Rebuild the status bar's location segment from ctrl's CURRENT selection
+    // (nodeIdx < 0 = resolve it from the controller). Called on selection AND
+    // on tab activation, so the segment always describes the visible tab.
+    void refreshSelectionStatus(RcxController* ctrl, int nodeIdx);
+    // Refresh the Scanner dock's title bar so it shows the active editor
+    // tab's source name + kind in parentheses, e.g.
+    // "Scanner — notepad.exe (Process)". Called whenever the active
     // tab or its provider changes so the user can never confuse which tab
     // their next scan will run against.
     void updateScannerTitle();
@@ -420,7 +428,6 @@ private:
 
     SplitPane createSplitPane(TabState& tab);
     void applyTheme(const Theme& theme);
-    void syncViewButtons(ViewMode mode);
     SplitPane* findPaneByTabWidget(QTabWidget* tw);
     SplitPane* findActiveSplitPane();
     RcxEditor* activePaneEditor();
@@ -430,22 +437,29 @@ private:
     QTreeView*            m_workspaceTree   = nullptr;
     QStandardItemModel*   m_workspaceModel  = nullptr;
     QSortFilterProxyModel* m_workspaceProxy = nullptr;
-    QLineEdit*            m_workspaceSearch = nullptr;
+    rcx::PanelSearchField* m_workspaceSearch = nullptr;
     // True while a right-click → Rename inline edit is in flight on the
     // Project tree. Gates the model's itemChanged handler so only a genuine
     // user rename pushes a ChangeStructTypeName command (not programmatic
     // rebuilds).
     bool                  m_wsRenaming = false;
     WorkspaceDelegate*    m_workspaceDelegate = nullptr;
-    QLabel*               m_dockTitleLabel  = nullptr;
-    QToolButton*          m_dockCloseBtn    = nullptr;
-    DockGripWidget*       m_dockGrip        = nullptr;
+    rcx::DockHeader*      m_workspaceHeader = nullptr;
+    QLabel*               m_dockTitleLabel  = nullptr;   // owned by m_workspaceHeader
     QSet<uint64_t>        m_pinnedIds;
     // Collapsed left-edge rail shown while the workspace dock is hidden — a
     // discoverable handle to re-open it. A thin, fixed-width, feature-less dock
     // in the LEFT area so it RESERVES its own column outside the editor (the
     // editor + its north/south tab bars sit to its right) rather than overlaying.
     QDockWidget*          m_workspaceRailDock = nullptr;
+    // True while the Project dock is CLOSED as opposed to merely deselected
+    // inside a tab group — QDockWidget reports both as visibilityChanged(false),
+    // and the collapsed rail must only appear for the former. Starts true:
+    // hidden-by-default at launch is the closed state. See rcx::railVisibleFor.
+    bool                  m_workspaceClosed = true;
+    // Builds the shared rcx::DockHeader + the floating BorderOverlay/ResizeGrip
+    // chrome for one dock. Used by all four side docks.
+    rcx::DockHeader* makeDockHeader(QDockWidget* dock, const QString& title);
     void createWorkspaceDock();
     void updateWorkspaceDockEdge();     // docked-only right hairline (header + panel)
     void rebuildWorkspaceModel();       // debounced — safe to call frequently
@@ -489,9 +503,15 @@ private:
     // Scanner dock
     QDockWidget*          m_scannerDock      = nullptr;
     ScannerPanel*         m_scannerPanel     = nullptr;
-    QLabel*               m_scanDockTitle    = nullptr;
-    QToolButton*          m_scanDockCloseBtn = nullptr;
-    DockGripWidget*       m_scanDockGrip     = nullptr;
+    rcx::DockHeader*      m_scanDockHeader   = nullptr;
+    QLabel*               m_scanDockTitle    = nullptr;  // owned by m_scanDockHeader
+    // Height the Bottom-docked scanner asks for on its FIRST show. A
+    // resizeDocks() issued while the dock is hidden is discarded by Qt, so
+    // createScannerDock defers the request to the first visibilityChanged(true).
+    // It is a request: ScannerPanel's own layout minimum currently floors the
+    // dock at 440 px, so this only bites once that comes down.
+    static constexpr int  kScannerDockDefaultH = 360;
+    bool                  m_scannerSizedOnce = false;
     void createScannerDock();
 public:
     // Lazy-build the heavy ScannerPanel widget the first time someone
@@ -506,10 +526,9 @@ private:
     QDockWidget*              m_symbolsDock     = nullptr;
     rcx::UnifiedSymbolPanel*  m_unifiedSymbols  = nullptr;
     // Title bar
-    QLabel*                m_symDockTitle     = nullptr;
-    QToolButton*           m_symDockCloseBtn  = nullptr;
-    QToolButton*           m_symDownloadBtn   = nullptr;
-    DockGripWidget*        m_symDockGrip      = nullptr;
+    rcx::DockHeader*       m_symDockHeader    = nullptr;
+    QLabel*                m_symDockTitle     = nullptr;  // owned by m_symDockHeader
+    QToolButton*           m_symDownloadBtn   = nullptr;  // header right slot
     rcx::SymbolDownloader* m_symDownloader    = nullptr;
 
 public:
@@ -522,9 +541,10 @@ public:
 private:
 
     // Bookmarks dock
-    QDockWidget* m_bookmarksDock   = nullptr;
-    QListWidget* m_bookmarksList   = nullptr;
-    QLineEdit*   m_bookmarksFilter = nullptr;
+    QDockWidget*           m_bookmarksDock   = nullptr;
+    QListWidget*           m_bookmarksList   = nullptr;
+    rcx::PanelSearchField* m_bookmarksFilter = nullptr;
+    rcx::DockHeader*       m_bmDockHeader    = nullptr;
     void createBookmarksDock();
     void refreshBookmarksDock();
     void themeBookmarksContent();   // colour the panel to the editor paper surface

@@ -1,8 +1,13 @@
 #pragma once
 
+#include "paintutil.h"
+#include "svgicon.h"
 #include "themes/thememanager.h"
 #include "widgets/category_chip.h"
+#include "widgets/dock_header.h"
+#include "widgets/empty_overlay.h"
 #include "widgets/fuzzy_match.h"
+#include "widgets/panel_search_field.h"
 #include "names/name_registry.h"
 #include "names/name_provider.h"
 
@@ -46,6 +51,15 @@ static constexpr int kSymPipSz  = 4;     // section pip / source pip size
 static constexpr int kSymBadgeW = 14;
 static constexpr int kSymKindW  = 12;
 static constexpr int kSymSzCol  = 38;    // right size column for type rows
+// Below this row width the address collapses to its low 8 hex digits and the
+// size column is dropped: at the user's ~270 px dock the full 16-digit address
+// plus a size column left the name column about 40 px wide.
+static constexpr int kSymNarrowW = 360;
+// The dock's minimum width. Below it the chip row drops the per-provider
+// counts and reflows into two columns; at or above it the DEFAULT dock width
+// yields one chip row plus the total count.
+static constexpr int kSymNarrowChips = 260;
+static constexpr int kSymDensityIcon = 12;   // density toggle glyph
 
 // Model: a flat list of NamedAddress rows + per-row fuzzy match positions.
 // Implements mimeData() so rows can be dragged out as "source!name" text
@@ -60,7 +74,21 @@ public:
     }
     QVariant data(const QModelIndex& idx, int role = Qt::DisplayRole) const override {
         if (!idx.isValid() || idx.row() < 0 || idx.row() >= m_rows.size()) return {};
-        if (role == Qt::DisplayRole) return m_rows.at(idx.row()).name;
+        const auto& e = m_rows.at(idx.row());
+        if (role == Qt::DisplayRole) return e.name;
+        // The delegate elides the address to its low 8 digits (and drops the
+        // size column) in a narrow dock; the full figures live here so nothing
+        // becomes unreachable.
+        if (role == Qt::ToolTipRole) {
+            QStringList bits;
+            bits << (e.displayName.isEmpty() ? e.name : e.displayName);
+            if (e.address != 0)
+                bits << QStringLiteral("0x%1")
+                        .arg(e.address, 16, 16, QLatin1Char('0')).toUpper();
+            if (e.size != 0) bits << QStringLiteral("%1 B").arg(e.size);
+            if (!e.source.isEmpty()) bits << e.source;
+            return bits.join(QStringLiteral("  \u00b7  "));
+        }
         return {};
     }
     Qt::ItemFlags flags(const QModelIndex& idx) const override {
@@ -218,12 +246,20 @@ public:
         } else {
             rvaText = QStringLiteral("—");
         }
+        // Below ~360 px the 16-digit address eats the name column, so show the
+        // low 8 digits only and skip the size column entirely. The full address
+        // and size stay in the row tooltip (UnifiedSymbolModel ToolTipRole).
+        const bool narrow = r.width() < kSymNarrowW;
+        if (narrow && rvaText.size() > 11)   // "0x" + 8 digits + 1 group mark
+            rvaText = QStringLiteral("0x") + rvaText.right(9);
         const int rvaW = fm.horizontalAdvance(rvaText);
-        const int rvaX = r.right() - qMax(rvaW, m_addressColW) - 6 + (qMax(rvaW, m_addressColW) - rvaW);
+        const int colW = narrow ? rvaW : qMax(rvaW, m_addressColW);
+        const int rvaX = r.right() - colW - 6 + (colW - rvaW);
 
         // [14] Size column for type rows (between name and address).
         int sizeColRight = rvaX - 8;
-        if ((e.kind == QLatin1String("type") || e.kind == QLatin1String("enum"))
+        if (!narrow
+            && (e.kind == QLatin1String("type") || e.kind == QLatin1String("enum"))
             && e.size > 0) {
             QFontMetrics smf(m_smallFont);
             QString szText = QStringLiteral("%1B").arg(e.size);
@@ -346,6 +382,53 @@ private:
     QFont m_smallFont;
 };
 
+// QListView that paints the shared two-line empty overlay when it has no rows
+// - the same treatment the Project tree and the scanner results table get, so
+// an empty Symbols dock reads as "nothing here yet, do X" rather than a bare
+// grey rectangle (the footer used to carry that job, badly).
+class EmptySymbolListView : public QListView {
+public:
+    using QListView::QListView;
+    QString placeholder;
+    QString hint;
+protected:
+    void paintEvent(QPaintEvent* e) override {
+        QListView::paintEvent(e);
+        if (model() && model()->rowCount() > 0) return;
+        paintEmptyOverlay(viewport(), font(), placeholder, hint);
+    }
+};
+
+// Sort + density row. Custom-painted so the checked item can carry a
+// device-exact 2-row accent underline: QSS cannot express device rows, and the
+// old `background: t.selected` + syntaxKeyword-blue text spent a second accent
+// hue on what is just "this control is current".
+class SymbolSortRow : public QWidget {
+public:
+    using QWidget::QWidget;
+    void track(QAbstractButton* b) { m_btns.append(b); }
+protected:
+    void paintEvent(QPaintEvent*) override {
+        const auto& t = ThemeManager::instance().current();
+        QPainter p(this);
+        p.fillRect(rect(), t.background);
+        // Hairline first: the accent underline deliberately REPLACES it under
+        // the checked control, exactly like the tab families do.
+        fillBottomDeviceRowOfRect(p, QRectF(rect()), containerBorderColor(t));
+        for (auto* b : m_btns)
+            if (b && b->isVisible() && b->isChecked())
+                // The button's WIDTH but the ROW's height: a QToolButton is a
+                // couple of device px shorter than the row it sits in, so
+                // using its own rect left the underline floating two rows
+                // above the hairline instead of replacing it.
+                fillBottomDeviceRowsOfRect(
+                    p, QRectF(b->x(), 0, b->width(), height()),
+                    kDockAccentRows, t.indHoverSpan);
+    }
+private:
+    QList<QAbstractButton*> m_btns;
+};
+
 // One unified, search-driven Symbols panel.
 class UnifiedSymbolPanel : public QWidget {
     Q_OBJECT
@@ -360,11 +443,12 @@ public:
         // would cause the dock to balloon out.
         setSizePolicy(QSizePolicy::Ignored, QSizePolicy::MinimumExpanding);
 
-        // [1] Outer layout margins 6,5,6,5 + 3px spacing (type chooser
-        // line 391 conventions). This is the foundational visual rhythm.
+        // Flush: every row owns its own padding and its own hairline, so an
+        // outer frame of empty background around them is pure noise (and, at
+        // the ~270 px dock, 12 px of the name column).
         auto* outer = new QVBoxLayout(this);
-        outer->setContentsMargins(6, 5, 6, 5);
-        outer->setSpacing(3);
+        outer->setContentsMargins(0, 0, 0, 0);
+        outer->setSpacing(0);
 
         buildSearchRow(outer);
         buildChipRow(outer);
@@ -376,6 +460,9 @@ public:
         connect(&NameRegistry::instance(), &NameRegistry::providersChanged, this,
                 &UnifiedSymbolPanel::rebuild);
 
+        setToolTip(QStringLiteral(
+            "\u2191\u2193 navigate  \u00b7  Enter activate  \u00b7  Ctrl+F filter"
+            "  \u00b7  drag a row into the editor"));
         loadPersistedState(); // [22]
         applyTheme(ThemeManager::instance().current());
         refreshSortLabels();
@@ -400,6 +487,7 @@ public:
         base.setFixedPitch(true);
         m_view->setFont(base);
         m_search->setFont(base);
+        m_search->applyTheme(t);
         m_footer->setFont(scaledFont(base, -2));
         m_statusLabel->setFont(scaledFont(base, -2));
         for (auto* b : m_sortBtns) b->setFont(scaledFont(base, -1));
@@ -413,40 +501,31 @@ public:
         m_delegate->setAddressColWidth(fm.horizontalAdvance(
             QStringLiteral("0xFFFF_FFFF_FFFF_FFFF")));
 
-        m_search->setStyleSheet(QStringLiteral(
-            "QLineEdit { background: %1; color: %2; border: 1px solid %4;"
-            " border-radius: 2px; padding: 2px 4px; }"
-            "QLineEdit:focus { border: 1px solid %5; }"
-            "QLineEdit QToolButton { padding: 0px 4px; }"
-            "QLineEdit QToolButton:hover { background: %3; }")
-            .arg(rcx::editorPaperColor(t).name(), t.textDim.name(), t.hover.name(),
-                 t.border.name(), t.borderFocused.name()));
-
+        // Chip row and sort row both sit on t.background: the two backgroundAlt
+        // slabs made the panel read as three stacked boxes, and the sort row's
+        // slab was the loudest thing in the dock.
         if (m_chipRowHost) {
             m_chipRowHost->setAutoFillBackground(true);
             QPalette pp = m_chipRowHost->palette();
-            pp.setColor(QPalette::Window, t.backgroundAlt);
+            pp.setColor(QPalette::Window, t.background);
             m_chipRowHost->setPalette(pp);
         }
-        if (m_sortRow) {
-            m_sortRow->setAutoFillBackground(true);
-            QPalette pp = m_sortRow->palette();
-            pp.setColor(QPalette::Window, t.backgroundAlt);
-            m_sortRow->setPalette(pp);
-        }
-        // [5,6,7] Sort buttons styled with type-chooser palette: muted
-        // off, t.text+selected-bg on, border-right between buttons.
+        // Checked = indHoverSpan text + the row's 2-device-row underline (the
+        // shared "this one is current" grammar). No fill, no box, no second
+        // accent hue: syntaxKeyword blue is document ink, not chrome state.
         const QString sortSheet = QStringLiteral(
             "QToolButton { color: %1; background: transparent;"
-            " border: none; border-right: 1px solid %4;"
-            " padding: 0 5px; }"
-            "QToolButton:last-child { border-right: none; }"
-            "QToolButton:checked { color: %2; background: %3; }"
-            "QToolButton:hover   { color: %2; }")
-            .arg(t.textMuted.name(), t.syntaxKeyword.name(),
-                 t.selected.name(), t.border.name());
+            " border: none; padding: 0 6px; }"
+            "QToolButton:checked { color: %2; }"
+            "QToolButton:hover   { color: %3; }")
+            .arg(t.textDim.name(), t.indHoverSpan.name(), t.text.name());
         for (auto* b : m_sortBtns) b->setStyleSheet(sortSheet);
         for (auto* b : m_densityBtns) b->setStyleSheet(sortSheet);
+        // The density pair is icon-only, so the `:checked { color }` rule above
+        // is dead on it — its whole checked/unchecked tone lives in the icon,
+        // which has to be re-tinted every time the checked state moves.
+        retintDensityIcons(t);
+        if (m_sortRow) m_sortRow->update();
 
         QPalette vp = m_view->palette();
         vp.setColor(QPalette::Base, rcx::editorPaperColor(t));  // match editor surface
@@ -459,15 +538,18 @@ public:
             "QAbstractScrollArea::corner { background: %1; border: none; }")
             .arg(rcx::editorPaperColor(t).name()));
 
+        // textDim (a chrome caption), not textFaint (which is reserved for
+        // document ink), and no slab: it sits on the panel's own ground.
         m_footer->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; background: %2; border-top: 1px solid %3;"
-            " padding: 0 6px; }")
-            .arg(t.textFaint.name(), t.backgroundAlt.name(), t.border.name()));
+            "QLabel { color: %1; background: transparent; padding: 0 %2px; }")
+            .arg(t.textDim.name()).arg(kGutter));
         m_statusLabel->setStyleSheet(QStringLiteral(
-            "QLabel { color: %1; padding: 0 6px; }").arg(t.textFaint.name()));
+            "QLabel { color: %1; padding: 0; }").arg(t.textDim.name()));
 
         for (auto* c : m_providerChips)
             c->setGroupColor(accentFor(c->property("provId").toString()));
+        setFooterText(m_footerText);   // re-elide against the new footer metrics
+        refreshEmptyHint();
         m_view->viewport()->update();
     }
 
@@ -600,21 +682,10 @@ protected:
 private:
     // ── Builders ─────────────────────────────────────────────────────────
     void buildSearchRow(QVBoxLayout* outer) {
-        // [2] Search field with type-chooser-style compact padding.
-        m_search = new QLineEdit(this);
-        m_search->setPlaceholderText(QStringLiteral("Search names..."));
-        auto* searchIcon = m_search->addAction(
-            QIcon(QStringLiteral(":/vsicons/search.svg")), QLineEdit::LeadingPosition);
-        for (auto* btn : m_search->findChildren<QToolButton*>())
-            if (btn->defaultAction() == searchIcon) { btn->setIconSize(QSize(14, 14)); break; }
-        auto* clearAct = m_search->addAction(
-            QIcon(QStringLiteral(":/vsicons/close.svg")), QLineEdit::TrailingPosition);
-        clearAct->setVisible(false);
-        connect(clearAct, &QAction::triggered, m_search, &QLineEdit::clear);
-        connect(m_search, &QLineEdit::textChanged, clearAct,
-                [clearAct](const QString& s) { clearAct->setVisible(!s.isEmpty()); });
-        for (auto* btn : m_search->findChildren<QToolButton*>())
-            if (btn->defaultAction() == clearAct) { btn->setIconSize(QSize(14, 14)); break; }
+        // Shared panel filter box (Project / Bookmarks / Symbols): paper
+        // ground, square, no box at rest, its own device-exact hairline.
+        m_search = new PanelSearchField(QStringLiteral(":/vsicons/search.svg"),
+                                        QStringLiteral("Search names\u2026"), this);
         outer->addWidget(m_search);
 
         m_searchTimer = new QTimer(this);
@@ -644,7 +715,7 @@ private:
         m_chipRowHost = new QWidget(this);
         m_chipRowHost->setFixedHeight(24);
         m_chipRow = new QGridLayout(m_chipRowHost);
-        m_chipRow->setContentsMargins(2, 2, 2, 2);
+        m_chipRow->setContentsMargins(kGutter, 2, kGutter, 2);
         m_chipRow->setSpacing(2);
         m_statusLabel = new QLabel(m_chipRowHost);
         m_statusLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
@@ -656,11 +727,11 @@ private:
     void buildSortRow(QVBoxLayout* outer) {
         // [5,7,8] Sort row mirrors type chooser line 487-594:
         // sort buttons LEFT (anchored to name column), density toggles RIGHT.
-        auto* sortRow = new QWidget(this);
+        auto* sortRow = new SymbolSortRow(this);
         sortRow->setFixedHeight(22);
         m_sortRow = sortRow;
         auto* slay = new QHBoxLayout(sortRow);
-        slay->setContentsMargins(0, 0, 0, 0);
+        slay->setContentsMargins(kGutter, 0, kGutter, 0);
         slay->setSpacing(0);
         const char* sortLabels[] = {"name", "address", "kind"};
         for (int i = 0; i < 3; i++) {
@@ -678,8 +749,10 @@ private:
                 refreshSortLabels();
                 refilter();
                 savePersistedState();
+                if (m_sortRow) m_sortRow->update();
             });
             m_sortBtns.append(b);
+            sortRow->track(b);
             slay->addWidget(b);
         }
         slay->addStretch();
@@ -688,24 +761,28 @@ private:
         // rows); the icon that reads "tighter" maps to Compact (shorter
         // rows). Earlier rev had these swapped — users intuitively read
         // ≡ as the dense one and ☰ as the loose one in most fonts.
-        auto* normal = new QToolButton(sortRow);
-        normal->setText(QStringLiteral("☰"));
-        normal->setCheckable(true); normal->setChecked(true);
-        normal->setToolTip(QStringLiteral("Normal density"));
-        normal->setCursor(Qt::PointingHandCursor);
-        auto* compact = new QToolButton(sortRow);
-        compact->setText(QStringLiteral("≡"));
-        compact->setCheckable(true);
-        compact->setToolTip(QStringLiteral("Compact density"));
-        compact->setCursor(Qt::PointingHandCursor);
+        // Two 12-px tinted SVGs of equal visual mass. The old U+2630 / U+2261
+        // text glyphs rendered at wildly different weights (and widths) across
+        // the fallback fonts, so the pair never read as one toggle.
+        auto* normal = makeDensityButton(sortRow,
+            QStringLiteral(":/vsicons/three-bars.svg"),
+            QStringLiteral("Normal density"));
+        normal->setChecked(true);
+        auto* compact = makeDensityButton(sortRow,
+            QStringLiteral(":/vsicons/list-flat.svg"),
+            QStringLiteral("Compact density"));
         m_densityBtns << normal << compact;
+        sortRow->track(normal);
+        sortRow->track(compact);
         slay->addWidget(normal);
         slay->addWidget(compact);
         auto applyDensity = [this, normal, compact](bool wantCompact) {
             m_delegate->setCompact(wantCompact);
             normal->setChecked(!wantCompact);
             compact->setChecked(wantCompact);
+            retintDensityIcons();
             savePersistedState();
+            if (m_sortRow) m_sortRow->update();
         };
         connect(normal, &QToolButton::clicked, this, [applyDensity] { applyDensity(false); });
         connect(compact, &QToolButton::clicked, this, [applyDensity] { applyDensity(true); });
@@ -714,7 +791,8 @@ private:
 
     void buildList(QVBoxLayout* outer) {
         m_model = new UnifiedSymbolModel(this);
-        m_view  = new QListView(this);
+        m_listView = new EmptySymbolListView(this);
+        m_view = m_listView;
         m_view->setModel(m_model);
         m_view->setMouseTracking(true);
         m_view->setUniformItemSizes(true);
@@ -739,6 +817,7 @@ private:
                 &UnifiedSymbolPanel::onContextMenu);
         // [21] Clickable "T" badge — single-click in badge rect imports.
         m_view->viewport()->installEventFilter(this);
+        refreshEmptyHint();
         // Selection drives footer update (iteration [30]).
         connect(m_view->selectionModel(), &QItemSelectionModel::selectionChanged, this,
                 [this] { updateFooter(); });
@@ -751,9 +830,13 @@ private:
         // propagates up the layout chain and balloons the dock.
         m_footer = new QLabel(this);
         m_footer->setFixedHeight(20);
-        m_footer->setTextFormat(Qt::RichText);
+        m_footer->setTextFormat(Qt::PlainText);
         m_footer->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-        m_footer->setText(QStringLiteral("↑↓ navigate · Enter activate · Ctrl+F filter · drag to editor"));
+        // Selection crumb ONLY, and hidden while nothing is selected. It used
+        // to carry a permanent "navigate / activate / filter / drag" hint that
+        // occupied a whole strip of chrome forever to teach four shortcuts
+        // once; those live in the panel tooltip now.
+        m_footer->hide();
         outer->addWidget(m_footer);
     }
 
@@ -762,12 +845,69 @@ public:
     // sized it to. Returning a small constant width means QListView's own
     // content-width hint (which can grow when a wide row is selected) is
     // effectively ignored.
-    QSize sizeHint() const override { return QSize(280, 400); }
+    QSize sizeHint() const override { return QSize(340, 400); }
     QSize minimumSizeHint() const override { return QSize(200, 120); }
 
 private:
 
     // ── Helpers ──────────────────────────────────────────────────────────
+
+    // The panel's base face: the user's editor font at the chrome size. One
+    // source of truth so chips created outside applyTheme match their
+    // neighbours.
+    static QFont panelBaseFont() {
+        QSettings s(QStringLiteral("REECLASS"), QStringLiteral("REECLASS"));
+        QFont f(s.value(QStringLiteral("font"),
+                        QStringLiteral("JetBrains Mono")).toString(), 10);
+        f.setFixedPitch(true);
+        return f;
+    }
+
+    // A checkable density toggle carrying a tinted 12-px SVG. The icon path
+    // rides on the button so applyTheme can re-tint it for the checked state.
+    QToolButton* makeDensityButton(QWidget* parent, const QString& iconPath,
+                                   const QString& tip) {
+        auto* b = new QToolButton(parent);
+        b->setProperty("rcxIconPath", iconPath);
+        b->setCheckable(true);
+        b->setAutoRaise(true);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setToolTip(tip);
+        b->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        b->setIconSize(QSize(kSymDensityIcon, kSymDensityIcon));
+        return b;
+    }
+
+    // Footer crumb. Stored raw so a resize can re-elide it, and hidden
+    // outright when empty so an unselected panel carries no chrome strip.
+    void setFooterText(const QString& text) {
+        m_footerText = text;
+        if (!m_footer) return;
+        if (text.isEmpty()) { m_footer->clear(); m_footer->hide(); return; }
+        const QFontMetrics fm(m_footer->font());
+        m_footer->setText(fm.elidedText(text, Qt::ElideRight,
+                                        qMax(0, width() - 12)));
+        m_footer->setToolTip(text);
+        m_footer->show();
+    }
+
+    // Keep the list's empty overlay honest: "No matches" while filtering (the
+    // user's own query explains it), the call-to-action otherwise.
+    void refreshEmptyHint() {
+        if (!m_listView) return;
+        const bool filtering = m_search && !m_search->text().trimmed().isEmpty();
+        if (filtering) {
+            m_listView->placeholder = QStringLiteral("No matches");
+            m_listView->hint.clear();
+        } else {
+            m_listView->placeholder = QStringLiteral("No symbols yet");
+            m_listView->hint = QStringLiteral(
+                "Attach a process and click Download, "
+                "or File \u25b8 Import \u25b8 PDB");
+        }
+        m_listView->viewport()->update();
+    }
+
     QFont scaledFont(const QFont& base, int dPx) const {
         QFont f = base;
         if (f.pixelSize() > 0) f.setPixelSize(qMax(7, f.pixelSize() + dPx));
@@ -813,6 +953,10 @@ private:
                 if (c->property("provId").toString() == p->id()) { exists = true; break; }
             if (!exists) {
                 auto* chip = new CategoryChip(p->displayName(), m_chipRowHost);
+                // Chips are created lazily as providers register, i.e. often
+                // AFTER the last applyTheme; without this the new chip stayed
+                // in the system UI font while its neighbours were mono.
+                chip->setFont(scaledFont(panelBaseFont(), -1));
                 chip->setProperty("provId", p->id());
                 chip->setGroupColor(accentFor(p->id()));
                 chip->setChecked(!m_hiddenProviders.contains(p->id()));
@@ -865,6 +1009,7 @@ private:
     }
 
     void refilter() {
+        refreshEmptyHint();
         QString pat = m_search->text().trimmed();
         if (pat.startsWith(QLatin1String("0x"), Qt::CaseInsensitive)) pat.clear();
 
@@ -974,17 +1119,21 @@ private:
                 }
             }
             if (typesSel > 0)
-                m_footer->setText(QStringLiteral("%1 types selected · Σ %2 B")
+                setFooterText(QStringLiteral("%1 types selected · Σ %2 B")
                     .arg(typesSel).arg(totalSize));
             else
-                m_footer->setText(QStringLiteral("%1 rows selected").arg(rows.size()));
+                setFooterText(QStringLiteral("%1 rows selected").arg(rows.size()));
             return;
         }
         if (rows.size() == 1 && rows.first().isValid()) {
             const auto& e = m_model->rowAt(rows.first().row());
             const QString shown = e.displayName.isEmpty() ? e.name : e.displayName;
+            // Plain text, not rich: the crumb is elided to the panel width in
+            // setFooterText, and QFontMetrics::elidedText cannot see through
+            // markup (the bold name used to survive at any width while the
+            // rest of the crumb silently overflowed the dock).
             QStringList bits;
-            bits << QStringLiteral("<b>%1</b>").arg(shown.toHtmlEscaped());
+            bits << shown;
             bits << e.source;
             if (!e.kind.isEmpty()) bits << e.kind;
             if (e.address != 0)
@@ -993,31 +1142,27 @@ private:
             // Discoverability cue: if the row carries a type definition,
             // tell the user double-click imports it.
             if (e.typeIndex != 0 && e.address == 0)
-                bits << QStringLiteral("<i>double-click to import</i>");
+                bits << QStringLiteral("double-click to import");
             else if (e.typeIndex != 0)
-                bits << QStringLiteral("<i>right-click → Import type</i>");
+                bits << QStringLiteral("right-click → Import type");
             else if (e.address != 0)
-                bits << QStringLiteral("<i>double-click to navigate</i>");
-            m_footer->setText(bits.join(QStringLiteral(" · ")));
+                bits << QStringLiteral("double-click to navigate");
+            setFooterText(bits.join(QStringLiteral(" · ")));
             return;
         }
-        // [15] Empty-state-ish hint when no rows or hint about workflow.
-        if (m_model->rowCount() == 0) {
-            if (m_allEntries.isEmpty())
-                m_footer->setText(QStringLiteral("No names yet — open a PDB or scan RTTI"));
-            else
-                m_footer->setText(QStringLiteral("No matches"));
-            return;
-        }
-        m_footer->setText(QStringLiteral(
-            "↑↓ navigate · Enter activate · Ctrl+F filter · drag to editor"));
+        // Nothing selected: no crumb, no strip. The empty LIST is explained by
+        // the view's own overlay (refreshEmptyHint), not by a footer caption.
+        setFooterText(QString());
     }
 
-    // Below ~300 px the chip row can't carry "Name (count)" x4: drop the
-    // counts (tooltips keep them). Re-evaluated on every resize.
+    // Below the breakpoint the chip row can't carry "Name (count)" x4: drop
+    // the counts (tooltips keep them). Re-evaluated on every resize.
+    // kSymNarrowChips == the dock's minimum width, so the DEFAULT width always
+    // gets one chip row plus the count instead of a two-column chip grid.
     void resizeEvent(QResizeEvent* e) override {
         QWidget::resizeEvent(e);
-        const bool narrow = width() < 300;
+        setFooterText(m_footerText);          // re-elide to the new width
+        const bool narrow = width() < kSymNarrowChips;
         if (narrow == m_narrowChips) return;
         m_narrowChips = narrow;
         for (auto* c : m_providerChips) c->setShowCount(!narrow);
@@ -1078,13 +1223,13 @@ private:
                     m_view->setCurrentIndex(m_model->index(0, 0));
                 }
                 m_statusLabel->setText(QStringLiteral("addr lookup"));
-                m_footer->setText(QStringLiteral("Address 0x%1 → %2")
+                setFooterText(QStringLiteral("Address 0x%1 → %2")
                     .arg(addr, 0, 16).arg(m_allEntries[i].name));
                 return;
             }
         }
         m_model->setRows({}, {});
-        m_footer->setText(QStringLiteral("No entry at 0x%1").arg(addr, 0, 16));
+        setFooterText(QStringLiteral("No entry at 0x%1").arg(addr, 0, 16));
     }
 
     void onContextMenu(const QPoint& pos) {
@@ -1234,6 +1379,23 @@ private:
     }
 
     // ── Persistence ([22], [28]) ─────────────────────────────────────────
+    // Single source of truth for the density toggles' tone. QToolButton::
+    // setChecked does not touch a single-pixmap QIcon, so leaving this inside
+    // applyTheme parked the indHoverSpan accent on whichever button was
+    // checked at construction: clicking Compact moved the row underline but
+    // left the purple ink on the (now unchecked) Normal glyph until the next
+    // theme or font change.
+    void retintDensityIcons(const Theme& t) {
+        const qreal iconDpr = devicePixelRatioF();
+        for (auto* b : m_densityBtns)
+            b->setIcon(themedVsIcon(b->property("rcxIconPath").toString(),
+                                    b->isChecked() ? t.indHoverSpan : t.textDim,
+                                    kSymDensityIcon, iconDpr));
+    }
+    void retintDensityIcons() {
+        retintDensityIcons(ThemeManager::instance().current());
+    }
+
     void loadPersistedState() {
         QSettings s("REECLASS", "REECLASS");
         s.beginGroup("SymbolPanel");
@@ -1253,6 +1415,7 @@ private:
         if (m_densityBtns.size() == 2) {
             m_densityBtns[0]->setChecked(!compact);
             m_densityBtns[1]->setChecked(compact);
+            retintDensityIcons();
         }
         if (!lastSearch.isEmpty()) m_search->setText(lastSearch);
     }
@@ -1272,12 +1435,14 @@ private:
     }
 
     // ── Members ──────────────────────────────────────────────────────────
-    QLineEdit*                  m_search = nullptr;
+    PanelSearchField*           m_search = nullptr;
+    EmptySymbolListView*        m_listView = nullptr;
+    QString                     m_footerText;
     QTimer*                     m_searchTimer = nullptr;
     QWidget*                    m_chipRowHost = nullptr;
     QGridLayout*                m_chipRow = nullptr;
     QLabel*                     m_statusLabel = nullptr;
-    QWidget*                    m_sortRow = nullptr;
+    SymbolSortRow*              m_sortRow = nullptr;
     QList<CategoryChip*>        m_providerChips;
     QList<QToolButton*>         m_sortBtns;
     bool                        m_narrowChips = false;

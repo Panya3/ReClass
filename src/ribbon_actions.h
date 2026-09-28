@@ -23,8 +23,12 @@
 //   type.utf8 type.utf16
 //   add.4 add.8 add.64 add.1024 add.2048
 //   insert.4 insert.8 insert.64 insert.1024 insert.2048
-//   sel.delete sel.duplicate sel.comment sel.zero sel.ff sel.random sel.swap
-//   edit.undo edit.redo
+//   sel.delete sel.duplicate sel.comment sel.zero sel.ff sel.random
+//   sel.swap (Big endian — checkable) sel.rtti (no op here; MainWindow
+//     forwards it to Tools ▸ RTTI Browser)
+//   edit.undo edit.redo — the title-strip quick-access pair; they have no
+//     ribbon button, so their label + tooltip are passed in rather than read
+//     from defaultRibbonSpec().
 //
 // Never addAction() these to a widget: the editor already owns the
 // Delete / Insert / 1-5 / P / F / S / U keys; shortcuts appear in tooltips
@@ -86,6 +90,8 @@ public:
         bool anyRoot = false;          // a plain row that is a root struct
         bool allLeaf = false;          // plainCount > 0, no footer/member/root, no container among baseIds
         bool anyScalar = false;        // a plain leaf whose kind isEndianSwappable (Swap target)
+        bool allBigEndian = false;     // …and every one of them is already big-endian (the
+                                       // checked state of the Big endian toggle)
         bool anyPtrConvertible = false;// a plain 4/8-byte leaf without refId (Ptr→Class target)
         bool byteSel = false;          // an editor holds a non-empty byte selection
         bool editing = false;          // any of the controller's editors is inline-editing
@@ -115,10 +121,18 @@ signals:
     // Short user-facing message for the status bar (a trigger that found
     // nothing usable selected, etc.). MainWindow routes it to setAppStatus.
     void statusHint(const QString& text);
+    // sel.rtti has no controller op of its own; MainWindow owns the browser.
+    // Routing it through a signal (rather than connecting to the QAction
+    // directly) keeps it behind wire()'s inline-edit guard like every other
+    // ribbon command.
+    void rttiRequested();
 
 private:
     QAction* add(const QString& id, const QString& text, const QString& tip,
                  const QVariant& data = QVariant());
+    // Label + tooltip from defaultRibbonSpec() (ribbon_spec.h) — the single
+    // source of a command's words.
+    QAction* add(const QString& id, const QVariant& data = QVariant());
     // Every trigger goes through here: the inline-edit guard runs first,
     // then the op. Nothing signals when an inline edit BEGINS (F2 / Enter
     // path), so the enabled predicate can be stale — the guard at trigger

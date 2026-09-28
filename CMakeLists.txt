@@ -213,6 +213,9 @@ add_executable(REECLASS
     src/widgets/category_chip.h
     src/widgets/fuzzy_match.h
     src/widgets/unified_symbol_panel.h
+    src/widgets/dock_header.h
+    src/widgets/panel_search_field.h
+    src/widgets/section_header.h
     src/widgets/enum_picker_popup.h
     third_party/fadec/decode.c
     third_party/fadec/format.c
@@ -502,9 +505,13 @@ if(BUILD_TESTING)
     # Workspace project-explorer model (workspace_model.h): empty-state row count
     # that drives the EmptyHintTreeView overlay + section/type row construction.
     # Header-only logic, so no extra .cpp sources are needed.
-    add_executable(test_workspace tests/test_workspace.cpp)
+    # Also pins the WorkspaceDelegate section-row spec + selection accent,
+    # so theme.cpp/thememanager.cpp come along (section_header.h reads the
+    # live theme) plus Svg for the shared widget headers.
+    add_executable(test_workspace tests/test_workspace.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp)
     target_include_directories(test_workspace PRIVATE src)
-    target_link_libraries(test_workspace PRIVATE ${QT}::Widgets ${QT}::Test)
+    target_link_libraries(test_workspace PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
     add_test(NAME test_workspace COMMAND test_workspace)
 
     # Tooltip-flicker detection. Drives mouse-move events into a live
@@ -1079,6 +1086,18 @@ if(BUILD_TESTING)
         target_link_libraries(test_tab_source_icon PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
         add_test(NAME test_tab_source_icon COMMAND test_tab_source_icon)
 
+        # ── Shared dock chrome: DockHeader / PanelSearchField / SectionHeader ──
+        # Pins the dock-header height against kDocTabBarHeight (the Project
+        # header seam has to land on the doc-tab seam), the one section-header
+        # spec, and the collapsed-rail truth table. Needs Svg for themedVsIcon
+        # and the qrc for :/vsicons.
+        add_executable(test_dock_header tests/test_dock_header.cpp
+            src/themes/theme.cpp src/themes/thememanager.cpp src/resources.qrc)
+        target_include_directories(test_dock_header PRIVATE src)
+        target_link_libraries(test_dock_header PRIVATE
+            ${QT}::Widgets ${QT}::Svg ${QT}::Test)
+        add_test(NAME test_dock_header COMMAND test_dock_header)
+
         # ── Ribbon pixel-glyph icons: crispness / scale rule / family contrast ──
         # Headless (QImage only). Loads the built-in themes straight from
         # src/themes/defaults via RCX_SOURCE_DIR so it doesn't depend on
@@ -1207,6 +1226,27 @@ if(BUILD_TESTING)
             target_link_libraries(bench_spam_append PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
         endif()
         add_test(NAME bench_spam_append COMMAND bench_spam_append)
+
+        # ── Theme tone ladder: the shipped JSON, not the loader ──
+        # Guards two orderings the editor's hierarchy depends on and that
+        # nothing else reads together: selected > hover on dark themes, and
+        # textFaint < textMuted < textDim < text. Parses the files straight
+        # from src/themes/defaults so it fails on the DATA, whatever fallback
+        # ThemeManager might grow.
+        add_executable(test_theme_tones tests/test_theme_tones.cpp)
+        target_include_directories(test_theme_tones PRIVATE src)
+        target_compile_definitions(test_theme_tones PRIVATE
+            RCX_THEME_DIR="${CMAKE_SOURCE_DIR}/src/themes/defaults")
+        target_link_libraries(test_theme_tones PRIVATE ${QT}::Gui ${QT}::Test)
+        add_test(NAME test_theme_tones COMMAND test_theme_tones)
+        # ── Chrome contracts extracted from main.cpp: the ONE pane-tab sheet
+        # and the status bar's location segment. Deliberately cheap (no
+        # controller, no editor): both live in pure headers precisely because
+        # MainWindow itself is not linkable from a test target.
+        add_executable(test_pane_chrome tests/test_pane_chrome.cpp src/themes/theme.cpp)
+        target_include_directories(test_pane_chrome PRIVATE src)
+        target_link_libraries(test_pane_chrome PRIVATE ${QT}::Widgets ${QT}::Test)
+        add_test(NAME test_pane_chrome COMMAND test_pane_chrome)
 
         # Deploy Qt runtime DLLs for tests (run windeployqt on a representative test exe
         # that links the broadest set of Qt modules; all test exes share the same output dir)

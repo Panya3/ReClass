@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core.h"
+#include "paintutil.h"
 #include "themes/thememanager.h"
 
 #include <QWidget>
@@ -8,6 +9,9 @@
 #include <QToolButton>
 #include <QLabel>
 #include <QLayoutItem>
+#include <QPainter>
+#include <QStyle>
+#include <QStyleOption>
 #include <functional>
 
 namespace rcx {
@@ -40,7 +44,9 @@ public:
                              // stable axis — labels and buttons of differing
                              // natural heights then center on the same line.
         m_layout = new QHBoxLayout(this);
-        m_layout->setContentsMargins(6, 0, 6, 0);
+        // kGutter, like every other strip's first ink — the left margin has to
+        // read as ONE line down the window, not five slightly different ones.
+        m_layout->setContentsMargins(kGutter, 0, kGutter, 0);
         m_layout->setSpacing(2);
         applyTheme(ThemeManager::instance().current());
         setVisible(false);  // until first setCrumbs (no document yet)
@@ -61,13 +67,32 @@ public:
 
     void applyTheme(const Theme& t) {
         m_theme = t;
-        const QColor strip = menuBarColor(t);
-        setStyleSheet(QStringLiteral(
-            "#rcxBreadcrumbBar { background:%1; border-bottom:1px solid %2; }")
-            .arg(strip.name(), t.border.name()));
+        // The band sits INSIDE the document column, so it is paper — not a
+        // third chrome strip. It used to be menuBarColor (the title/menu tone),
+        // which made a navigation aid outrank the data it navigates. The
+        // bottom seam moved out of QSS and into paintEvent (see below).
+        setStyleSheet(QStringLiteral("#rcxBreadcrumbBar { background:%1; }")
+            .arg(editorPaperColor(t).name()));
         rebuild();
     }
 
+protected:
+    // The bottom seam is painted, not QSS: a "1px" CSS border covers 1.25
+    // device px at 125 % DPI and snaps to TWO rows, so it read as a double
+    // line beside the editor's device-exact frame. containerBorderColor is the
+    // tone for every seam that touches the document.
+    void paintEvent(QPaintEvent*) override {
+        // QWidget::paintEvent is a no-op, so a subclass that reimplements it
+        // has to draw the stylesheet background itself (Qt's documented
+        // PE_Widget idiom) or WA_StyledBackground stops working.
+        QStyleOption opt;
+        opt.initFrom(this);
+        QPainter p(this);
+        style()->drawPrimitive(QStyle::PE_Widget, &opt, &p, this);
+        fillBottomDeviceRowOfRect(p, QRectF(rect()), containerBorderColor(m_theme));
+    }
+
+public:
     // ── Test accessors ──
     bool barVisible() const { return isVisible(); }
     // Rendered tokens left→right: class names, "›" separators, field
@@ -111,17 +136,30 @@ private:
         m_segments.push_back(QStringLiteral("›"));
     }
 
-    void makeClickable(const QString& text, uint64_t index, bool current) {
+    // `deepest` = the crumb you are standing on; `lone` = it is the ONLY crumb.
+    // Tone ladder: a single crumb only repeats the class the doc tab and the
+    // command row already name, so it stays textDim and regular. From depth 2
+    // the trail becomes navigation — ancestors textDim, the deepest one text at
+    // DemiBold, the single weight step on this surface.
+    void makeClickable(const QString& text, uint64_t index, bool deepest, bool lone) {
         auto* btn = new QToolButton(this);
         btn->setText(text);
         btn->setAutoRaise(true);
         btn->setCursor(Qt::PointingHandCursor);
+        const bool primary = deepest && !lone;
+        // The layout already spends kGutter on the left edge, so the FIRST
+        // crumb must not spend it again: with the button's own padding the
+        // band's first ink landed further in than the pane tabs' and the doc
+        // tabs', which is the one thing the shared gutter exists to prevent.
+        const bool firstInStrip = (m_layout->count() == 0);
         btn->setStyleSheet(QStringLiteral(
-            "QToolButton { border:none; padding:0 2px; color:%1; background:transparent;%2 }"
+            "QToolButton { border:none; padding:0 2px; padding-left:%4px;"
+            " color:%1; background:transparent;%2 }"
             "QToolButton:hover { color:%3; text-decoration:underline; }")
-            .arg(m_theme.text.name(),
-                 current ? QStringLiteral(" font-weight:bold;") : QString(),
-                 m_theme.indHoverSpan.name()));
+            .arg((primary ? m_theme.text : m_theme.textDim).name(),
+                 primary ? QStringLiteral(" font-weight:600;") : QString(),
+                 m_theme.text.name())    // hover = link cue, not the accent
+            .arg(firstInStrip ? 0 : 2));
         connect(btn, &QToolButton::clicked, this, [this, index]() {
             if (m_onCrumb) m_onCrumb(index);
         });
@@ -176,8 +214,8 @@ private:
             const bool isCurrent = (idx == items.size() - 1);
             // Every class crumb is clickable (collapse-to + scroll). The
             // current/deepest one just scrolls (nothing deeper to collapse);
-            // it is bolded to mark "you are here".
-            makeClickable(item.cls, item.index, isCurrent);
+            // it carries the weight step that marks "you are here".
+            makeClickable(item.cls, item.index, isCurrent, items.size() == 1);
             m_segments.push_back(item.cls);
             first = false;
         }

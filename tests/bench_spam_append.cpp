@@ -183,10 +183,12 @@ void BenchSpamAppend::benchSpamAppend100()
     QVERIFY(wallMs > 0);
 }
 
-// Direct regression for the "last hex64 isn't dimmed" report: append five
-// fields one at a time, then for each frame verify Scintilla actually has
-// IND_HEX_DIM applied on the byte range of the most-recently-added line.
-// This is the exact symptom the user is seeing in production.
+// Direct regression for the "last hex64 isn't toned" report: append five
+// fields one at a time, then for each frame verify Scintilla actually has the
+// hex row's tone applied on the most-recently-added line. The tone is
+// IND_HEX_TYPE over [typeStart, valueStart) — the type column and the ASCII
+// slot; the bytes themselves keep the lexer's theme.text and carry no tone
+// indicator at all, so sampling the whole line would (correctly) miss.
 void BenchSpamAppend::testHexDimOnLastAppendedLine()
 {
     NodeTree tree = buildSeedTree(/*seed=*/3);
@@ -202,7 +204,7 @@ void BenchSpamAppend::testHexDimOnLastAppendedLine()
     }
 
     // Same indicator id used by editor.cpp
-    static constexpr int IND_HEX_DIM = 9;
+    static constexpr int IND_HEX_TYPE = 8;
 
     auto* sci = editor.scintilla();
 
@@ -229,25 +231,33 @@ void BenchSpamAppend::testHexDimOnLastAppendedLine()
             }
             QVERIFY2(line >= 0, "couldn't locate field line by id");
 
-            long byteStart = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
-                                                (unsigned long)line);
-            long byteEnd = sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION,
-                                              (unsigned long)line);
-            QVERIFY2(byteEnd > byteStart, "empty line");
+            // Sample the toned region only: [typeStart, valueStart).
+            const LineMeta* lmt = editor.metaForLine(line);
+            QVERIFY2(lmt, "no meta for line");
+            rcx::LineGeometry geom = rcx::LineGeometry::forLine(*lmt);
+            rcx::ColumnSpan vspan = rcx::valueSpanFor(*lmt, 0, lmt->effectiveTypeW,
+                                                      lmt->effectiveNameW);
+            QVERIFY2(vspan.valid && vspan.start > geom.typeStart(), "bad geometry");
+            long byteStart = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                                (unsigned long)line,
+                                                (long)geom.typeStart());
+            long byteEnd = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                              (unsigned long)line, (long)vspan.start);
+            QVERIFY2(byteEnd > byteStart, "empty tone span");
 
             int sampleHits = 0, sampleTotal = 0;
             for (long off = byteStart; off < byteEnd;
                  off += qMax<long>(1, (byteEnd - byteStart) / 8)) {
                 ++sampleTotal;
                 long val = sci->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT,
-                                              (unsigned long)IND_HEX_DIM, off);
+                                              (unsigned long)IND_HEX_TYPE, off);
                 if (val) ++sampleHits;
             }
             qDebug() << "  press" << press << "field#" << p << "line=" << line
-                     << "byteRange=[" << byteStart << ".." << byteEnd << ")"
-                     << "IND_HEX_DIM hits:" << sampleHits << "/" << sampleTotal;
+                     << "toneRange=[" << byteStart << ".." << byteEnd << ")"
+                     << "IND_HEX_TYPE hits:" << sampleHits << "/" << sampleTotal;
             QVERIFY2(sampleHits == sampleTotal,
-                     QStringLiteral("press %1, field %2: IND_HEX_DIM missing")
+                     QStringLiteral("press %1, field %2: IND_HEX_TYPE missing")
                          .arg(press).arg(p).toUtf8().constData());
         }
     }
@@ -271,7 +281,7 @@ void BenchSpamAppend::testControllerSpamDownPreservesAllDim()
     ctrl.refresh();
     ctrl.refresh();  // prime diff path
 
-    static constexpr int IND_HEX_DIM = 9;
+    static constexpr int IND_HEX_TYPE = 8;
     auto* sci = editor->scintilla();
 
     // Find the root struct id (the only Struct node with parentId 0).
@@ -317,25 +327,32 @@ void BenchSpamAppend::testControllerSpamDownPreservesAllDim()
             }
             QVERIFY2(line >= 0, "couldn't locate field line");
 
-            long byteStart = sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE,
-                                                (unsigned long)line);
-            long byteEnd = sci->SendScintilla(QsciScintillaBase::SCI_GETLINEENDPOSITION,
-                                              (unsigned long)line);
-            QVERIFY2(byteEnd > byteStart, "empty line");
+            const LineMeta* lmt = editor->metaForLine(line);
+            QVERIFY2(lmt, "no meta for line");
+            rcx::LineGeometry geom = rcx::LineGeometry::forLine(*lmt);
+            rcx::ColumnSpan vspan = rcx::valueSpanFor(*lmt, 0, lmt->effectiveTypeW,
+                                                      lmt->effectiveNameW);
+            QVERIFY2(vspan.valid && vspan.start > geom.typeStart(), "bad geometry");
+            long byteStart = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                                (unsigned long)line,
+                                                (long)geom.typeStart());
+            long byteEnd = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                              (unsigned long)line, (long)vspan.start);
+            QVERIFY2(byteEnd > byteStart, "empty tone span");
 
             int sampleHits = 0, sampleTotal = 0;
             for (long off = byteStart; off < byteEnd;
                  off += qMax<long>(1, (byteEnd - byteStart) / 8)) {
                 ++sampleTotal;
                 long val = sci->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT,
-                                              (unsigned long)IND_HEX_DIM, off);
+                                              (unsigned long)IND_HEX_TYPE, off);
                 if (val) ++sampleHits;
             }
             qDebug() << "  ctrl press" << press << "field#" << p << "line=" << line
-                     << "byteRange=[" << byteStart << ".." << byteEnd << ")"
-                     << "IND_HEX_DIM hits:" << sampleHits << "/" << sampleTotal;
+                     << "toneRange=[" << byteStart << ".." << byteEnd << ")"
+                     << "IND_HEX_TYPE hits:" << sampleHits << "/" << sampleTotal;
             if (sampleHits != sampleTotal) {
-                QFAIL(QStringLiteral("press %1, field %2 (line %3): IND_HEX_DIM missing — %4/%5 hits")
+                QFAIL(QStringLiteral("press %1, field %2 (line %3): IND_HEX_TYPE missing — %4/%5 hits")
                       .arg(press).arg(p).arg(line).arg(sampleHits).arg(sampleTotal)
                       .toUtf8().constData());
             }

@@ -52,6 +52,55 @@ static void sendMouseMove(QWidget* viewport, const QPoint& pos) {
     QApplication::sendEvent(viewport, &move);
 }
 
+// Mirrors of editor.cpp's private indicator slots. Kept as their own names
+// (not the editor's) so the mirroring is obvious at the use site.
+static constexpr int kIndHexByte   = 7;   // text     — the hex value span (the bytes)
+static constexpr int kIndHexType   = 8;   // textDim  — hex type column + name slot
+static constexpr int kIndHexDim    = 9;   // textFaint — furniture only
+static constexpr int kIndZero      = 10;  // textMuted — ASCII column + 00 bytes
+static constexpr int kIndHoverSpan = 11;
+static constexpr int kIndCmdPill   = 12;  // footer pill outline
+static constexpr int kIndPillHover = 30;  // footer pill hover fill
+
+// Is indicator `ind` set on the character at (line, col)?
+static bool indAt(QsciScintilla* sci, int ind, int line, int col) {
+    long pos = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                  (unsigned long)line, (long)col);
+    return sci->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT,
+                              (unsigned long)ind, pos) != 0;
+}
+
+// First hex-preview field row in the document (they carry the byte grid).
+static int firstHexPreviewLine(RcxEditor* ed) {
+    for (int i = kFirstDataLine; ; ++i) {
+        const LineMeta* lm = ed->metaForLine(i);
+        if (!lm) return -1;
+        if (lm->lineKind == LineKind::Field && !lm->isContinuation
+            && !lm->isMemberLine && isHexPreview(lm->nodeKind))
+            return i;
+    }
+}
+
+// Bring `line` into the viewport so colToViewport() yields a point that
+// actually hit-tests to it (the fixture document is far taller than the
+// editor, and an off-screen line's computed y lands on a different row).
+static void scrollLineIntoView(QsciScintilla* sci, int line) {
+    sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE,
+                       (unsigned long)qMax(0, line - 3));
+    QApplication::processEvents();
+}
+
+// First footer row carrying the append/trim pills.
+static int firstPillFooterLine(RcxEditor* ed) {
+    for (int i = 0; ; ++i) {
+        const LineMeta* lm = ed->metaForLine(i);
+        if (!lm) return -1;
+        if (lm->lineKind == LineKind::Footer
+            && ed->scintilla()->text(i).contains(QStringLiteral("+10h")))
+            return i;
+    }
+}
+
 static void sendLeftClick(QWidget* viewport, const QPoint& pos) {
     QMouseEvent press(QEvent::MouseButtonPress, QPointF(pos), QPointF(pos),
                       Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
@@ -3838,6 +3887,116 @@ private slots:
         m_editor->cancelInlineEdit();
         QVERIFY(!m_editor->isEditing());
 
+        // Clear stack-object refs (file convention — every test that calls
+        // setProviderRef must clear it, or later hovers deref freed memory).
+        m_editor->setProviderRef(nullptr, nullptr, nullptr);
+        m_editor->applyDocument(m_result);
+    }
+
+    // ══ Document tones (P0 #10) ═════════════════════════════════════════
+    // The reading order on this surface is bytes > type column > ASCII/zero
+    // bytes > tree connectors > braces and footer. The hex row used to be
+    // filled edge-to-edge with IND_HEX_DIM (textFaint, 2.18:1 on paper),
+    // which pushed the only real data on screen BELOW the punctuation.
+
+    void testHexRowTypeColumnToneNotWholeLine() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+
+        const int line = firstHexPreviewLine(m_editor);
+        QVERIFY2(line >= 0, "fixture has no hex-preview row");
+        const LineMeta* lm = m_editor->metaForLine(line);
+        QVERIFY(lm);
+        LineGeometry g = LineGeometry::forLine(*lm);
+        ColumnSpan vs = valueSpanFor(*lm, 0, lm->effectiveTypeW, lm->effectiveNameW);
+        QVERIFY(vs.valid && vs.start > g.typeStart());
+
+        // The type column and the name/ASCII slot carry the type tone…
+        for (int col = g.typeStart(); col < vs.start; ++col)
+            QVERIFY2(indAt(sci, kIndHexType, line, col),
+                     qPrintable(QString("IND_HEX_TYPE missing at col %1 of line %2")
+                                    .arg(col).arg(line)));
+
+        // …and not one character of the row's data is furniture-faint.
+        for (int col = g.typeStart(); col < vs.end; ++col)
+            QVERIFY2(!indAt(sci, kIndHexDim, line, col),
+                     qPrintable(QString("IND_HEX_DIM still fills hex row col %1 "
+                                        "(line %2) — defect 12 regression")
+                                    .arg(col).arg(line)));
+
+        // The bytes are painted explicitly at theme.text — the type tone
+        // stops at the value column and the byte tone starts there.
+        for (int col = vs.start; col < vs.end; ++col) {
+            QVERIFY2(!indAt(sci, kIndHexType, line, col),
+                     qPrintable(QString("IND_HEX_TYPE leaked into the value span "
+                                        "at col %1").arg(col)));
+            QVERIFY2(indAt(sci, kIndHexByte, line, col),
+                     qPrintable(QString("IND_HEX_BYTE missing on byte col %1")
+                                    .arg(col)));
+        }
+    }
+
+    // The byte grid may NOT be left to the lexer. The document is lexed as
+    // C++ and a hex row's ASCII preview is real memory: a 0x22 (") or 0x27
+    // (') byte opens an unterminated literal and drops every character to
+    // EOL to QsciLexerCPP::UnclosedString, and a byte token starting with a
+    // digit lexes as Number (green) while one starting with a hex letter
+    // lexes as Identifier. The whole-row textFaint fill used to mask all of
+    // that; deleting it (defect 12) is what made the byte tone mandatory.
+    void testHexBytesArePaintedNotLeftToTheLexer() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "Quoted"; root.name = "q";
+        root.parentId = 0; root.offset = 0;
+        const uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+        for (int off = 0; off < 0x20; off += 8) {
+            Node n; n.kind = NodeKind::Hex64; n.name = "raw";
+            n.parentId = rootId; n.offset = off;
+            tree.addNode(n);
+        }
+        // Row 0 previews as ` !"#$%&'` — both a double and a single quote.
+        // Row 1 is all digit-leading tokens, row 2 all letter-leading, row 3
+        // mixes zeros in. Every one of them must read as one tone.
+        QByteArray data(0x20, '\0');
+        for (int i = 0; i < 8; ++i)  data[i]        = (char)(0x20 + i);
+        for (int i = 0; i < 8; ++i)  data[8 + i]    = (char)(0x30 + i);
+        for (int i = 0; i < 8; ++i)  data[0x10 + i] = (char)(0xA0 + i);
+        data[0x18] = (char)0x2F; data[0x19] = (char)0x2F;   // "//" in ASCII
+        BufferProvider prov(data, QStringLiteral("tone.bin"));
+        ComposeResult r = compose(tree, prov);
+        m_editor->applyDocument(r);
+        auto* sci = m_editor->scintilla();
+
+        int checked = 0;
+        for (int i = kFirstDataLine; ; ++i) {
+            const LineMeta* lm = m_editor->metaForLine(i);
+            if (!lm) break;
+            if (lm->lineKind != LineKind::Field || !isHexPreview(lm->nodeKind))
+                continue;
+            const QString t = sci->text(i);
+            ColumnSpan vs = valueSpanFor(*lm, t.size(), lm->effectiveTypeW,
+                                         lm->effectiveNameW);
+            QVERIFY(vs.valid);
+            for (int col = vs.start; col < vs.end && col < t.size(); ++col) {
+                if (t[col] == QLatin1Char(' ')) continue;
+                QVERIFY2(indAt(sci, kIndHexByte, i, col),
+                         qPrintable(QString("line %1 col %2 ('%3') has no byte "
+                                            "tone — it would render at "
+                                            "whatever the C++ lexer chose")
+                                        .arg(i).arg(col).arg(t[col])));
+            }
+            ++checked;
+        }
+        QCOMPARE(checked, 4);
+
+        // …and the tone is theme.text, i.e. the brightest ink on the surface.
+        const auto& th = rcx::ThemeManager::instance().current();
+        const long fore = sci->SendScintilla(QsciScintillaBase::SCI_INDICGETFORE,
+                                             (unsigned long)kIndHexByte);
+        QCOMPARE(QColor((int)(fore & 0xFF), (int)((fore >> 8) & 0xFF),
+                        (int)((fore >> 16) & 0xFF)).name(), th.text.name());
+
         m_editor->applyDocument(m_result);
     }
 
@@ -3935,6 +4094,47 @@ private slots:
         m_editor->applyDocument(m_result);
     }
 
+    // valueSpanFor() hard-codes 23 columns for every hex kind, which is eight
+    // bytes short of a Hex128 row (format.cpp emits qMax(23, size*3 - 1)).
+    // The tone passes derive the end from LineMeta::lineByteCount instead, so
+    // a Hex128 row is not half-toned.
+    void testHex128ToneCoversAllSixteenBytes() {
+        NodeTree tree;
+        tree.baseAddress = 0;
+        Node root; root.kind = NodeKind::Struct;
+        root.structTypeName = "Wide"; root.name = "w";
+        root.parentId = 0; root.offset = 0;
+        const uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+        Node n; n.kind = NodeKind::Hex128; n.name = "raw";
+        n.parentId = rootId; n.offset = 0;
+        tree.addNode(n);
+
+        QByteArray data(0x20, '\0');
+        for (int i = 0; i < 8; ++i) data[i] = (char)(0xA1 + i);   // live bytes
+        // bytes 8..15 stay 00 — the half valueSpanFor never reached.
+        BufferProvider prov(data, QStringLiteral("tone.bin"));
+        ComposeResult r = compose(tree, prov);
+        m_editor->applyDocument(r);
+        auto* sci = m_editor->scintilla();
+
+        const int line = firstHexPreviewLine(m_editor);
+        QVERIFY(line >= 0);
+        const LineMeta* lm = m_editor->metaForLine(line);
+        QVERIFY(lm && lm->lineByteCount == 16);
+        const QString t = sci->text(line);
+        ColumnSpan vs = valueSpanFor(*lm, t.size(), lm->effectiveTypeW,
+                                     lm->effectiveNameW);
+        QVERIFY(vs.valid);
+        const int last = vs.start + 15 * 3;          // byte 15, "00"
+        QVERIFY(last + 1 < t.size());
+        QCOMPARE(t.mid(last, 2), QStringLiteral("00"));
+        QVERIFY2(indAt(sci, kIndHexByte, line, last),
+                 "byte 15 of a Hex128 row has no tone at all");
+        QVERIFY2(indAt(sci, kIndZero, line, last),
+                 "the second half of a Hex128 row kept full weight while the "
+                 "first half receded");        m_editor->applyDocument(m_result);
+    }
+
     // ── Test: vftable block name is locked (not editable via F2/click) ──
     void testVftableBlockNameLocked() {
         NodeTree tree;
@@ -4003,7 +4203,326 @@ private slots:
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
 
+        // Clear stack-object refs (file convention — every test that calls
+        // setProviderRef must clear it, or later hovers deref freed memory).
+        m_editor->setProviderRef(nullptr, nullptr, nullptr);
         m_editor->applyDocument(m_result);
+    }
+
+    // Typing inside the byte grid must not paint the character the user just
+    // typed as furniture. replaceCharAt re-applies a tone after every
+    // SCI_REPLACETARGET; it used to re-apply IND_HEX_DIM (correct only while
+    // that indicator filled whole hex rows), and nothing clears it until a
+    // refresh — which is suppressed for the duration of the edit.
+    void testInlineHexEditKeepsTheByteTone() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+        const int line = firstHexPreviewLine(m_editor);
+        QVERIFY(line >= 0);
+        scrollLineIntoView(sci, line);
+
+        m_editor->setHexEditPending(true);
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Value, line));
+        QVERIFY(m_editor->isEditing());
+
+        int l0, c0; sci->getCursorPosition(&l0, &c0);
+        const long pos = sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN,
+                                            (unsigned long)l0, (long)c0);
+        QKeyEvent ke(QEvent::KeyPress, Qt::Key_F, Qt::NoModifier,
+                     QStringLiteral("f"));
+        QApplication::sendEvent(sci, &ke);
+
+        QVERIFY2(sci->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT,
+                                    (unsigned long)kIndHexByte, pos) != 0,
+                 "the typed byte lost the byte tone");
+        QVERIFY2(sci->SendScintilla(QsciScintillaBase::SCI_INDICATORVALUEAT,
+                                    (unsigned long)kIndHexDim, pos) == 0,
+                 "the typed byte was painted furniture-faint — the faintest "
+                 "ink in its own row");
+
+        m_editor->cancelInlineEdit();
+        m_editor->applyDocument(m_result);
+    }
+
+    void testZeroBytesAndAsciiColumnAreMuted() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+
+        // Find a hex row that has BOTH a 00 token and a non-zero one, so the
+        // test proves the tone is per-token and not a second whole-row wash.
+        int line = -1, zeroCol = -1, liveCol = -1;
+        ColumnSpan vs, ns;
+        for (int i = kFirstDataLine; ; ++i) {
+            const LineMeta* lm = m_editor->metaForLine(i);
+            if (!lm) break;
+            if (lm->lineKind != LineKind::Field || lm->isContinuation
+                || lm->isMemberLine || !isHexPreview(lm->nodeKind)) continue;
+            const QString t = sci->text(i);
+            ColumnSpan v = valueSpanFor(*lm, t.size(), lm->effectiveTypeW,
+                                        lm->effectiveNameW);
+            if (!v.valid) continue;
+            int z = -1, l = -1;
+            for (int c = v.start; c + 1 < v.end && c + 1 < t.size(); c += 3) {
+                const bool zero = (t[c] == QLatin1Char('0') && t[c + 1] == QLatin1Char('0'));
+                if (zero && z < 0) z = c;
+                if (!zero && t[c].isLetterOrNumber() && l < 0) l = c;
+            }
+            if (z >= 0 && l >= 0) {
+                line = i; zeroCol = z; liveCol = l; vs = v;
+                ns = nameSpanFor(*lm, lm->effectiveTypeW, lm->effectiveNameW);
+                break;
+            }
+        }
+        QVERIFY2(line >= 0, "no hex row with both zero and non-zero bytes");
+
+        // ASCII preview column recedes to textMuted…
+        QVERIFY(ns.valid);
+        for (int col = ns.start; col < ns.end; ++col)
+            QVERIFY2(indAt(sci, kIndZero, line, col),
+                     qPrintable(QString("ASCII column not muted at col %1").arg(col)));
+
+        // …and so does every 00 token, but never a byte that holds data.
+        QVERIFY2(indAt(sci, kIndZero, line, zeroCol)
+                     && indAt(sci, kIndZero, line, zeroCol + 1),
+                 "a 00 byte kept full text weight");
+        QVERIFY2(!indAt(sci, kIndZero, line, liveCol)
+                     && !indAt(sci, kIndZero, line, liveCol + 1),
+                 qPrintable(QString("non-zero byte at col %1 was muted").arg(liveCol)));
+    }
+
+    // The tone pass runs on every applyDocument, including the incremental
+    // SCI_REPLACETARGET path — which clears indicators on the patched lines.
+    // (reference_hover_span_refresh_wipe: anything painted once must be
+    // re-painted by whatever re-renders the line.)
+    void testDocumentTonesSurvivePatchRefresh() {
+        NodeTree tree = makeTestTree();
+        BufferProvider prov = makeTestProvider();
+        ComposeResult r1 = compose(tree, prov);
+        m_editor->applyDocument(r1);
+        m_editor->applyDocument(r1);   // prime m_prevText for the diff path
+
+        // Rename one field → a one-line text diff → the patch path.
+        int victim = -1;
+        for (int i = 0; i < tree.nodes.size(); ++i)
+            if (isHexPreview(tree.nodes[i].kind)) { victim = i; break; }
+        QVERIFY(victim >= 0);
+        tree.nodes[victim].name = QStringLiteral("patched_name");
+        ComposeResult r2 = compose(tree, prov);
+        m_editor->applyDocument(r2);
+        QVERIFY2(m_editor->lastApplyWasPatch(),
+                 "expected the incremental patch path, got a full replace");
+
+        auto* sci = m_editor->scintilla();
+        const int line = firstHexPreviewLine(m_editor);
+        QVERIFY(line >= 0);
+        const LineMeta* lm = m_editor->metaForLine(line);
+        QVERIFY(lm);
+        LineGeometry g = LineGeometry::forLine(*lm);
+        ColumnSpan vs = valueSpanFor(*lm, 0, lm->effectiveTypeW, lm->effectiveNameW);
+        ColumnSpan ns = nameSpanFor(*lm, lm->effectiveTypeW, lm->effectiveNameW);
+        QVERIFY(vs.valid && ns.valid);
+        QVERIFY2(indAt(sci, kIndHexType, line, g.typeStart()),
+                 "IND_HEX_TYPE lost across a patch refresh");
+        QVERIFY2(indAt(sci, kIndZero, line, ns.start),
+                 "IND_ZERO lost across a patch refresh");
+
+        m_editor->applyDocument(m_result);
+    }
+
+    // ══ Command row (P1 #24) ════════════════════════════════════════════
+
+    void testCommandRowSourceAndAddressAreNotFaint() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+        const QString cmd =
+            QStringLiteral("[\u25B8] 'peb_snapshot.bin'\u25BE  0xD87B5E5000  struct _PEB64 {");
+        m_editor->setCommandRowText(cmd);
+
+        const QString t = sci->text(0);
+        ColumnSpan src  = commandRowSrcSpan(t);
+        ColumnSpan addr = commandRowAddrSpan(t);
+        QVERIFY(src.valid && addr.valid);
+
+        // Both spans are editable (click = source picker / address edit), so
+        // they read at textDim, not as furniture.
+        QVERIFY2(indAt(sci, kIndHexType, 0, src.start),
+                 "source label is not painted at the type tone");
+        QVERIFY2(!indAt(sci, kIndHexType, 0, src.start)
+                     || !indAt(sci, kIndHexDim, 0, src.start),
+                 "source label is still faint");
+        QVERIFY2(indAt(sci, kIndHexType, 0, addr.start),
+                 "base address is not painted at the type tone");
+        QVERIFY2(!indAt(sci, kIndHexDim, 0, addr.start),
+                 "base address is still faint");
+
+        // The chevron and the trailing brace stay furniture.
+        ColumnSpan chev = commandRowChevronSpan(t);
+        if (chev.valid)
+            QVERIFY2(indAt(sci, kIndHexDim, 0, chev.start),
+                     "the [\u25B8] chevron stopped being furniture");
+        const int brace = t.lastIndexOf(QLatin1Char('{'));
+        QVERIFY(brace > 0);
+        QVERIFY2(indAt(sci, kIndHexDim, 0, brace),
+                 "the trailing { stopped being furniture");
+
+        // …and it all survives the SCI_REPLACETARGET that rewrites line 0.
+        m_editor->setCommandRowText(cmd + QStringLiteral(" "));
+        QVERIFY2(indAt(sci, kIndHexType, 0, addr.start),
+                 "command-row tone lost after a setCommandRowText patch");
+    }
+
+    // The base address is printed IN the command row, so repeating it in the
+    // offset margin showed the same number twice on the same line. Relative
+    // mode always blanked it; absolute mode did not.
+    void testCommandRowMarginBlankInAbsoluteMode() {
+        auto* sci = m_editor->scintilla();
+        m_editor->setRelativeOffsets(false);
+        m_editor->applyDocument(m_result);
+
+        char buf[256] = {0};
+        sci->SendScintilla(QsciScintillaBase::SCI_MARGINGETTEXT,
+                           (unsigned long)0, (void*)buf);
+        const QString margin = QString::fromUtf8(buf);
+        QVERIFY2(margin.trimmed().isEmpty(),
+                 qPrintable(QString("command-row margin should be blank in "
+                                    "absolute mode, got '%1'").arg(margin)));
+
+        // A data row still shows its absolute offset — we blanked one line,
+        // not the margin.
+        const int line = firstHexPreviewLine(m_editor);
+        QVERIFY(line >= 0);
+        char buf2[256] = {0};
+        sci->SendScintilla(QsciScintillaBase::SCI_MARGINGETTEXT,
+                           (unsigned long)line, (void*)buf2);
+        QVERIFY2(!QString::fromUtf8(buf2).trimmed().isEmpty(),
+                 "data rows lost their absolute offset margin");
+
+        m_editor->setRelativeOffsets(true);
+        m_editor->applyDocument(m_result);
+    }
+
+    // ══ Footer pills (P1 #23) ═══════════════════════════════════════════
+
+    void testFooterPillToneAndHover() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+
+        const int line = firstPillFooterLine(m_editor);
+        QVERIFY2(line >= 0, "fixture has no footer with pills");
+        const QString ft = sci->text(line);
+        const int plus10 = ft.indexOf(QStringLiteral("+10h"));
+        QVERIFY(plus10 > 0);
+
+        // Rest state: outlined, painted at the type tone, NOT faint — while
+        // the "};" and the "// 0x… (…)" comment around it stay furniture.
+        QVERIFY2(indAt(sci, kIndCmdPill, line, plus10), "pill has no outline");
+        QVERIFY2(indAt(sci, kIndHexType, line, plus10),
+                 "pill glyphs are not painted at the type tone");
+        QVERIFY2(!indAt(sci, kIndHexDim, line, plus10),
+                 "pill glyphs are still swallowed by the footer's faint fill");
+        const int brace = ft.indexOf(QLatin1Char('}'));
+        QVERIFY(brace >= 0);
+        QVERIFY2(indAt(sci, kIndHexDim, line, brace),
+                 "the closing brace stopped being furniture");
+        const int comment = ft.indexOf(QStringLiteral("//"));
+        if (comment > 0)
+            QVERIFY2(indAt(sci, kIndHexDim, line, comment),
+                     "the byte-count comment stopped being furniture");
+        QVERIFY2(!indAt(sci, kIndPillHover, line, plus10),
+                 "pill is filled at rest");
+
+        // Hover: the outlined box fills, the glyphs go purple, and the
+        // viewport carries the pill's one label.
+        scrollLineIntoView(sci, line);
+        sendMouseMove(sci->viewport(), colToViewport(sci, line, plus10 + 1));
+        QApplication::processEvents();
+        QVERIFY2(indAt(sci, kIndPillHover, line, plus10),
+                 "hovered pill did not fill");
+        QVERIFY2(indAt(sci, kIndHoverSpan, line, plus10),
+                 "hovered pill did not take the link tone");
+        QVERIFY2(indAt(sci, kIndCmdPill, line, plus10),
+                 "hovering a pill destroyed its outline — it reads as a solid "
+                 "block instead of the same box, now lit");
+        // The hover cue may not BE a row band: the pill's own row already
+        // carries theme.hover, and a footer row is selectable, so either band
+        // token would be invisible on exactly the row it must appear on —
+        // and theme.selected would make a hovered pill read as a selected row.
+        {
+            const auto& th = rcx::ThemeManager::instance().current();
+            const long f = sci->SendScintilla(QsciScintillaBase::SCI_INDICGETFORE,
+                                              (unsigned long)kIndPillHover);
+            const QColor fill((int)(f & 0xFF), (int)((f >> 8) & 0xFF),
+                              (int)((f >> 16) & 0xFF));
+            QVERIFY2(fill.name() != th.hover.name(),
+                     "pill hover fill is the row hover band (invisible on the "
+                     "row it appears on)");
+            QVERIFY2(fill.name() != th.selected.name(),
+                     "pill hover fill is the row selection band (collides with "
+                     "the selected-row state)");
+        }
+        QCOMPARE(sci->viewport()->toolTip(),
+                 QStringLiteral("Append 16 bytes (0x10)"));
+
+        // Leaving clears both the fill and the tooltip.
+        sendMouseMove(sci->viewport(), colToViewport(sci, line, brace));
+        QApplication::processEvents();
+        QVERIFY2(!indAt(sci, kIndPillHover, line, plus10),
+                 "pill fill survived the pointer leaving");
+        QVERIFY(sci->viewport()->toolTip().isEmpty());
+    }
+
+    // Every pill on a footer resolves through one span list, so the outline,
+    // the hover fill and the click handler cannot disagree about bounds.
+    void testFooterPillLabelsAreOnePerCommand() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+        const int line = firstPillFooterLine(m_editor);
+        QVERIFY(line >= 0);
+        const QString ft = sci->text(line);
+        scrollLineIntoView(sci, line);
+
+        struct { const char* token; const char* label; } expect[] = {
+            { " +1 ",    "Append one field" },
+            { "+10h",    "Append 16 bytes (0x10)" },
+            { "+100h",   "Append 256 bytes (0x100)" },
+            { "+1000h",  "Append 4096 bytes (0x1000)" },
+            { "Trim",    "Remove trailing hex padding" },
+            { "Top",     "Scroll to top" },
+        };
+        for (const auto& e : expect) {
+            const int at = ft.indexOf(QString::fromLatin1(e.token));
+            QVERIFY2(at >= 0, e.token);
+            const int col = at + (QString::fromLatin1(e.token).startsWith(' ') ? 1 : 0);
+            sendMouseMove(sci->viewport(), colToViewport(sci, line, col));
+            QApplication::processEvents();
+            QCOMPARE(sci->viewport()->toolTip(), QString::fromLatin1(e.label));
+        }
+    }
+
+    // ══ documentApplied (P0 #5) ═════════════════════════════════════════
+    // compose emits a constant placeholder for line 0; a mirror that listens
+    // to documentApplied used to receive that forever, so the minimap showed
+    // "struct Untitled {" for a named, attached class.
+    void testDocumentAppliedCarriesRealCommandRow() {
+        QString last;
+        auto conn = connect(m_editor, &RcxEditor::documentApplied,
+                            this, [&last](const QString& t) { last = t; });
+
+        const QString cmd = QStringLiteral(
+            "[\u25B8] 'peb_snapshot.bin'\u25BE  0xD87B5E5000  struct _PEB64 {");
+        m_editor->applyDocument(m_result);
+        m_editor->setCommandRowText(cmd);
+        QVERIFY(!last.isEmpty());
+        QCOMPARE(last.left(last.indexOf(QLatin1Char('\n'))), cmd);
+
+        // …and it stays real across a plain refresh (the patch path keeps
+        // line 0, so the mirror must not fall back to the placeholder).
+        m_editor->applyDocument(m_result);
+        QVERIFY2(!last.startsWith(QStringLiteral("[\u25B8] source\u25BE")),
+                 "documentApplied fell back to compose's placeholder row");
+        QCOMPARE(last.left(last.indexOf(QLatin1Char('\n'))), cmd);
+
+        disconnect(conn);
     }
 };
 

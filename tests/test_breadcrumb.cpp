@@ -283,6 +283,62 @@ private slots:
             QVERIFY(b->text() != QStringLiteral("↩"));
     }
 
+    // ── Tone ladder (the band is paper, not a third chrome strip) ──
+    // Depth 1 only repeats the class the doc tab and the command row already
+    // name, so the lone crumb stays secondary: textDim, regular weight.
+    void testDepth1CrumbIsDimAndRegular() {
+        BreadcrumbBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        bar.setCrumbs({ { QStringLiteral("RcxEditor"), 0, false } });
+        const auto& t = ThemeManager::instance().current();
+        QToolButton* only = nullptr;
+        for (auto* b : bar.findChildren<QToolButton*>()) only = b;
+        QVERIFY(only != nullptr);
+        const QString qss = only->styleSheet();
+        QVERIFY(qss.contains(t.textDim.name()));
+        QVERIFY(!qss.contains(QStringLiteral("font-weight")));
+    }
+
+    // From depth 2 the trail is navigation: ancestors stay textDim, the
+    // deepest crumb steps up to text + DemiBold (the ONE weight step here).
+    void testDeepestCrumbIsTextDemiBold() {
+        BreadcrumbBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        bar.setCrumbs({
+            { QStringLiteral("RcxEditor"),      0, false },
+            { QStringLiteral("vptr"),           0, true  },
+            { QStringLiteral("QWidgetPrivate"), 1, false },
+        });
+        const auto& t = ThemeManager::instance().current();
+        QString rootQss, deepQss;
+        for (auto* b : bar.findChildren<QToolButton*>()) {
+            if (b->text() == QStringLiteral("RcxEditor"))      rootQss = b->styleSheet();
+            if (b->text() == QStringLiteral("QWidgetPrivate")) deepQss = b->styleSheet();
+        }
+        QVERIFY(!rootQss.isEmpty() && !deepQss.isEmpty());
+        QVERIFY(rootQss.contains(t.textDim.name()));
+        QVERIFY(!rootQss.contains(QStringLiteral("font-weight")));
+        QVERIFY(deepQss.contains(t.text.name()));
+        QVERIFY(deepQss.contains(QStringLiteral("font-weight:600")));
+        // Hover is a link cue (text + underline), not the accent — purple is
+        // spent on current/selected only.
+        QVERIFY(deepQss.contains(QStringLiteral("text-decoration:underline")));
+        QVERIFY(!deepQss.contains(t.indHoverSpan.name()));
+    }
+
+    // The bottom seam is painted device-exact (paintEvent), because a QSS
+    // "1px" border is TWO device rows at 125 % DPI next to the editor's
+    // device-exact frame.
+    void testBandHasNoQssBorderAndIsPaper() {
+        BreadcrumbBar bar;
+        const auto& t = ThemeManager::instance().current();
+        bar.applyTheme(t);
+        const QString qss = bar.styleSheet();
+        QVERIFY(!qss.contains(QStringLiteral("border")));
+        QVERIFY(qss.contains(rcx::editorPaperColor(t).name()));
+        QVERIFY(!qss.contains(rcx::menuBarColor(t).name()));
+    }
+
     void testBarCollapsesDeepTrailToEllipsis() {
         BreadcrumbBar bar;
         QVector<Crumb> crumbs;

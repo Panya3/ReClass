@@ -18,7 +18,10 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QMainWindow>
+#include <QSettings>
+#include <QSignalSpy>
 #include <QToolBar>
+#include <QToolButton>
 
 #include "dockoverlay.h"
 #include "ribbon.h"
@@ -170,12 +173,94 @@ private slots:
                             .arg(f.host->height()).arg(fullH)));
         QCOMPARE(overlay->dropContentRect().top(), inWindow(f.host, f.win).bottom() + 1);
 
-        // Hiding the host (View > Ribbon off) hands the row back to the docks.
+        // Hiding the host (View > Ribbon = Hidden) hands the row back to the docks.
         f.host->hide();
         QTest::qWait(50);
         QApplication::processEvents();
         QCOMPARE(overlay->dropContentRect().top(), inWindow(f.titleBar, f.win).bottom() + 1);
         delete f.win;
+    }
+
+    // P0 #9: ONE persisted key. The old pair (`showRibbon` from the View menu,
+    // `ribbonMinimized` from the tab double-click) could disagree — hidden but
+    // "expanded", collapsed but with no menu entry saying so. The migration
+    // folds both into `ribbonState` once and deletes them.
+    void testRibbonStateMigratesTheTwoLegacyKeys() {
+        struct Case { bool shown; bool mini; int want; const char* what; };
+        const Case cases[] = {
+            {true,  false, rcx::RibbonFull,      "shown + expanded -> Full"},
+            {true,  true,  rcx::RibbonCollapsed, "shown + minimized -> Collapsed"},
+            {false, false, rcx::RibbonHidden,    "hidden -> Hidden"},
+            {false, true,  rcx::RibbonHidden,    "hidden wins over minimized"},
+        };
+        for (const Case& c : cases) {
+            QSettings s(QStringLiteral("REECLASS-test"), QStringLiteral("ribbon-migration"));
+            s.clear();
+            s.setValue(QStringLiteral("showRibbon"), c.shown);
+            s.setValue(QStringLiteral("ribbonMinimized"), c.mini);
+            QCOMPARE(rcx::ribbonStateFromSettings(s), c.want);
+            QVERIFY2(!s.contains(QStringLiteral("showRibbon")), c.what);
+            QVERIFY2(!s.contains(QStringLiteral("ribbonMinimized")), c.what);
+            QCOMPARE(s.value(QStringLiteral("ribbonState")).toInt(), c.want);
+            // Second read is a plain read — it must not re-migrate.
+            s.setValue(QStringLiteral("ribbonState"), int(rcx::RibbonCollapsed));
+            QCOMPARE(rcx::ribbonStateFromSettings(s), int(rcx::RibbonCollapsed));
+            s.clear();
+        }
+        // Nothing stored at all = Full; a junk value falls back to Full.
+        QSettings s(QStringLiteral("REECLASS-test"), QStringLiteral("ribbon-migration"));
+        s.clear();
+        QCOMPARE(rcx::ribbonStateFromSettings(s), int(rcx::RibbonFull));
+        s.setValue(QStringLiteral("ribbonState"), 99);
+        QCOMPARE(rcx::ribbonStateFromSettings(s), int(rcx::RibbonFull));
+        s.clear();
+    }
+
+    // P1 #16: Undo / Redo are title-strip quick access. The buttons are views
+    // of the RibbonActions QActions, take no focus, and — the reason they can
+    // live on the drag strip at all — consume their own press so the title
+    // bar never starts a system move under them.
+    void testTitleStripQuickAccess() {
+        const Theme theme = loadTheme(QStringLiteral("vs"));
+        TitleBarWidget bar;
+        bar.applyTheme(theme);
+        QCOMPARE(bar.quickButton(0), nullptr);
+
+        QAction undo(QStringLiteral("Undo")), redo(QStringLiteral("Redo"));
+        undo.setToolTip(QStringLiteral("Undo (Ctrl+Z)"));
+        redo.setToolTip(QStringLiteral("Redo (Ctrl+Y)"));
+        undo.setEnabled(false);
+        bar.setQuickActions(&undo, &redo);
+        QToolButton* bu = bar.quickButton(0);
+        QToolButton* br = bar.quickButton(1);
+        QVERIFY(bu && br);
+        QCOMPARE(bu->defaultAction(), &undo);
+        QCOMPARE(br->defaultAction(), &redo);
+        QCOMPARE(bu->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(br->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(bu->size(), QSize(28, 32));
+        QCOMPARE(bu->toolTip(), QStringLiteral("Undo (Ctrl+Z)"));
+        QCOMPARE(br->toolTip(), QStringLiteral("Redo (Ctrl+Y)"));
+        // Enabled state follows the action, not the button.
+        QVERIFY(!bu->isEnabled());
+        undo.setEnabled(true);
+        QVERIFY(bu->isEnabled());
+        // Both carry an icon, and Redo's is the mirror of Undo's, not a
+        // different arrow (they used to be arrow-left / arrow-right).
+        QVERIFY(!undo.icon().isNull());
+        QVERIFY(!redo.icon().isNull());
+        const QImage a = undo.icon().pixmap(16, 16).toImage()
+                             .convertToFormat(QImage::Format_ARGB32);
+        const QImage b = redo.icon().pixmap(16, 16).toImage()
+                             .convertToFormat(QImage::Format_ARGB32);
+        QCOMPARE(a.mirrored(true, false), b);
+        // The press lands on the button, not on the title bar's drag handler.
+        QSignalSpy spy(&redo, &QAction::triggered);
+        QTest::mouseClick(br, Qt::LeftButton, Qt::NoModifier, br->rect().center());
+        QCOMPARE(spy.count(), 1);
+        // Building twice is a no-op (applyTheme re-runs on every theme switch).
+        bar.setQuickActions(&undo, &redo);
+        QCOMPARE(bar.quickButton(0), bu);
     }
 };
 

@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
         << "  total: " << bar.preferredHeight() << "\n";
 
     bar.show();
-    for (const QString& tab : {QStringLiteral("modify"), QStringLiteral("home")}) {
+    for (const QString& tab : {QStringLiteral("home"), QStringLiteral("modify")}) {
         bar.setCurrentTab(tab);
         for (int w : {760, 1080, 1350, 1920}) {
             bar.resize(w, bar.preferredHeight());
@@ -107,13 +107,16 @@ int main(int argc, char** argv) {
             // exactly (multiply by the dpr printed above).
             out << "  rects:";
             for (const char* id : {"type.hex64", "type.float", "type.utf16", "sel.zero", "add.1024",
-                                   "home.project.newclass", "home.tools.scanner", "home.code.codeview",
-                                   "home.tools.console", "edit.undo"}) {
+                                   "type.custom", "type.class", "sel.rtti",
+                                   "home.class.newclass", "home.panels.scanner", "home.file.open",
+                                   "home.panels.console", "home.source.attach"}) {
                 const QRect r = bar.itemRect(QLatin1String(id));
                 if (!r.isNull())
                     out << " " << id << "=" << r.x() << "," << r.y() << "," << r.width() << "," << r.height();
             }
-            for (const QString& pid : {QStringLiteral("edit"), QStringLiteral("add"), QStringLiteral("project"), QStringLiteral("tools")}) {
+            for (const QString& pid : {QStringLiteral("add"), QStringLiteral("insert"),
+                                       QStringLiteral("structure"), QStringLiteral("file"),
+                                       QStringLiteral("panels")}) {
                 const QRect r = bar.panelRect(pid);
                 if (!r.isNull())
                     out << " panel:" << pid << "=" << r.x() << "," << r.y() << "," << r.width() << "," << r.height();
@@ -122,6 +125,20 @@ int main(int argc, char** argv) {
                 << " tab:home=" << bar.tabRect(QStringLiteral("home")).x() << "," << bar.tabRect(QStringLiteral("home")).width()
                 << "\n";
         }
+    }
+    // Collapsed: tab row + chevron only (the chevron points DOWN here).
+    bar.setCurrentTab(QStringLiteral("home"));
+    bar.setMinimized(true);
+    bar.resize(1080, bar.preferredHeight());
+    app.processEvents();
+    app.processEvents();
+    {
+        const QString path = QStringLiteral("%1_collapsed_1080.png").arg(prefix);
+        bar.grab().save(path);
+        const QRect cr = bar.collapseButtonRect();
+        out << path << "  height=" << bar.preferredHeight()
+            << "  collapse=" << cr.x() << "," << cr.y() << "," << cr.width() << "," << cr.height()
+            << "\n";
     }
     out.flush();
     return 0;

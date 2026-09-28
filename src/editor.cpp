@@ -1667,9 +1667,40 @@ public:
     }
 };
 
-static constexpr int IND_EDITABLE   = 8;
-static constexpr int IND_HEX_DIM    = 9;
-static constexpr int IND_BASE_ADDR  = 10;  // Default text color override for command row address
+// Scintilla resolves overlapping INDIC_TEXTFORE indicators by SLOT NUMBER —
+// the highest set slot on a character wins. The document-tone ladder below
+// therefore has to live in ascending "recedes least" order and stay BELOW
+// IND_HOVER_SPAN (11), the heat slots (13/17/18) and IND_BYTE_SEL (26), all
+// of which must keep overriding a resting tone.
+static constexpr int IND_HEX_BYTE   = 7;   // theme.text over the hex value span (the byte
+                                           // grid) of every hex-preview row. The bytes are
+                                           // NOT safe to leave to the lexer: the document is
+                                           // lexed as C++ and a hex row's ASCII preview is
+                                           // real memory, so a 0x22 / 0x27 byte opens an
+                                           // unterminated string literal (whole row falls to
+                                           // UnclosedString) and a byte token starting with a
+                                           // digit lexes as Number (green) while one starting
+                                           // with a hex letter lexes as Identifier. Painting
+                                           // the span explicitly makes the data one tone and
+                                           // the brightest ink on the surface. Lowest tone
+                                           // slot: IND_ZERO (10) paints the "00" tokens on
+                                           // top of it, which is the intended order.
+static constexpr int IND_HEX_TYPE   = 8;   // theme.textDim over the type column +
+                                           // name/ASCII slot of a hex-preview row and
+                                           // over the command row's editable source
+                                           // label + base address. Lowest tone slot:
+                                           // IND_ZERO (10) paints the ASCII column on
+                                           // top of it, which is the intended order.
+static constexpr int IND_HEX_DIM    = 9;   // theme.textFaint — FURNITURE ONLY (fold
+                                           // arrows, braces, "};", the footer's
+                                           // "// 0x80 (128)" comment). It used to fill
+                                           // whole hex rows, which flattened the data
+                                           // to 2.18:1 and inverted the hierarchy.
+static constexpr int IND_ZERO       = 10;  // theme.textMuted over the ASCII preview
+                                           // column and every "00" byte token. Above
+                                           // IND_HEX_TYPE so it wins on the ASCII slot
+                                           // (which is inside the type-column span),
+                                           // below IND_HOVER_SPAN so hover still wins.
 static constexpr int IND_HOVER_SPAN = 11;  // Blue text on hover (link-like)
 static constexpr int IND_CMD_PILL   = 12;  // Rounded chip behind command row spans
 static constexpr int IND_HEAT_COLD    = 13; // Heatmap level 1 (changed once)
@@ -1688,14 +1719,21 @@ static constexpr int IND_CHIP_BG      = 22; // Rounded-box background painted un
 static constexpr int IND_CHIP_HOVER   = 23; // Lighter pill overlay on the chip the cursor is over.
                                             // Applied only to clickable chip kinds so the user can
                                             // see at a glance which chips respond to a click.
-static constexpr int IND_CHIP_PRESSED = 24; // Darker pill overlay while the mouse button is held
-                                            // down inside a clickable chip — the button-press
-                                            // feedback that "your click is registering here".
-static constexpr int IND_TREE_CONN    = 25; // Tree-connector glyphs (├ │ └) tinted theme.textDim.
-                                            // Pulls the connector chars slightly down from the
-                                            // default theme.text foreground so the hierarchy is
-                                            // legible without competing for attention with the
-                                            // actual field type/name/value content.
+static constexpr int IND_CHIP_PRESSED = 24; // Stronger pill overlay while the mouse button is
+                                            // held down inside a clickable chip — the button-
+                                            // press feedback that "your click is registering
+                                            // here". theme.selected at alpha 200 over
+                                            // theme.hover at 130: selected is now the BRIGHTER
+                                            // of the two row-band tokens in every dark theme
+                                            // (it used to be darker, which made a press read as
+                                            // the chip going dead), so pressed reads as a
+                                            // firmer version of hover, not an inversion.
+static constexpr int IND_TREE_CONN    = 25; // Tree-connector glyphs (├ │ └) tinted
+                                            // theme.textMuted. Connectors are structure, not
+                                            // data: one step under the type column and one
+                                            // above the braces on the document tone ladder, so
+                                            // the hierarchy stays legible without competing
+                                            // with the actual type/name/value content.
 static constexpr int IND_EDIT_BOUNDS  = 27; // STRAIGHTBOX background fill on the byte ranges
                                             // covered by an active byte-range inline edit. Tints
                                             // the editable digits with a faded indHoverSpan so the
@@ -1717,6 +1755,28 @@ static constexpr int IND_BYTE_SEL     = 26; // Foreground recolor (TEXTFORE) on 
                                             // IND_HEX_DIM means selection wins over heat on
                                             // overlapping bytes — selection is an explicit user
                                             // action and should be the dominant visual signal.
+static constexpr int IND_EDITABLE     = 29; // INDIC_HIDDEN bookkeeping span marking an
+                                            // editable token. Purely internal (no paint),
+                                            // so its slot number carries no precedence
+                                            // meaning — it lives up here to leave the low
+                                            // slots free for the tone ladder.
+static constexpr int IND_PILL_HOVER   = 30; // STRAIGHTBOX behind the footer pill the cursor
+                                            // is on: theme.textDim, alpha 40 fill + alpha 255
+                                            // outline, so the pill's edge brightens and its
+                                            // interior lifts one step. NEITHER band token works
+                                            // here — hovering a pill necessarily hovers its
+                                            // row (band = theme.hover) and a footer row is
+                                            // selectable (band = theme.selected), so either
+                                            // fill would be pixel-identical to its surroundings
+                                            // on exactly the row it must appear on, and
+                                            // theme.selected would additionally make a hovered
+                                            // pill read as a selected row. Above IND_CMD_PILL
+                                            // (12) so the brighter hover edge replaces the
+                                            // resting theme.border edge instead of hiding under
+                                            // it. Deliberately not IND_CHIP_HOVER either: that
+                                            // slot is cleared and repainted wholesale from the
+                                            // tail-chip bookkeeping, so sharing it would have
+                                            // the two passes wipe each other.
 static constexpr int IND_UNREADABLE   = 28; // Strike-through (INDIC_STRIKE) in theme.markerError
 static constexpr int IND_OVERLAP      = 29; // Full-row warning band (STRAIGHTBOX) on fields whose
                                             // offset overlaps a sibling (duplicate offset or size
@@ -1741,6 +1801,11 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     PROFILE_SCOPE("RcxEditor::ctor");
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+    // Zero spacing, not just zero margins: QVBoxLayout's default 6-px gap sat
+    // between the breadcrumb band and the Scintilla paper and painted in the
+    // WINDOW background, so the document column showed a chrome-coloured stripe
+    // under the breadcrumb. The band's own bottom hairline is the seam.
+    layout->setSpacing(0);
 
     // Drill-down breadcrumb strip — above the command row (Scintilla line 0),
     // hidden until the user drills ≥1 level. A click re-emits crumbClicked so
@@ -2123,36 +2188,69 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_EDITABLE, 5 /*INDIC_HIDDEN*/);
 
-    // Hex node dim indicator — overrides text color
+    // Document-tone ladder (see the slot constants for the precedence rules).
+    // Furniture tone — braces, fold arrows, footer comment.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_HEX_BYTE, 17 /*INDIC_TEXTFORE*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HEX_DIM, 17 /*INDIC_TEXTFORE*/);
+    // Type column / name slot of a hex row + the command row's editable spans.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_HEX_TYPE, 17 /*INDIC_TEXTFORE*/);
+    // ASCII preview column + zero bytes — the hex-editor convention that a
+    // 00 is absence of data and should not read as loud as a real byte.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_ZERO, 17 /*INDIC_TEXTFORE*/);
 
     // Unreadable-value indicator — strike-through over the value span so a
     // failed read reads as "not real data" rather than a silent zero-fill.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_UNREADABLE, 4 /*INDIC_STRIKE*/);
 
-    // Tree connector dim — same INDIC_TEXTFORE but at theme.textDim (not
-    // textFaint like IND_HEX_DIM) so the ├ │ └ glyphs are clearly
-    // legible while still receding behind the actual content.
+    // Tree connector dim — same INDIC_TEXTFORE at theme.textMuted: the
+    // connectors are structure, so they sit one step below the type column
+    // (textDim) and one above the braces (textFaint).
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_TREE_CONN, 17 /*INDIC_TEXTFORE*/);
-
-    // Base address indicator — text color override on command row
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
-                         IND_BASE_ADDR, 17 /*INDIC_TEXTFORE*/);
 
     // Hover span indicator — link-like text
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HOVER_SPAN, 17 /*INDIC_TEXTFORE*/);
 
-    // Command-row pill background
+    // Footer pill outline (+1 / +10h / … / Trim / Top). Despite the name this
+    // indicator is only ever filled by the footer pass. Outline-only at rest —
+    // alpha 0, outline 255 in theme.border — so the pills match the validated
+    // dialog-button idiom (square, no fill, one hairline) instead of reading as
+    // six filled blobs competing with the data above them.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_CMD_PILL, 8 /*INDIC_STRAIGHTBOX*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
-                         IND_CMD_PILL, (long)100);
+                         IND_CMD_PILL, (long)0);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETOUTLINEALPHA,
+                         IND_CMD_PILL, (long)255);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
                          IND_CMD_PILL, (long)1);
+
+    // Footer pill hover — the button that lights up under the cursor.
+    // Own slot (not IND_CHIP_HOVER, which the tail-chip pass owns end to end).
+    // Painted in theme.textDim: a light WASH (alpha 40) inside the box plus a
+    // SOLID edge (outline alpha 255), so hovering brightens the pill's border
+    // and lifts its interior one step off whatever band the row carries.
+    // A band token cannot do that job — the pill's own row is already
+    // painted theme.hover, and a footer row is selectable, so a theme.hover or
+    // theme.selected fill goes invisible on exactly the row it has to appear
+    // on (and theme.selected would additionally make a hovered pill read as a
+    // selected row). textDim is a foreground token: it reads as a lift over
+    // every band in every dark theme, as a darkening on the light theme, and
+    // never collides with the row-band language.
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
+                         IND_PILL_HOVER, 8 /*INDIC_STRAIGHTBOX*/);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
+                         IND_PILL_HOVER, (long)40);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETOUTLINEALPHA,
+                         IND_PILL_HOVER, (long)255);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
+                         IND_PILL_HOVER, (long)1);
 
     // Tail-chip pill background — STRAIGHTBOX styled to match the footer
     // buttons (+1, +10h, Trim, Top) so chips and footer affordances read
@@ -2399,6 +2497,8 @@ void RcxEditor::applyTheme(const Theme& theme) {
 
     // Indicator colors
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_HEX_BYTE, theme.text);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEX_DIM, theme.textFaint);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_UNREADABLE, theme.markerError);
@@ -2408,13 +2508,20 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_OVERLAP, theme.indOverlap);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_TREE_CONN, theme.textDim);
+                         IND_HEX_TYPE, theme.textDim);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_BASE_ADDR, theme.text);
+                         IND_ZERO, theme.textMuted);
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_TREE_CONN, theme.textMuted);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HOVER_SPAN, theme.indHoverSpan);
+    // Pill outline, not pill fill (alpha 0 / outline 255 above).
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_CMD_PILL, theme.indCmdPill);
+                         IND_CMD_PILL, theme.border);
+    // One step above the row hover band it is painted over (see the slot's
+    // comment for why theme.hover reads as no fill at all here).
+    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
+                         IND_PILL_HOVER, theme.textDim);
     // Heatmap colors
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEAT_COLD, theme.indHeatCold);
@@ -2459,9 +2566,10 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_BYTE_SEL, theme.indHoverSpan);
     // Edit-bounds background: theme.selected — the same neutral
     // highlight used for selected-node row backgrounds (M_SELECTED
-    // marker). Keeps the edit zone visually subdued and consistent
-    // with the rest of the editor's "this is selected" language;
-    // avoids the loud accent that an indHoverSpan fill would produce.
+    // marker), i.e. one step ABOVE theme.hover on every dark theme.
+    // Keeps the edit zone visually subdued and consistent with the
+    // rest of the editor's "this is selected" language; avoids the
+    // loud accent that an indHoverSpan fill would produce.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_EDIT_BOUNDS, theme.selected);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
@@ -2472,6 +2580,19 @@ void RcxEditor::applyTheme(const Theme& theme) {
     m_lexer->setColor(theme.syntaxNumber, QsciLexerCPP::Number);
     m_lexer->setColor(theme.syntaxString, QsciLexerCPP::DoubleQuotedString);
     m_lexer->setColor(theme.syntaxString, QsciLexerCPP::SingleQuotedString);
+    // The string-ish styles a C++ lexer can reach that we would otherwise
+    // never colour: an unset style paints RGB(0,0,0), i.e. invisible ink on a
+    // dark paper. The document tone pass covers the hex rows where these are
+    // actually reachable (a 0x22 / 0x27 byte in an ASCII preview opens an
+    // unterminated literal), but nothing should be able to fall through to
+    // black on a surface we own.
+    m_lexer->setColor(theme.syntaxString, QsciLexerCPP::UnclosedString);
+    m_lexer->setColor(theme.syntaxString, QsciLexerCPP::VerbatimString);
+    m_lexer->setColor(theme.syntaxString, QsciLexerCPP::RawString);
+    m_lexer->setColor(theme.syntaxString, QsciLexerCPP::HashQuotedString);
+    m_lexer->setColor(theme.syntaxString,
+                      QsciLexerCPP::TripleQuotedVerbatimString);
+    m_lexer->setColor(theme.syntaxString, QsciLexerCPP::Regex);
     m_lexer->setColor(theme.syntaxComment, QsciLexerCPP::Comment);
     m_lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentLine);
     m_lexer->setColor(theme.syntaxComment, QsciLexerCPP::CommentDoc);
@@ -2581,6 +2702,13 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     updateOffsetMarginWidth();
 
     bool didPatch = false;
+    // What the mirrors (minimap) are told the document says. m_prevText is by
+    // contract a mirror of the Scintilla BUFFER, and on the full-replace path
+    // the buffer legitimately holds compose's "struct Untitled" placeholder in
+    // line 0 until updateCommandRow runs. Mirrors want the real row on the
+    // first emit, not one frame later, so they carry the diff-adjusted text
+    // (line 0 substituted with m_lastCommandRowText) whenever one is known.
+    QString emitText;
     long patchByteStart = 0;
     long patchByteLen = 0;
     // Scintilla line range the patch rewrote (see the marker wipe below);
@@ -2754,6 +2882,11 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         // m_prevText must mirror the buffer: the patched text carries the
         // real command row, a full replace carries the placeholder.
         m_prevText = didPatch ? newText : result.text;
+        // newText == result.text with line 0 replaced by the real command row
+        // when one is cached, and == result.text when it is not (nothing
+        // better exists then). Either way it is the closest thing to the
+        // finished document available at this point.
+        emitText = newText;
         m_lastApplyWasPatch = didPatch;
     }
 
@@ -2860,11 +2993,14 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     {
         PROFILE_SCOPE("applyDocument.clearIndicators");
         long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
-        for (int ind : {IND_HEX_DIM, IND_BASE_ADDR, IND_HOVER_SPAN, IND_HEAT_COLD,
-                        IND_CLASS_NAME, IND_HINT_GREEN, IND_LOCAL_OFF, IND_HEAT_WARM,
-                        IND_HEAT_HOT, IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
-                        IND_CHIP_HOVER, IND_CHIP_PRESSED, IND_TREE_CONN,
-                        IND_BYTE_SEL, IND_EDIT_BOUNDS, IND_UNREADABLE, IND_OVERLAP}) {
+        for (int ind : {IND_HEX_BYTE, IND_HEX_DIM, IND_HEX_TYPE, IND_ZERO,
+                        IND_HOVER_SPAN, IND_CMD_PILL,
+                        IND_HEAT_COLD, IND_CLASS_NAME, IND_HINT_GREEN,
+                        IND_LOCAL_OFF, IND_HEAT_WARM, IND_HEAT_HOT,
+                        IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
+                        IND_CHIP_HOVER, IND_CHIP_PRESSED, IND_PILL_HOVER,
+                        IND_TREE_CONN, IND_BYTE_SEL, IND_EDIT_BOUNDS,
+                        IND_UNREADABLE, IND_OVERLAP}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
             m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORCLEARRANGE, (long)0, docLen);
         }
@@ -2874,6 +3010,10 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         m_chipHoverStartCol = -1;
         m_chipHoverEndCol   = -1;
         m_chipPressed       = false;
+        // Same for the footer pill: IND_PILL_HOVER was just cleared
+        // document-wide, so the cached line must not outlive it (on a
+        // document that shrank it would point past the end).
+        m_pillHoverLine     = -1;
     }
 
     // Marker/margin work stays narrowed — that's where the real cost
@@ -2888,11 +3028,12 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         attrLast  = qMax(lastChanged,  patchLineHi);
     }
     applyLineAttributes(result.meta, attrFirst, attrLast);
-    applyHexDimming(result.meta, /*firstLine=*/-1, /*lastLine=*/-1);
 
     // Build line-text cache using the lineStarts array compose() already
     // computed. O(N) slice of the buffer rather than O(N) char scan +
-    // O(N) QString allocations from a manual split.
+    // O(N) QString allocations from a manual split. Built BEFORE the tone
+    // pass: applyHexDimming needs the text to locate zero-byte tokens and
+    // the footer pill glyphs it must not paint over.
     QVector<QString> lineTexts(result.meta.size());
     {
         const int n = qMin(result.meta.size(), result.lineStarts.size());
@@ -2905,6 +3046,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     }
     // Indicator passes are forced full-doc (see clearIndicators rationale
     // above). Cheap — tens of microseconds even on 1000-line structs.
+    applyHexDimming(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
     applyHeatmapHighlight(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
     applySymbolColoring(result.meta, lineTexts, /*firstLine=*/-1, /*lastLine=*/-1);
     applyUnreadableHighlight(result.meta, lineTexts);
@@ -2912,45 +3054,13 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
 
     applyCommandRowPills();
 
-    // Footer pill styling — full-doc (indicators forced full-pass).
-    {
-        for (int i = 0; i < result.meta.size(); i++) {
-            if (result.meta[i].lineKind != LineKind::Footer) continue;
-            const QString& ft = lineTexts[i];
-        // Single-field add chip — search ` +1 ` (padded so the token can't
-        // collide with +10/+10h/+100h/+1000h, which all have a digit after
-        // +1). Paint only the visible `+1` (cols pPlusOne+1..pPlusOne+3)
-        // so the pill doesn't visually butt up against the +10h chip
-        // beside it; click hit-test below stays generous (4 cols).
-        int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
-        if (pPlusOne >= 0)
-            fillIndicatorCols(IND_CMD_PILL, i, pPlusOne + 1, pPlusOne + 3);
-        int pVf = ft.indexOf(QStringLiteral("+vf"));
-        if (pVf >= 0)
-            fillIndicatorCols(IND_CMD_PILL, i, pVf, pVf + 3);
-        // Struct footer: +10h +100h +1000h Trim (search longest first)
-        int p1000 = ft.indexOf(QStringLiteral("+1000h"));
-        if (p1000 >= 0)
-            fillIndicatorCols(IND_CMD_PILL, i, p1000, p1000 + 6);
-        int p100 = ft.indexOf(QStringLiteral("+100h"));
-        if (p100 >= 0 && p100 != p1000 + 1)
-            fillIndicatorCols(IND_CMD_PILL, i, p100, p100 + 5);
-        int p10 = ft.indexOf(QStringLiteral("+10h"));
-        if (p10 >= 0 && p10 != p100 && p10 != p1000)
-            fillIndicatorCols(IND_CMD_PILL, i, p10, p10 + 4);
-        // Enum footer: +10 (no 'h'). Skip when the +10 we found is actually
-        // the start of "+1000h" / "+100h" / "+10h" we already painted, OR
-        // sits inside "+Field" (it doesn't, but be defensive).
-        int add10Start = ft.indexOf(QStringLiteral("+10"));
-        if (add10Start >= 0 && add10Start != p10 && add10Start != p100 && add10Start != p1000)
-            fillIndicatorCols(IND_CMD_PILL, i, add10Start, add10Start + 3);
-        int trimStart = ft.indexOf(QStringLiteral("Trim"));
-        if (trimStart >= 0)
-            fillIndicatorCols(IND_CMD_PILL, i, trimStart, trimStart + 4);
-        int topStart = ft.indexOf(QStringLiteral("Top"));
-        if (topStart >= 0)
-            fillIndicatorCols(IND_CMD_PILL, i, topStart, topStart + 3);
-        }
+    // Footer pill outlines — full-doc (indicators forced full-pass). One span
+    // list, shared with the tone pass, the hover paint and the click handler,
+    // so a pill can never be outlined where it isn't clickable.
+    for (int i = 0; i < result.meta.size(); i++) {
+        if (result.meta[i].lineKind != LineKind::Footer) continue;
+        for (const FooterPill& p : footerPillsIn(lineTexts[i]))
+            fillIndicatorCols(IND_CMD_PILL, i, p.textStart, p.textStart + p.textLen);
     }
 
     // Per-chip indicator coloring: Enum / TypeHint / Rtti / Comment all
@@ -3077,7 +3187,16 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
 
     // Notify minimap / any passive mirror that text has been updated. Fired
     // last so receivers see the final Scintilla state (post-indicator apply).
-    emit documentApplied(result.text);
+    //
+    // NOT result.text: compose emits a constant placeholder for line 0
+    // ("[▸] source▾  0x0  struct Untitled {") that setCommandRowText
+    // overwrites in the buffer. Emitting the compose text handed every mirror
+    // the placeholder forever — the minimap showed "struct Untitled" for a
+    // named, attached class. emitText carries the real command row on the
+    // full-replace frame too (see its declaration), so a mirror never renders
+    // the placeholder even for the microseconds before updateCommandRow runs.
+    m_lastEmittedText = emitText.isEmpty() ? m_prevText : emitText;
+    emit documentApplied(m_lastEmittedText);
 }
 
 void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta, int firstLine, int lastLine) {
@@ -3114,6 +3233,10 @@ void RcxEditor::applyLineAttributes(const QVector<LineMeta>& meta, int firstLine
     if (!m_relativeOffsets) {
         for (int i = 0; i < meta.size(); i++) {
             const auto& lm = meta[i];
+            // Command row: the base address is already on the row itself, so
+            // the margin stays blank (clearMarginText(-1) above did that) —
+            // absolute mode skips reformatMargins, so the rule lives here too.
+            if (lm.lineKind == LineKind::CommandRow) continue;
             if (lm.offsetText.isEmpty()) continue;
             QByteArray text = lm.offsetText.toUtf8();
             m_sci->SendScintilla(QsciScintillaBase::SCI_MARGINSETTEXT,
@@ -3169,10 +3292,15 @@ void RcxEditor::reformatMargins(int firstLine, int lastLine) {
             lm.offsetText = QStringLiteral("  \u00B7 ");
         } else if (lm.offsetText.isEmpty()) {
             continue;
+        } else if (lm.lineKind == LineKind::CommandRow) {
+            // The command row already SHOWS the base address, in an editable
+            // span. Repeating it in the margin printed the same number twice
+            // on the same line — the relative branch always blanked it; the
+            // absolute branch did not, so hoist the case ahead of the split.
+            lm.offsetText = QString(hexDigits + 1, ' ');
         } else if (m_relativeOffsets) {
             if (lm.lineKind == LineKind::Footer ||
-                lm.lineKind == LineKind::ArrayElementSeparator ||
-                lm.lineKind == LineKind::CommandRow) {
+                lm.lineKind == LineKind::ArrayElementSeparator) {
                 lm.offsetText = QString(hexDigits + 1, ' ');
             } else {
                 uint64_t rvaBase = lm.ptrBase ? lm.ptrBase : base;
@@ -3306,34 +3434,156 @@ void RcxEditor::fillIndicatorCols(int indic, int line, int colA, int colB) {
     }
 }
 
-void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta, int firstLine, int lastLine) {
+// The document-tone pass. Named for what it used to do (dim hex rows); it is
+// now the single place that assigns every resting tone in the document, in the
+// order the eye should read them:
+//
+//   bytes (theme.text)  >  type column (textDim)  >  ASCII + 00 bytes
+//   (textMuted)  >  tree connectors (textMuted)  >  braces / footer / fold
+//   arrows (textFaint)
+//
+// The old version filled the WHOLE hex row with textFaint, which flattened the
+// only real data on screen to 2.18:1 and put the byte values below the braces
+// in the hierarchy. Removing that fill also removed the mask it accidentally
+// provided over the C++ lexer, so the byte grid is now painted explicitly
+// (IND_HEX_BYTE) instead of inheriting whatever style the lexer assigned to a
+// row whose ASCII preview happens to contain a quote or a digit. Typed rows
+// are untouched — their lexer colours already carry the type/value
+// distinction.
+void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta,
+                                const QVector<QString>& lineTexts,
+                                int firstLine, int lastLine) {
     PROFILE_SCOPE("applyHexDimming");
     bool full = (firstLine < 0);
     int begin = full ? 0 : firstLine;
     int end = full ? meta.size() : qMin(lastLine + 1, (int)meta.size());
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
     for (int i = begin; i < end; i++) {
-        // Dim fold arrows (▸/▾) on fold head lines
+        // Furniture: fold arrows (▸/▾) on fold head lines
         if (meta[i].foldHead && meta[i].lineKind != LineKind::CommandRow)
             fillIndicatorCols(IND_HEX_DIM, i, 0, kFoldCol);
 
-        if (isHexPreview(meta[i].nodeKind)) {
-            long pos, len; lineRangeNoEol(m_sci, i, pos, len);
-            if (len > 0)
-                m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, len);
-        }
-        // Dim struct/array braces: entire footer line, trailing "{" on headers
+        // Furniture: struct/array braces — the whole footer line ("};  +1 …
+        // // 0x80 (128)") minus the pill glyphs, and the trailing "{" on
+        // headers. The pills are affordances, not furniture: they get the
+        // type tone below so they read as clickable text inside a faint line.
         if (meta[i].lineKind == LineKind::Footer) {
-            long pos, len; lineRangeNoEol(m_sci, i, pos, len);
-            if (len > 0)
-                m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, len);
+            const QString ft = (i < lineTexts.size()) ? lineTexts[i] : QString();
+            const QVector<FooterPill> pills = footerPillsIn(ft);
+            if (pills.isEmpty()) {
+                long pos, len; lineRangeNoEol(m_sci, i, pos, len);
+                if (len > 0)
+                    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, len);
+            } else {
+                // Fill the GAPS between pill glyph spans (pills come back in
+                // ascending column order, so one sweep is enough).
+                int cursor = 0;
+                for (const FooterPill& p : pills) {
+                    if (p.textStart > cursor)
+                        fillIndicatorCols(IND_HEX_DIM, i, cursor, p.textStart);
+                    cursor = qMax(cursor, p.textStart + p.textLen);
+                }
+                fillIndicatorCols(IND_HEX_DIM, i, cursor, ft.size());
+                // …and give the glyphs themselves the type tone, so a pill
+                // reads as a control sitting in furniture rather than as more
+                // furniture. The outline (IND_CMD_PILL) is painted in
+                // applyDocument's footer pass from the same span list.
+                for (const FooterPill& p : pills)
+                    fillIndicatorCols(IND_HEX_TYPE, i, p.textStart,
+                                      p.textStart + p.textLen);
+                m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
+                                     IND_HEX_DIM);
+            }
         } else if (meta[i].braceCol >= 0) {
             // Use precomputed brace column from compose (avoids per-character IPC scan)
             fillIndicatorCols(IND_HEX_DIM, i, meta[i].braceCol, meta[i].braceCol + 1);
         }
     }
 
-    // Tree-connector tint — apply IND_TREE_CONN (theme.textDim) ONLY
+    // Hex value width. valueSpanFor() hard-codes 23 columns for every hex
+    // kind (format.cpp emits qMax(23, size*3 - 1)), which is exact for
+    // Hex8/16/32/64 but eight bytes short on a Hex128 row — the tone passes
+    // below would then paint half the grid and leave the rest at whatever
+    // the lexer chose. lineByteCount is compose's own byte count for the
+    // row, so derive the end from it and clamp to the text we actually have.
+    auto hexValueEnd = [](const LineMeta& lm, const ColumnSpan& vs, int lineLen) {
+        const int w = qMax(23, lm.lineByteCount * 3 - 1);
+        return qMin(qMax(vs.end, vs.start + w), lineLen);
+    };
+
+    // Byte tone: the value span of every hex-preview row painted explicitly
+    // at theme.text. This CANNOT be left to the lexer — the document is
+    // lexed as C++ and the ASCII preview is real memory, so one 0x22 / 0x27
+    // byte opens an unterminated literal and drops the whole byte grid to
+    // UnclosedString (uncoloured = pure black on paper), while byte tokens
+    // starting with a digit lex as Number (green) and ones starting with a
+    // hex letter lex as Identifier. IND_ZERO (10) still wins on the "00"
+    // tokens; hover / heat / byte-selection all outrank both.
+    for (int i = begin; i < end; i++) {
+        const LineMeta& lm = meta[i];
+        if (!isHexPreview(lm.nodeKind)) continue;
+        if (lm.isMemberLine) continue;
+        const int lineLen = (i < lineTexts.size()) ? lineTexts[i].size() : 0;
+        ColumnSpan vs = valueSpan(lm, lineLen, lm.effectiveTypeW, lm.effectiveNameW);
+        if (!vs.valid) continue;
+        const int vsEnd = hexValueEnd(lm, vs, lineLen);
+        if (vsEnd > vs.start)
+            fillIndicatorCols(IND_HEX_BYTE, i, vs.start, vsEnd);
+    }
+
+    // Type-column tone: the type name and the ASCII/name slot of every hex
+    // preview row. Stops at the value column so the bytes keep the byte tone
+    // above and stay the brightest ink on the surface.
+    for (int i = begin; i < end; i++) {
+        const LineMeta& lm = meta[i];
+        if (!isHexPreview(lm.nodeKind)) continue;
+        if (lm.isMemberLine) continue;
+        const int lineLen = (i < lineTexts.size()) ? lineTexts[i].size() : 0;
+        ColumnSpan vs = valueSpan(lm, lineLen, lm.effectiveTypeW, lm.effectiveNameW);
+        if (!vs.valid) continue;
+        LineGeometry g = LineGeometry::forLine(lm);
+        if (vs.start > g.typeStart())
+            fillIndicatorCols(IND_HEX_TYPE, i, g.typeStart(), vs.start);
+    }
+
+    // Zero tone: the ASCII preview column, plus every "00" token inside the
+    // value span. A hex editor reads a run of 00 as "nothing here" — keeping
+    // them at full text weight is what made an untyped class look like a wall.
+    // Same valueSpan() call applyUnreadableHighlight uses, so the two passes
+    // can never disagree about where the bytes are.
+    for (int i = begin; i < end; i++) {
+        const LineMeta& lm = meta[i];
+        if (!isHexPreview(lm.nodeKind)) continue;
+        if (lm.isMemberLine || i >= lineTexts.size()) continue;
+        const QString& lt = lineTexts[i];
+
+        ColumnSpan ns = nameSpan(lm, lm.effectiveTypeW, lm.effectiveNameW);
+        if (ns.valid && ns.end > ns.start)
+            fillIndicatorCols(IND_ZERO, i, ns.start, ns.end);
+
+        ColumnSpan vs = valueSpan(lm, lt.size(), lm.effectiveTypeW, lm.effectiveNameW);
+        if (!vs.valid) continue;
+        const int vsEnd = hexValueEnd(lm, vs, lt.size());
+        // Bytes are "00 11 22 …": stride 3, pure ASCII, so plain index maths
+        // is exact here and costs one FINDCOLUMN instead of one per byte.
+        // Adjacent zero bytes merge into a single fill run — a 1000-line
+        // struct stays at a couple of calls per row rather than sixteen.
+        int runStart = -1;
+        for (int c = vs.start; c + 1 < vsEnd && c + 1 < lt.size(); c += 3) {
+            const bool zero = (lt[c] == QLatin1Char('0') && lt[c + 1] == QLatin1Char('0'));
+            if (zero) {
+                if (runStart < 0) runStart = c;
+            } else if (runStart >= 0) {
+                fillIndicatorCols(IND_ZERO, i, runStart, c - 1);
+                runStart = -1;
+            }
+        }
+        if (runStart >= 0)
+            fillIndicatorCols(IND_ZERO, i, runStart, vsEnd);
+    }
+
+    // Tree-connector tint — apply IND_TREE_CONN (theme.textMuted; structure
+    // sits one step under the type column, one above the braces) ONLY
     // to the row's own innermost connector glyph (├ / └ in the last
     // kTreeIndent chars of the indent region). Ancestor │ pipes from
     // outer levels stay at default theme.text. The indent region is
@@ -4669,17 +4919,6 @@ void RcxEditor::applySymbolColoring(const QVector<LineMeta>& meta,
 //    }  // end if (false) dead-code guard
 }
 
-void RcxEditor::applyBaseAddressColoring(const QVector<LineMeta>& meta) {
-    if (meta.isEmpty() || meta[0].lineKind != LineKind::CommandRow) return;
-
-    clearIndicatorLine(IND_BASE_ADDR, 0);
-    // Override lexer's green number coloring on the address with default text color
-    QString t = getLineText(m_sci, 0);
-    ColumnSpan addr = commandRowAddrSpan(t);
-    if (addr.valid)
-        fillIndicatorCols(IND_BASE_ADDR, 0, addr.start, addr.end);
-}
-
 void RcxEditor::applyCommandRowPills() {
     PROFILE_SCOPE("applyCommandRowPills");
     if (m_meta.isEmpty() || m_meta[0].lineKind != LineKind::CommandRow) return;
@@ -4687,7 +4926,11 @@ void RcxEditor::applyCommandRowPills() {
     constexpr int line = 0;
     QString t = getLineText(m_sci, line);
 
+    // Line 0 is re-patched by setCommandRowText (SCI_REPLACETARGET), which
+    // wipes indicators on it outside applyDocument's doc-wide clear — so this
+    // pass owns clearing and repainting every tone it sets on the row.
     clearIndicatorLine(IND_HEX_DIM, line);
+    clearIndicatorLine(IND_HEX_TYPE, line);
     clearIndicatorLine(IND_CLASS_NAME, line);
 
     // Dim the [▾] type-selector chevron
@@ -4695,24 +4938,26 @@ void RcxEditor::applyCommandRowPills() {
     if (chevron.valid)
         fillIndicatorCols(IND_HEX_DIM, line, chevron.start, chevron.end);
 
-    // Dim label text: source arrow/placeholder + its ▾ dropdown arrow
+    // Source label — textDim, NOT textFaint. It is one of the two editable
+    // things on this row (click opens the source picker); painting it as
+    // furniture told the user it was decoration. Its ▾ stays faint: the
+    // chevron is the affordance mark, not the content.
     ColumnSpan srcSpan = commandRowSrcSpan(t);
     if (srcSpan.valid) {
         int quotePos = t.indexOf('\'', srcSpan.start);
         int kindEnd = (quotePos > srcSpan.start) ? quotePos : srcSpan.end;
         while (kindEnd > srcSpan.start && t[kindEnd - 1].isSpace()) kindEnd--;
         if (kindEnd > srcSpan.start)
-            fillIndicatorCols(IND_HEX_DIM, line, srcSpan.start, kindEnd);
-        // Dim the source ▾ dropdown arrow to match (like struct▾)
+            fillIndicatorCols(IND_HEX_TYPE, line, srcSpan.start, kindEnd);
         int srcDrop = t.indexOf(QChar(0x25BE));
         int rootStart = commandRowRootStart(t);
         if (srcDrop >= 0 && (rootStart < 0 || srcDrop < rootStart))
             fillIndicatorCols(IND_HEX_DIM, line, srcDrop, srcDrop + 1);
     }
-    // Dim base address to match source/struct grey
+    // Base address — the other editable span, same tone as the source label.
     ColumnSpan addrSpan = commandRowAddrSpan(t);
     if (addrSpan.valid)
-        fillIndicatorCols(IND_HEX_DIM, line, addrSpan.start, addrSpan.end);
+        fillIndicatorCols(IND_HEX_TYPE, line, addrSpan.start, addrSpan.end);
 
     // Root class styling (type dim + class-name teal, no underline)
     ColumnSpan rt = commandRowRootTypeSpan(t);
@@ -6489,20 +6734,29 @@ bool RcxEditor::handleHexEditKey(QKeyEvent* ke) {
     const int spanStart = m_editState.spanStart;
     const int spanEnd = spanStart + m_editState.original.size();
 
-    // Helper: replace a single character and re-apply hex dimming indicator
+    // Helper: replace a single character and re-apply the tone the document
+    // pass would have given that column.
     // (SCI_REPLACETARGET clears indicators at the edges of an indicator
     // range — i.e. the very first / very last char of the active edit-
     // bounds span loses its background highlight on replace. Re-fill
     // IND_EDIT_BOUNDS at the replacement pos while a byte-range edit is
     // in flight to keep the highlight contiguous as the user types past
     // segment boundaries.)
-    auto replaceCharAt = [this](long pos, char ch) {
+    // The tone re-fill used to be IND_HEX_DIM, from when that indicator
+    // filled whole hex rows. It is furniture-only now, so re-applying it
+    // painted every character the user typed the FAINTEST ink in the row —
+    // and it stuck, because the live refresh (the only thing that clears
+    // it) is suppressed while an inline edit is in flight. Re-apply the
+    // real tone instead: the byte tone in the hex grid, the zero/ASCII
+    // tone in the ASCII column.
+    auto replaceCharAt = [this, isHexMode](long pos, char ch) {
         QByteArray buf(1, ch);
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETSTART, pos);
         m_sci->SendScintilla(QsciScintillaBase::SCI_SETTARGETEND, pos + 1);
         m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACETARGET,
                              (uintptr_t)1, buf.constData());
-        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, IND_HEX_DIM);
+        m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
+                             isHexMode ? IND_HEX_BYTE : IND_ZERO);
         m_sci->SendScintilla(QsciScintillaBase::SCI_INDICATORFILLRANGE, pos, 1);
         if (m_editState.byteRange) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT,
@@ -7511,22 +7765,26 @@ void RcxEditor::setViewportCursor(Qt::CursorShape shape) {
     m_sci->viewport()->setCursor(shape);
 }
 
-// Which footer pill (if any) sits under `col` on `line`.
+// Every footer pill on a composed footer line, in ascending column order.
 //
 // The disambiguation is positional, not semantic: "+1" is a prefix of "+10",
 // "+10h", "+100h" and "+1000h", so each longer form is matched first and the
 // shorter ones must prove they didn't land on a longer one's text. " +1 " is
-// searched space-padded for the same reason. Order and bounds here mirror the
-// press handler exactly — that is the point of having one copy.
-RcxEditor::FooterPill RcxEditor::footerPillAt(int line, int col) const {
-    FooterPill p;
-    if (line < 0 || line >= m_meta.size()
-        || m_meta[line].lineKind != LineKind::Footer)
-        return p;
-
-    const QString ft = getLineText(m_sci, line);
-    auto within = [col](int start, int len) {
-        return start >= 0 && col >= start && col < start + len;
+// searched space-padded for the same reason.
+//
+// This is the ONE copy. The outline pass, the tone pass (which must not dim
+// the glyphs), the hover fill + tooltip and the click handler all go through
+// it, so a pill cannot be outlined, lit or labelled anywhere it isn't
+// clickable — there used to be three hand-synchronised copies of this chain.
+QVector<RcxEditor::FooterPill> RcxEditor::footerPillsIn(const QString& ft) {
+    QVector<FooterPill> out;
+    auto add = [&out](FooterPill::Action a, int start, int len,
+                      uint64_t bytes = 0, int textStart = -1, int textLen = 0) {
+        FooterPill p;
+        p.action = a; p.start = start; p.len = len; p.bytes = bytes;
+        p.textStart = textStart >= 0 ? textStart : start;
+        p.textLen   = textStart >= 0 ? textLen   : len;
+        out.append(p);
     };
 
     const int pPlusOne = ft.indexOf(QStringLiteral(" +1 "));
@@ -7538,31 +7796,59 @@ RcxEditor::FooterPill RcxEditor::footerPillAt(int line, int col) const {
     const int pTrim    = ft.indexOf(QStringLiteral("Trim"));
     const int pTop     = ft.indexOf(QStringLiteral("Top"));
 
-    if (within(pVf, 3)) {
-        p.action = FooterPill::Action::AddVf;  p.start = pVf; p.len = 3;
-    } else if (within(pPlusOne, 4)) {
-        p.action = FooterPill::Action::AddField;  p.start = pPlusOne; p.len = 4;
-        // paint only the "+1" glyphs, not the surrounding padding
-        p.textStart = pPlusOne + 1; p.textLen = 2;
-    } else if (within(p1000, 6)) {
-        p.action = FooterPill::Action::AddBytes;  p.start = p1000; p.len = 6; p.bytes = 0x1000;
-    } else if (p100 != p1000 + 1 && within(p100, 5)) {
-        p.action = FooterPill::Action::AddBytes;  p.start = p100; p.len = 5; p.bytes = 0x100;
-    } else if (p10 != p100 && p10 != p1000 && within(p10, 4)) {
-        p.action = FooterPill::Action::AddBytes;  p.start = p10; p.len = 4; p.bytes = 0x10;
-    } else if (p10enum != p10 && p10enum != p100 && p10enum != p1000
-               && within(p10enum, 3)) {
-        p.action = FooterPill::Action::AddEnumMembers; p.start = p10enum; p.len = 3;
-    } else if (within(pTrim, 4)) {
-        p.action = FooterPill::Action::Trim;      p.start = pTrim; p.len = 4;
-    } else if (within(pTop, 3)) {
-        p.action = FooterPill::Action::Top;       p.start = pTop;  p.len = 3;
+    // Hit region is the padded " +1 "; the painted region is the "+1" glyphs
+    // only, so the outline doesn't butt against the +10h pill beside it.
+    if (pPlusOne >= 0)
+        add(FooterPill::Action::AddField, pPlusOne, 4, 0, pPlusOne + 1, 2);
+    if (p1000 >= 0)
+        add(FooterPill::Action::AddBytes, p1000, 6, 0x1000);
+    if (p100 >= 0 && p100 != p1000 + 1)
+        add(FooterPill::Action::AddBytes, p100, 5, 0x100);
+    if (p10 >= 0 && p10 != p100 && p10 != p1000)
+        add(FooterPill::Action::AddBytes, p10, 4, 0x10);
+    // Enum footer: +10 (no 'h'). Skip when the +10 we found is actually the
+    // start of "+1000h" / "+100h" / "+10h" we already emitted.
+    if (p10enum >= 0 && p10enum != p10 && p10enum != p100 && p10enum != p1000)
+        add(FooterPill::Action::AddEnumMembers, p10enum, 3);
+    // Fork: vftable footer "+vf" — append a virtual function entry.
+    if (pVf >= 0)
+        add(FooterPill::Action::AddVf, pVf, 3);
+    if (pTrim >= 0) add(FooterPill::Action::Trim, pTrim, 4);
+    if (pTop  >= 0) add(FooterPill::Action::Top,  pTop,  3);
+
+    std::sort(out.begin(), out.end(),
+              [](const FooterPill& a, const FooterPill& b) { return a.start < b.start; });
+    return out;
+}
+
+// One label per pill — the same words the tooltip shows and the same verb the
+// command it triggers uses elsewhere in the UI.
+QString RcxEditor::footerPillTooltip(const FooterPill& p) {
+    switch (p.action) {
+    case FooterPill::Action::AddField:        return QObject::tr("Append one field");
+    case FooterPill::Action::AddBytes:
+        return QObject::tr("Append %1 bytes (0x%2)")
+                   .arg(p.bytes).arg(QString::number(p.bytes, 16));
+    case FooterPill::Action::AddEnumMembers:  return QObject::tr("Append 10 enum members");
+    case FooterPill::Action::AddVf:           return QObject::tr("Append virtual function entry");
+    case FooterPill::Action::Trim:            return QObject::tr("Remove trailing hex padding");
+    case FooterPill::Action::Top:             return QObject::tr("Scroll to top");
+    case FooterPill::Action::None:            break;
     }
-    if (p.action != FooterPill::Action::None && p.textStart < 0) {
-        p.textStart = p.start;                    // most pills paint what they hit
-        p.textLen   = p.len;
-    }
-    return p;
+    return QString();
+}
+
+// Which footer pill (if any) sits under `col` on `line`. The pill regions on a
+// footer are disjoint, so "first match" is unambiguous.
+RcxEditor::FooterPill RcxEditor::footerPillAt(int line, int col) const {
+    if (line < 0 || line >= m_meta.size()
+        || m_meta[line].lineKind != LineKind::Footer)
+        return {};
+
+    for (const FooterPill& p : footerPillsIn(getLineText(m_sci, line)))
+        if (col >= p.start && col < p.start + p.len)
+            return p;
+    return {};
 }
 
 // Pure hover resolution — no painting, no setCursor, no popups.
@@ -7718,6 +8004,15 @@ void RcxEditor::applyHoverCursor() {
     for (int ln : m_hoverSpanLines)
         clearIndicatorLine(IND_HOVER_SPAN, ln);
     m_hoverSpanLines.clear();
+
+    // Footer-pill hover fill + its tooltip live on the same clear cycle as the
+    // hover underline: both are repainted below when the pointer is still on a
+    // pill, so clearing unconditionally here cannot leave a stale one behind.
+    if (m_pillHoverLine >= 0) {
+        clearIndicatorLine(IND_PILL_HOVER, m_pillHoverLine);
+        m_pillHoverLine = -1;
+        if (m_sci->viewport()) m_sci->viewport()->setToolTip(QString());
+    }
 
     // Lock cursor to Arrow during drag-selection (prevents flicker)
     if (m_dragStarted) {
@@ -7923,6 +8218,19 @@ void RcxEditor::applyHoverCursor() {
             fillIndicatorCols(IND_HOVER_SPAN, h.line,
                               pill.textStart, pill.textStart + pill.textLen);
             m_hoverSpanLines.append(h.line);
+            // Light the box (theme.textDim wash + solid edge, UNDER — see the
+            // IND_PILL_HOVER slot comment for why neither row band can be used
+            // here) so a hovered pill reads like every other hovered button in
+            // the app; the purple text above stays as the "this is a link"
+            // half of the cue.
+            fillIndicatorCols(IND_PILL_HOVER, h.line,
+                              pill.textStart, pill.textStart + pill.textLen);
+            m_pillHoverLine = h.line;
+            // The editor viewport has no dwell-tooltip path of its own, so the
+            // affordance bridge sets the viewport tooltip directly. Cleared at
+            // the top of the next applyHoverCursor.
+            if (m_sci->viewport())
+                m_sci->viewport()->setToolTip(footerPillTooltip(pill));
         }
     }
 
@@ -8342,6 +8650,21 @@ void RcxEditor::setCommandRowText(const QString& line) {
     m_sci->SendScintilla(QsciScintillaBase::SCI_SETANCHOR, savedAnchor);
     m_sci->SendScintilla(QsciScintillaBase::SCI_COLOURISE, start, start + utf8.size());
     applyCommandRowPills();
+
+    // Line 0 just changed under the mirrors' feet: applyDocument's emit ran
+    // before this write. Re-emit so a minimap never shows a stale command
+    // row. m_prevText was patched above, so it matches the buffer exactly.
+    // Skipped when applyDocument already emitted this exact text (the common
+    // case now that its payload carries the real line 0): a mirror does one
+    // full setText per frame instead of two, and the frame this used to
+    // double up on — the full replace — is the most expensive one.
+    // The de-dup deliberately guards ONLY this re-emit: applyDocument still
+    // emits unconditionally, so a mirror that was hidden and is then shown
+    // still gets its text from the forced refresh.
+    if (m_prevText != m_lastEmittedText) {
+        m_lastEmittedText = m_prevText;
+        emit documentApplied(m_prevText);
+    }
 }
 
 void RcxEditor::setEditorFont(const QString& fontName) {

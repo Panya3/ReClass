@@ -10,9 +10,17 @@
 //
 // Usage: editor_render <out.png> [loByte] [hiByte]
 //   loByte/hiByte are buffer offsets; default [4, 16) spans rows 1..3.
+//   editor_render <out.png> tones   — visual proof of the document tone
+//   ladder: a fresh 0x80 class of Hex64 rows over a realistic mix of zero
+//   and non-zero bytes, at the real 1080-logical window width, with one row
+//   selected and the pointer parked on another. Writes a second PNG
+//   (<out>_pill.png) with the pointer on a footer pill, and prints the
+//   resolved tone tokens so the image can be checked against numbers.
 #include <QApplication>
 #include <QSplitter>
 #include <QFont>
+#include <QMouseEvent>
+#include <QFileInfo>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
 #include <cstdio>
@@ -91,6 +99,59 @@ static NodeTree buildDrillTree() {
     return tree;
 }
 
+// 16 x Hex64 = 0x80 — the shape a "New Class" lands in, and the one the tone
+// ladder has to make readable: every row is type column + ASCII preview +
+// eight bytes, with nothing but the byte values to carry the data.
+static NodeTree buildTonesTree() {
+    NodeTree tree;
+    tree.baseAddress = 0;  // BufferProvider treats an address as a buffer offset
+    Node root;
+    root.kind = NodeKind::Struct;
+    root.structTypeName = "UnnamedClass0";
+    root.classKeyword = "class";
+    root.name = "obj";
+    root.parentId = 0;
+    root.collapsed = false;
+    uint64_t rootId = tree.nodes[tree.addNode(root)].id;
+    for (int i = 0; i < 16; ++i) {
+        Node n;
+        n.kind = NodeKind::Hex64;
+        n.parentId = rootId;
+        n.offset = i * 8;
+        tree.addNode(n);
+    }
+    return tree;
+}
+
+// A realistic mix: pointers and small ints leave long runs of 00 next to a
+// few live bytes, which is exactly the contrast the ladder has to render.
+static QByteArray buildTonesBuffer() {
+    QByteArray data(0x80, '\0');
+    auto w64 = [&](int off, quint64 v) { memcpy(data.data() + off, &v, 8); };
+    w64(0x00, 0x00007FF6DE1234A0ULL);  // vtable-ish pointer
+    w64(0x08, 0x0000000000000001ULL);  // small int -> seven 00s
+    w64(0x10, 0x000001A4C3E20F90ULL);
+    w64(0x18, 0x0000000000000000ULL);  // all zero
+    w64(0x20, 0x3F80000042C80000ULL);  // two floats
+    w64(0x28, 0x00007FFE3B8B53C0ULL);
+    w64(0x30, 0x0000000000000064ULL);
+    w64(0x38, 0xFFFFFFFFFFFFFFFFULL);  // all live
+    w64(0x40, 0x000001A4C3D40000ULL);
+    w64(0x50, 0x0000000000000010ULL);
+    w64(0x60, 0x00007FFE3B720000ULL);
+    w64(0x70, 0x0000000000000002ULL);
+    // Printable ASCII, deliberately including 0x22 (") and 0x27 ('), plus a
+    // "//" pair. The ASCII preview column is REAL memory, so these put the
+    // C++ lexer into string / comment state on their row; without the
+    // explicit byte tone the whole byte grid on those rows renders at
+    // whatever the lexer chose (an unset UnclosedString = pure black).
+    // A tones buffer of pointers and zeros can never show that.
+    for (int i = 0; i < 8; ++i) data[0x48 + i] = (char)(0x20 + i);   // ` !"#$%&'`
+    for (int i = 0; i < 8; ++i) data[0x58 + i] = (char)(0x28 + i);   // `()*+,-./`
+    for (int i = 0; i < 8; ++i) data[0x68 + i] = (char)(0x30 + i);   // digits
+    return data;
+}
+
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
 
@@ -123,6 +184,80 @@ int main(int argc, char** argv) {
         editor->scintilla()->zoomTo(QString::fromLocal8Bit(argv[3]).toInt());
         app.processEvents();
         editor->grab().save(out);
+        return 0;
+    }
+
+    if (mode == QStringLiteral("tones")) {
+        // Real window width: the user's app is ~1080 logical px, and the tone
+        // ladder is only honest at the width the columns were laid out for.
+        doc->tree = buildTonesTree();
+        doc->provider = std::make_shared<BufferProvider>(buildTonesBuffer(),
+                                                         "tones.bin");
+        splitter->resize(1080, 560);
+        ctrl->refresh();
+        app.processEvents();
+
+        const Theme& th = ThemeManager::instance().current();
+        std::printf("tones: paper=%s text=%s textDim=%s textMuted=%s "
+                    "textFaint=%s hover=%s selected=%s border=%s\n",
+                    qPrintable(editorPaperColor(th).name()),
+                    qPrintable(th.text.name()), qPrintable(th.textDim.name()),
+                    qPrintable(th.textMuted.name()), qPrintable(th.textFaint.name()),
+                    qPrintable(th.hover.name()), qPrintable(th.selected.name()),
+                    qPrintable(th.border.name()));
+
+        // Pin one row selected (the persistent state) and park the pointer on
+        // another (the transient one) so the two bands appear side by side.
+        int firstField = -1, footerLine = -1;
+        for (int i = 0; ; ++i) {
+            const LineMeta* lm = editor->metaForLine(i);
+            if (!lm) break;
+            if (firstField < 0 && lm->lineKind == LineKind::Field) firstField = i;
+            if (lm->lineKind == LineKind::Footer) footerLine = i;
+        }
+        if (firstField >= 0) {
+            const LineMeta* lm = editor->metaForLine(firstField + 2);
+            if (lm) ctrl->handleNodeClick(editor, firstField + 2, lm->nodeId,
+                                          Qt::NoModifier);
+        }
+        app.processEvents();
+
+        auto moveTo = [&](int line, int col) {
+            long pos = editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_FINDCOLUMN, (unsigned long)line, (long)col);
+            int x = (int)editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_POINTXFROMPOSITION, 0, pos);
+            int y = (int)editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_POINTYFROMPOSITION, 0, pos);
+            QPoint p(x + 2, y + 4);
+            QMouseEvent move(QEvent::MouseMove, QPointF(p), QPointF(p),
+                             Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(editor->scintilla()->viewport(), &move);
+            app.processEvents();
+        };
+
+        if (firstField >= 0) moveTo(firstField + 5, 6);
+        editor->grab().save(out);
+        std::printf("tones: wrote %s (selected line %d, hover line %d)\n",
+                    qPrintable(out), firstField + 2, firstField + 5);
+
+        // Second frame: pointer on the "+10h" footer pill, for the
+        // outline-at-rest / fill-on-hover check.
+        if (footerLine >= 0) {
+            const QString ft = editor->scintilla()->text(footerLine);
+            const int at = ft.indexOf(QStringLiteral("+10h"));
+            if (at > 0) {
+                moveTo(footerLine, at + 1);
+                QFileInfo fi(out);
+                const QString pillOut = fi.path() + QStringLiteral("/")
+                                      + fi.completeBaseName()
+                                      + QStringLiteral("_pill.png");
+                editor->grab().save(pillOut);
+                std::printf("tones: wrote %s (footer line %d, +10h at col %d)\n",
+                            qPrintable(pillOut), footerLine, at);
+            }
+        }
+        std::fflush(stdout);
         return 0;
     }
 
