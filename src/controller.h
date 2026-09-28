@@ -573,6 +573,9 @@ public:
     // Up one level = the parent crumb: collapseToFocus on the deepest hop,
     // which records its own history entry (it is a crumb click).
     void goUp(RcxEditor* from = nullptr);
+    // The source chooser the address bar's chip opens, for other surfaces
+    // (the ribbon's Source button) so there is one picker, not two.
+    void openSourceChooser(RcxEditor* editor, QPoint globalPos) { showSourcePopup(editor, globalPos); }
     // The history menu's pick: negative = back |delta| entries, positive =
     // forward. Steps the stacks entry by entry (so they stay exactly what a
     // sequence of single steps would leave) but restores only the final

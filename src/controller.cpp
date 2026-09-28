@@ -2072,6 +2072,9 @@ QVector<SiblingEntry> RcxController::siblingsForCrumb(int level) const {
             if (v == UINT64_MAX) v = 0;
         }
         if (n.isRelative && v != 0) v += tree.baseAddress;
+        // A dangling pointer must say what its crumb would say: compose
+        // stamps ptrBase 0 for an unreadable target, so the row does too.
+        if (v != 0 && !prov->isReadable(v, 1)) v = 0;
         e.address = v;
     }
     return sibs;

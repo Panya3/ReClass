@@ -3793,6 +3793,27 @@ private slots:
 
     // ── Sibling rows say where each pointer leads ──
 
+    // A pointer whose VALUE reads fine but whose target does not (past the
+    // buffer) is placed nowhere: compose stamps ptrBase 0 for it once
+    // expanded, so the collapsed row must say the same.
+    void testDanglingSiblingPointerIsUnreadable() {
+        QByteArray bytes = chainBytes();
+        qToLittleEndian<quint64>(0x1000, bytes.data() + 0x18);   // ptr2 -> outside the 64 bytes
+        m_doc->provider = std::make_unique<BufferProvider>(bytes);
+        const uint64_t ptr2 = addSibling();
+        const QVector<SiblingEntry> sibs = m_ctrl->siblingsForCrumb(0);
+        QCOMPARE(sibs.size(), 2);
+        QCOMPARE(sibs[1].id, ptr2);
+        QCOMPARE(sibs[1].address, 0ULL);
+        QCOMPARE(sibs[0].address, 0x20ULL);                     // the readable one is unaffected
+        AddressBar* bar = m_editor->addressBar();
+        QMenu* menu = openMenuOn(bar, QStringLiteral("chev:0"), QStringLiteral("rcxAddressBarSiblingMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions()[1]->text(), AddressBar::siblingActionText(sibs[1]));
+        QVERIFY2(menu->actions()[1]->toolTip().endsWith(QStringLiteral("(unreadable)")), qPrintable(menu->actions()[1]->toolTip()));
+        closeMenuOn(bar, QStringLiteral("chev:0"), menu);
+    }
+
     void testSiblingRowsSayWhereEachPointerLeads() {
         // The bytes hold real pointers: RcxEditor@0 .vptr = 0x20, .ptr2 =
         // 0x38, QWidgetPrivate@0x20 .parent = 0x30. A collapsed pointer's

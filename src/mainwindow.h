@@ -252,6 +252,10 @@ private:
     QAction*        m_actClose     = nullptr;
     QAction*        m_actRefresh   = nullptr;
     QAction*        m_actGoto      = nullptr;
+    QAction*        m_actNavBack   = nullptr;   // View > Back / Forward / Up / Edit Path
+    QAction*        m_actNavForward = nullptr;  // (the address bar's history; the keys
+    QAction*        m_actNavUp     = nullptr;   //  themselves live in RcxEditor)
+    QAction*        m_actNavPath   = nullptr;
     QAction*        m_actBreakClass = nullptr;
     QAction*        m_actConsole   = nullptr;
     QAction*        m_actScanner   = nullptr;

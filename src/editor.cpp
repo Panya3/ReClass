@@ -4569,6 +4569,10 @@ void RcxEditor::setAddressBarTreeQueries(AddressBarTreeQueries q) {
     if (m_addressBar) m_addressBar->setTreeQueries(std::move(q));
 }
 
+void RcxEditor::beginAddressBarPathEdit() {
+    if (m_addressBar) m_addressBar->beginPathEdit();
+}
+
 void RcxEditor::scrollNodeToTop(uint64_t nodeId) {
     // First display line of the node — O(1) via the per-refresh index, with a
     // linear fallback. Compose re-emits only visible lines (collapsed nodes'

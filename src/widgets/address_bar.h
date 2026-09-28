@@ -803,8 +803,12 @@ protected:
 
     void changeEvent(QEvent* e) override {
         QWidget::changeEvent(e);
-        if (e->type() == QEvent::FontChange || e->type() == QEvent::StyleChange)
+        if (e->type() == QEvent::FontChange || e->type() == QEvent::StyleChange) {
             markLayoutDirty();
+            // A font change while an edit is up re-measures every cell; the
+            // overlay follows the field it covers, as it does on a resize.
+            if (m_editVisible) { m_edit->setFont(chromeFont()); followEditGeometry(); }
+        }
     }
 
     void mouseMoveEvent(QMouseEvent* e) override {

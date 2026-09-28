@@ -38,6 +38,9 @@ public:
     // call every tick.
     void setAddressBarState(const AddressBarState& s);
     AddressBar* addressBar() const { return m_addressBar; }
+    // Open the bar's path edit from outside (the View menu); main.cpp only
+    // forward-declares AddressBar, so the call lives here.
+    void beginAddressBarPathEdit();
 
     ViewState saveViewState() const;
     void restoreViewState(const ViewState& vs);
