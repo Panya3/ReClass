@@ -79,13 +79,6 @@ static QString docTypeNameProvider(NodeKind k) {
     return m ? QString::fromLatin1(m->typeName) : QStringLiteral("???");
 }
 
-static QString elide(QString s, int max) {
-    if (max <= 0) return {};
-    if (s.size() <= max) return s;
-    if (max == 1) return QStringLiteral("\u2026");
-    return s.left(max - 1) + QChar(0x2026);
-}
-
 //TODO-DELETE(elideLeft) static QString elideLeft(const QString& s, int max) {
 //    if (s.size() <= max) return s;
 //    if (max <= 1) return QStringLiteral("\u2026").left(max);
@@ -1626,8 +1619,8 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text,
                          uint64_t resolvedAddr) {
-        // CommandRow BaseAddress/Source/RootClass edit has nodeIdx=-1
-        if (nodeIdx < 0 && target != EditTarget::BaseAddress && target != EditTarget::Source
+        // CommandRow BaseAddress/RootClass edit has nodeIdx=-1
+        if (nodeIdx < 0 && target != EditTarget::BaseAddress
             && target != EditTarget::RootClassType && target != EditTarget::RootClassName) { refresh(); return; }
         switch (target) {
         case EditTarget::Name: {
@@ -1765,9 +1758,6 @@ void RcxController::connectEditor(RcxEditor* editor) {
             if (rebaseTo(text)) return;
             break;
         }
-        case EditTarget::Source:
-            selectSource(text);
-            break;
         case EditTarget::ArrayElementType: {
             if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) break;
             const Node& node = m_doc->tree.nodes[nodeIdx];
@@ -2035,13 +2025,24 @@ QVector<SiblingEntry> RcxController::drillFieldsAt(const QString& path) const {
     return siblingFieldsOf(tree, container, 0);
 }
 
-void RcxController::switchSibling(int level, uint64_t newPointerId) {
-    if (level < 0 || level > m_focusPath.size()) return;
+bool RcxController::switchSibling(int level, uint64_t newPointerId) {
+    if (level < 0 || level > m_focusPath.size()) return false;
     const NodeTree& tree = m_doc->tree;
     const int ni = tree.indexOfId(newPointerId);
-    if (ni < 0 || drillTargetId(tree.nodes[ni]) == 0) return;   // not a hop
+    if (ni < 0 || drillTargetId(tree.nodes[ni]) == 0) return false;   // not a hop
+    // The hop has to belong to the class the crumb at `level` names — the
+    // same class whose fields the chevron menu listed. A pointer that lives
+    // in some other class (a stale menu, a caller's wrong id) would be
+    // spliced into a trail it is not on; reconcileFocusPath would then trim
+    // it on the next refresh, after the undo entry was already pushed.
+    const uint64_t classId = classAtLevel(tree, m_viewRootId, m_focusPath, level);
+    if (classId == 0) return false;
+    bool listed = false;
+    for (const SiblingEntry& e : siblingFieldsOf(tree, classId, 0))
+        if (e.id == newPointerId) { listed = true; break; }
+    if (!listed) return false;
     const uint64_t oldPointer = level < m_focusPath.size() ? m_focusPath[level] : 0;
-    if (oldPointer == newPointerId) return;   // already there: nothing to undo
+    if (oldPointer == newPointerId) return false;   // already there: nothing to undo
     const int oi = oldPointer ? tree.indexOfId(oldPointer) : -1;
     const bool collapseOld = oi >= 0 && !tree.nodes[oi].collapsed;
     const bool expandNew   = tree.nodes[ni].collapsed;
@@ -2068,6 +2069,7 @@ void RcxController::switchSibling(int level, uint64_t newPointerId) {
     RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
     if (!ed) ed = primaryEditor();
     if (ed) ed->scrollNodeToTop(newPointerId);
+    return true;
 }
 
 bool RcxController::navigateToDrillPath(const QString& text, QString* err) {
@@ -2274,6 +2276,7 @@ AddressBarState RcxController::addressBarState() {
     s.resolvedBase = tree.baseAddress;
     s.crumbs       = crumbs;
     s.trailPath    = trailPathText(tree, m_viewRootId, m_focusPath);
+    s.viewRootId   = m_viewRootId;
     s.canBack      = false;   // P5: NavHistory
     s.canForward   = false;
     s.canUp        = !m_focusPath.isEmpty();
@@ -7323,16 +7326,9 @@ void RcxController::applySelectionOverlays() {
 
 
 void RcxController::updateCommandRow() {
-    // -- Source label: driven by provider metadata --
-    QString src;
-    QString provName = m_doc->provider->name();
-    if (provName.isEmpty()) {
-        src = QStringLiteral("source\u25BE");
-    } else {
-        src = QStringLiteral("'%1'\u25BE")
-            .arg(provName);
-    }
-
+    // The source control left this row for the address bar's chip (the
+    // provider's name, liveness and the chooser popup all live there now).
+    // The base address stays until P7 demotes line 0 to the header alone.
     QString addr;
     if (!m_doc->tree.baseAddressFormula.isEmpty())
         addr = m_doc->tree.baseAddressFormula;
@@ -7340,45 +7336,35 @@ void RcxController::updateCommandRow() {
         addr = QStringLiteral("0x") +
             QString::number(m_doc->tree.baseAddress, 16).toUpper();
 
-    QString row = QStringLiteral("%1  %2")
-        .arg(elide(src, 40), elide(addr, 24));
-
-    // Build row 2: root class type + name (uses current view root)
-    QString brace = m_braceWrap ? QString() : QStringLiteral(" {");
-    QString row2;
+    // Root class keyword + name (uses current view root)
+    QString keyword, className;
+    bool haveRoot = false;
+    auto takeRoot = [&](const Node& n) {
+        keyword = n.resolvedClassKeyword();
+        className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
+        if (className.isEmpty()) className = QStringLiteral("Untitled");
+        haveRoot = true;
+    };
     if (m_viewRootId != 0) {
         int vi = m_doc->tree.indexOfId(m_viewRootId);
-        if (vi >= 0) {
-            const auto& n = m_doc->tree.nodes[vi];
-            QString keyword = n.resolvedClassKeyword();
-            QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-            row2 = QStringLiteral("%1 %2%3")
-                .arg(keyword, className.isEmpty() ? QStringLiteral("Untitled") : className, brace);
-        }
+        if (vi >= 0) takeRoot(m_doc->tree.nodes[vi]);
     }
-    if (row2.isEmpty()) {
+    if (!haveRoot) {
         // Fallback: find first root struct
-        for (int i = 0; i < m_doc->tree.nodes.size(); i++) {
-            const auto& n = m_doc->tree.nodes[i];
-            if (n.parentId == 0 && n.kind == NodeKind::Struct) {
-                QString keyword = n.resolvedClassKeyword();
-                QString className = n.structTypeName.isEmpty() ? n.name : n.structTypeName;
-                row2 = QStringLiteral("%1 %2%3")
-                    .arg(keyword, className.isEmpty() ? QStringLiteral("Untitled") : className, brace);
-                break;
-            }
+        for (const auto& n : m_doc->tree.nodes) {
+            if (n.parentId == 0 && n.kind == NodeKind::Struct) { takeRoot(n); break; }
         }
     }
-    if (row2.isEmpty()) {
+    if (!haveRoot) {
         // No struct nodes at all in the tree → blank project. Show
         // "Untitled" instead of the old "NoName" placeholder so the
         // command row doesn't look like a programmer-grade default
         // leaked into the UI.
-        row2 = QStringLiteral("struct Untitled") + brace;
+        keyword = QStringLiteral("struct");
+        className = QStringLiteral("Untitled");
     }
 
-    QString combined = QStringLiteral("[\u25B8] ") + row + QStringLiteral("  ") + row2;
-
+    const QString combined = buildCommandRowText(addr, keyword, className, m_braceWrap);
     for (auto* ed : m_editors) {
         ed->setCommandRowText(combined);
     }

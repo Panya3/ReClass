@@ -1791,11 +1791,13 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }
     }  // end PROFILE_SCOPE("compose.widths")
 
-    // Emit CommandRow as line 0 (combined: source + address + root class type + name)
+    // Emit CommandRow as line 0 (chevron + base address + root class type + name)
     // Placeholder shown only until controller.updateCommandRow rewrites
-    // it with the real source / base address / class name. "Untitled"
-    // matches MainWindow::rootName's empty-tree fallback at main.cpp:2554.
-    const QString cmdRowText = QStringLiteral("[\u25B8] source\u25BE  0x0  struct Untitled {");
+    // it with the real base address / class name — the same shape
+    // buildCommandRowText (core.h) produces, so the span parsers read it
+    // the same way. "Untitled" matches MainWindow::rootName's empty-tree
+    // fallback at main.cpp:2554.
+    const QString cmdRowText = QStringLiteral("[\u25B8] 0x0  struct Untitled {");
     {
         LineMeta lm;
         lm.nodeIdx   = -1;

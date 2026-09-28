@@ -2845,7 +2845,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
                                              (unsigned long)ln, (long)-1);
                 }
                 // If the patch covers line 0, it just stomped Scintilla's
-                // command row with compose's placeholder ("[▸] source▾ …").
+                // command row with compose's placeholder ("[▸] 0x0 …").
                 // Invalidate the setCommandRowText skip-cache so the
                 // controller's updateCommandRow() actually repaints line 0
                 // afterward. Without this clear, the cache says "we
@@ -2862,7 +2862,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
             m_sci->setText(result.text);
             m_sci->setReadOnly(true);
             // Full-replace just rewrote line 0 to compose's literal
-            // "[▸] source▾  0x0  struct Untitled {" placeholder. Invalidate
+            // "[▸] 0x0  struct Untitled {" placeholder. Invalidate
             // the setCommandRowText skip-cache so the controller's
             // updateCommandRow() that runs next is forced to re-paint
             // line 0 with the proper text.
@@ -3172,7 +3172,7 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
     // last so receivers see the final Scintilla state (post-indicator apply).
     //
     // NOT result.text: compose emits a constant placeholder for line 0
-    // ("[▸] source▾  0x0  struct Untitled {") that setCommandRowText
+    // ("[▸] 0x0  struct Untitled {") that setCommandRowText
     // overwrites in the buffer. Emitting the compose text handed every mirror
     // the placeholder forever — the minimap showed "struct Untitled" for a
     // named, attached class. emitText carries the real command row on the
@@ -4927,23 +4927,10 @@ void RcxEditor::applyCommandRowPills() {
     if (chevron.valid)
         fillIndicatorCols(IND_HEX_DIM, line, chevron.start, chevron.end);
 
-    // Source label — textDim, NOT textFaint. It is one of the two editable
-    // things on this row (click opens the source picker); painting it as
-    // furniture told the user it was decoration. Its ▾ stays faint: the
-    // chevron is the affordance mark, not the content.
-    ColumnSpan srcSpan = commandRowSrcSpan(t);
-    if (srcSpan.valid) {
-        int quotePos = t.indexOf('\'', srcSpan.start);
-        int kindEnd = (quotePos > srcSpan.start) ? quotePos : srcSpan.end;
-        while (kindEnd > srcSpan.start && t[kindEnd - 1].isSpace()) kindEnd--;
-        if (kindEnd > srcSpan.start)
-            fillIndicatorCols(IND_HEX_TYPE, line, srcSpan.start, kindEnd);
-        int srcDrop = t.indexOf(QChar(0x25BE));
-        int rootStart = commandRowRootStart(t);
-        if (srcDrop >= 0 && (rootStart < 0 || srcDrop < rootStart))
-            fillIndicatorCols(IND_HEX_DIM, line, srcDrop, srcDrop + 1);
-    }
-    // Base address — the other editable span, same tone as the source label.
+    // Base address — textDim, NOT textFaint. It is the editable cell on
+    // this row (click edits it in the address bar); painting it as
+    // furniture told the user it was decoration. The source label that
+    // used to sit before it moved to the bar's chip.
     ColumnSpan addrSpan = commandRowAddrSpan(t);
     if (addrSpan.valid)
         fillIndicatorCols(IND_HEX_TYPE, line, addrSpan.start, addrSpan.end);
@@ -5201,15 +5188,14 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     const LineMeta* lm = metaForLine(line);
     if (!lm) return false;
 
-    // CommandRow: Source / BaseAddress / Root class (type+name) editing
+    // CommandRow: BaseAddress / Root class (type+name) editing
     if (lm->lineKind == LineKind::CommandRow) {
-        if (t != EditTarget::BaseAddress && t != EditTarget::Source
+        if (t != EditTarget::BaseAddress
             && t != EditTarget::RootClassType && t != EditTarget::RootClassName
             && t != EditTarget::TypeSelector) return false;
         QString lineText = getLineText(m_sci, line);
         ColumnSpan s;
         if (t == EditTarget::TypeSelector)       s = commandRowChevronSpan(lineText);
-        else if (t == EditTarget::Source)        s = commandRowSrcSpan(lineText);
         else if (t == EditTarget::BaseAddress)   s = commandRowAddrSpan(lineText);
         else if (t == EditTarget::RootClassType) s = commandRowRootTypeSpan(lineText);
         else                                     s = commandRowRootNameSpan(lineText);
@@ -5273,7 +5259,6 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
             s = {textLen - 1, textLen, true};
         break;
     }
-    case EditTarget::Source: break;
     }
 
     // Fallback spans for header lines
@@ -5364,12 +5349,11 @@ static bool hitTestTarget(QsciScintilla* sci,
         return s.valid && col >= s.start && col < s.end;
     };
 
-    // CommandRow: interactive chevron/SRC/ADDR + root class (type+name)
+    // CommandRow: interactive chevron/ADDR + root class name. The source
+    // control is the address bar's chip now.
     if (lm.lineKind == LineKind::CommandRow) {
         ColumnSpan chevron = commandRowChevronSpan(lineText);
         if (inSpan(chevron)) { outTarget = EditTarget::TypeSelector; outLine = line; return true; }
-        ColumnSpan ss = commandRowSrcSpan(lineText);
-        if (inSpan(ss)) { outTarget = EditTarget::Source; outLine = line; return true; }
         ColumnSpan as = commandRowAddrSpan(lineText);
         if (inSpan(as)) { outTarget = EditTarget::BaseAddress; outLine = line; return true; }
 
@@ -5516,7 +5500,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 case EditTarget::Name:        raw = nameSpan(*lm, typeW, nameW); break;
                 case EditTarget::Value:       raw = valueSpan(*lm, lineText.size(), typeW, nameW); break;
                 case EditTarget::BaseAddress: raw = commandRowAddrSpan(lineText); break;
-                case EditTarget::Source:      raw = commandRowSrcSpan(lineText); break;
                 case EditTarget::ArrayIndex:  raw = arrayIndexSpanFor(*lm, lineText); break;
                 case EditTarget::ArrayCount:  raw = arrayCountSpanFor(*lm, lineText); break;
                 case EditTarget::ArrayElementType:  raw = arrayElemTypeSpanFor(*lm, lineText); break;
@@ -6658,6 +6641,16 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
     // User list is handled via userListActivated signal, not here
     // SCI_AUTOCACTIVE is for autocomplete, not user lists
 
+    // Alt+D / Ctrl+L open the address bar's path edit from the document
+    // (handleNormalKey). Mid-edit they are swallowed whole: Ctrl+L would
+    // otherwise reach QScintilla's own keymap (LineCut — the edit line
+    // gone) and Alt+D fall through to the bar, opening a second editor
+    // over the one in progress. Enter/Esc end this edit first; then the
+    // keys work again.
+    if ((ke->key() == Qt::Key_L && ke->modifiers() == Qt::ControlModifier)
+        || (ke->key() == Qt::Key_D && ke->modifiers() == Qt::AltModifier))
+        return true;
+
     switch (ke->key()) {
     case Qt::Key_Return:
     case Qt::Key_Enter:
@@ -7050,21 +7043,6 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         return true;
     }
 
-    // Source: handled by SourceChooserPopup, not inline edit
-    if (target == EditTarget::Source) {
-        // Position popup below the source span in the command row
-        QString cmdText = getLineText(m_sci, 0);
-        ColumnSpan srcSpan = commandRowSrcSpan(cmdText);
-        int col = srcSpan.valid ? srcSpan.start : 0;
-        long srcPos = m_sci->SendScintilla(QsciScintillaBase::SCI_FINDCOLUMN, 0UL, (long)col);
-        int lineH = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0);
-        int sx = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, srcPos);
-        int sy = (int)m_sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, srcPos);
-        QPoint pos = m_sci->viewport()->mapToGlobal(QPoint(sx, sy + lineH));
-        emit sourcePopupRequested(pos);
-        return true;
-    }
-
     if (m_editState.active) return false;
     // Padding tracker is per-edit — reset before any padding extension may run.
     m_editState.padBytes = 0;
@@ -7089,7 +7067,7 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     if (!lm) return false;
     // Allow nodeIdx=-1 only for CommandRow editing (command bar)
     if (lm->nodeIdx < 0 && !(lm->lineKind == LineKind::CommandRow &&
-        (target == EditTarget::BaseAddress || target == EditTarget::Source
+        (target == EditTarget::BaseAddress
          || target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
         return false;
     // Hex nodes: only Type is editable via normal flow (double-click, F2, Enter)
@@ -7322,14 +7300,14 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     }
 
     // Switch to I-beam for editing (skip for picker-based targets)
-    if (target != EditTarget::Type && target != EditTarget::Source
+    if (target != EditTarget::Type
         && target != EditTarget::ArrayElementType && target != EditTarget::PointerTarget
         && target != EditTarget::RootClassType) {
         setViewportCursor(Qt::IBeamCursor);
     }
 
     // Re-enable selection rendering for inline edit (skip for picker-based targets)
-    bool isPicker = (target == EditTarget::Type || target == EditTarget::Source
+    bool isPicker = (target == EditTarget::Type
                      || target == EditTarget::ArrayElementType
                      || target == EditTarget::PointerTarget
                      || target == EditTarget::RootClassType);
@@ -7582,11 +7560,6 @@ void RcxEditor::showTypeListFiltered(const QString& filter) {
     setViewportCursor(Qt::ArrowCursor);
 }
 
-//TODO-DELETE(RcxEditor::showSourcePicker) void RcxEditor::showSourcePicker() {
-//    // Replaced by SourceChooserPopup — Source target now early-returns
-//    // from beginInlineEdit() and emits sourcePopupRequested().
-//}
-
 void RcxEditor::updateTypeListFilter() {
     if (!m_editState.active ||
         (m_editState.target != EditTarget::Type && m_editState.target != EditTarget::ArrayElementType))
@@ -7678,11 +7651,9 @@ void RcxEditor::updatePointerTargetFilter() {
 void RcxEditor::paintEditableSpans(int line) {
     const LineMeta* lm = metaForLine(line);
     if (!lm) return;
-    // CommandRow: paint Source/BaseAddress + root class (type+name) spans
+    // CommandRow: paint BaseAddress + root class name spans
     if (lm->lineKind == LineKind::CommandRow) {
         NormalizedSpan norm;
-        if (resolvedSpanFor(line, EditTarget::Source, norm))
-            fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         if (resolvedSpanFor(line, EditTarget::BaseAddress, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         // RootClassType no longer shown as editable — right-click conversion instead
@@ -7999,7 +7970,6 @@ RcxEditor::HoverAffordance RcxEditor::resolveHoverAffordance(const QPoint& pos) 
             a.span = trimmed;
             switch (t) {
             case EditTarget::Type:
-            case EditTarget::Source:
             case EditTarget::ArrayElementType:
             case EditTarget::PointerTarget:
             case EditTarget::TypeSelector:
@@ -8355,10 +8325,6 @@ void RcxEditor::applyHoverCursor() {
                 && h.col >= span.start && h.col < span.end) {
                 QString tipTitle, tipBody;
                 switch (t) {
-                case EditTarget::Source:
-                    tipTitle = QStringLiteral("Data Source");
-                    tipBody = QStringLiteral("Click to change the attached\nmemory source (process, file)");
-                    break;
                 case EditTarget::BaseAddress:
                     tipTitle = QStringLiteral("Base Address");
                     tipBody = QStringLiteral(

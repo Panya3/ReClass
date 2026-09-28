@@ -512,8 +512,10 @@ public:
     // focus path to focusPath[0..level) + newPointerId, refresh and scroll
     // the new hop's row to the top of the sender pane. level ==
     // focusPath().size() appends (the deepest crumb's "drill further").
-    // Choosing the hop already there is a no-op: no undo entry.
-    void switchSibling(int level, uint64_t newPointerId);
+    // Choosing the hop already there is a no-op: no undo entry. True when
+    // the switch happened; false (nothing pushed, path untouched) for a bad
+    // level, a non-hop, or an id that is not a hop of the class at `level`.
+    bool switchSibling(int level, uint64_t newPointerId);
     // The path edit's Enter: resolve "RcxEditor.vptr.parent"
     // (resolveDrillPath), switch the view root if the path names another
     // one, expand every collapsed hop in ONE undo macro "Navigate to path",

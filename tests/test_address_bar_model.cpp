@@ -317,6 +317,7 @@ private slots:
         Crumb c; c.label = "Player"; c.classId = 1; c.address = 0x1000; c.keyword = "struct";
         a.crumbs = { c };
         a.trailPath = "Player";
+        a.viewRootId = 1;
         a.canBack = true; a.canForward = false; a.canUp = true;
         AddressBarState b = a;
         QVERIFY(a == b);
@@ -335,6 +336,7 @@ private slots:
         QVERIFY(differs([](AddressBarState& s) { s.resolvedBase = 0x2000; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].label = "Enemy"; }));
         QVERIFY(differs([](AddressBarState& s) { s.trailPath = "Player.stats"; }));
+        QVERIFY(differs([](AddressBarState& s) { s.viewRootId = 0; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].classId = 2; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].pointerId = 3; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].address = 0; }));

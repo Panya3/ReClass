@@ -45,6 +45,8 @@ struct AddressBarState {
                                       // what the bar's path edit opens on. Carried
                                       // in the state — it changes exactly when the
                                       // crumbs do, so a callback would be no cheaper
+    uint64_t       viewRootId = 0;    // RcxController::viewRootId(); 0 = show-all, where
+                                      // crumbs[0] names the FIRST root but none is "current"
     bool           canBack = false;
     bool           canForward = false;
     bool           canUp = false;
@@ -58,6 +60,7 @@ struct AddressBarState {
             && resolvedBase == o.resolvedBase
             && crumbs == o.crumbs
             && trailPath == o.trailPath
+            && viewRootId == o.viewRootId
             && canBack == o.canBack
             && canForward == o.canForward
             && canUp == o.canUp;

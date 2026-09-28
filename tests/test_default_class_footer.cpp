@@ -184,7 +184,7 @@ void TestDefaultClassFooter::footerSurvivesSetCommandRowThenRefresh()
 
     // Step 2: rewrite line 0 with text different from compose's
     // placeholder — same as controller's updateCommandRow does.
-    editor->setCommandRowText("[>] source>  0xDEADBEEF  struct UnnamedClass0 {");
+    editor->setCommandRowText("[>] 0xDEADBEEF  struct UnnamedClass0 {");
     QApplication::processEvents();
 
     // Step 3: another applyDocument with the SAME compose result —

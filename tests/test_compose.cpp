@@ -2170,9 +2170,24 @@ private slots:
         }
     }
 
+    void testCommandRowPlaceholderMatchesBuilder() {
+        // compose's line-0 placeholder is the same shape updateCommandRow
+        // writes (buildCommandRowText), so the span parsers read both alike
+        // and a mirror never sees a row of another shape.
+        NodeTree tree;
+        tree.baseAddress = 0;
+        BufferProvider prov(QByteArray(64, '\0'));
+        ComposeResult r = compose(tree, prov);
+        const QString line0 = r.text.left(r.text.indexOf(QLatin1Char('\n')));
+        QCOMPARE(line0, buildCommandRowText(QStringLiteral("0x0"), QStringLiteral("struct"),
+                                            QStringLiteral("Untitled"), false));
+        QVERIFY(!line0.contains(QChar(0x25BE)));
+        QVERIFY(commandRowAddrSpan(line0).valid);
+    }
+
     void testCommandRowRootNameSpan() {
         // Name span should cover the class name in the merged command row
-        QString text = "source\u25BE  0x0  struct MyClass {";
+        QString text = "[\u25B8] 0x0  struct MyClass {";
         ColumnSpan nameSpan = commandRowRootNameSpan(text);
         QVERIFY(nameSpan.valid);
 

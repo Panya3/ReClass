@@ -1795,7 +1795,7 @@ private slots:
         while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
         const ColumnSpan as = commandRowAddrSpan(line);
         QVERIFY2(as.valid, qPrintable(line));
-        // Character column → byte position (the row holds ▸ and ▾), then to
+        // Character column → byte position (the row holds a ▸), then to
         // a viewport point on that glyph's row.
         const int col = (as.start + as.end) / 2;
         const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
@@ -2401,6 +2401,175 @@ private slots:
         hoverAt(bar, c0.center());
         QCOMPARE(bar.cursor().shape(), Qt::PointingHandCursor);   // back
         QCOMPARE(bar.itemIdAt(c0.center()), QStringLiteral("crumb:0"));
+    }
+
+    void testLineZeroHasNoSourceControlTheChipHas() {
+        // The 'name'▾ that used to open the source chooser from line 0
+        // moved to the bar's chip. The row now goes chevron → address: no
+        // ▾, and the address cell starts where the chevron ends. A click
+        // on that cell is the bar's base edit; only the chip asks for the
+        // popup.
+        QApplication::processEvents();
+        QsciScintilla* sci = m_editor->scintilla();
+        const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
+        QVERIFY(len > 0);
+        QByteArray buf(len + 1, '\0');
+        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
+        QString line = QString::fromUtf8(buf.constData(), len);
+        while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
+        QVERIFY2(!line.contains(QChar(0x25BE)), qPrintable(line));
+        const ColumnSpan chev = commandRowChevronSpan(line);
+        const ColumnSpan as = commandRowAddrSpan(line);
+        QVERIFY(chev.valid && as.valid);
+        QCOMPARE(as.start, chev.end);
+        QCOMPARE(line.mid(as.start, as.end - as.start), QStringLiteral("0x0"));
+        QCOMPARE(line, buildCommandRowText(QStringLiteral("0x0"), QStringLiteral("struct"),
+                                           QStringLiteral("RcxEditor"), false));
+        QSignalSpy spy(m_editor, &RcxEditor::sourcePopupRequested);
+        // The cell right after the chevron — where the source label was.
+        const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
+                       + line.left(as.start + 1).toUtf8().size();
+        const int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
+        const int y = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
+        const int lh = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+        AddressBar* bar = m_editor->addressBar();
+        QTest::mouseClick(sci->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(x + 1, y + lh / 2));
+        QApplication::processEvents();
+        QCOMPARE(spy.count(), 0);
+        QVERIFY2(bar->isBaseEditing(), "the cell after the chevron is the address: a base edit");
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        // The chip still opens the popup.
+        const QRect src = bar->itemRect(QStringLiteral("src"));
+        QVERIFY(!src.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, src.center());
+        QCOMPARE(spy.count(), 1);
+        auto* popup = m_editor->findChild<SourceChooserPopup*>();
+        QVERIFY(popup);
+        popup->hide();
+        QApplication::processEvents();
+    }
+
+    void testPressOnVisibleCellAfterEditActsInOneClick() {
+        // Phase-4 follow-up: the press that ended an edit was spent on
+        // EVERY cell but base/space, so a click on "recent" while the base
+        // edit was open closed the edit and did nothing else — P3 had it
+        // close the edit AND open the places menu. Only a press on a cell
+        // the overlay's paper covered is spent; recent stayed visible.
+        QWidget win;
+        auto* lay = new QVBoxLayout(&win);
+        lay->setContentsMargins(0, 0, 0, 0);
+        auto* bar = new AddressBar(&win);
+        int crumbClicks = 0;
+        AddressBar::Callbacks cb;
+        cb.onCrumb = [&](int) { ++crumbClicks; };
+        bar->setCallbacks(std::move(cb));
+        bar->setState(stateWith(twoLevel()));
+        lay->addWidget(bar);
+        win.resize(800, 80);
+        win.show();
+        QTest::qWait(30);
+        QApplication::processEvents();
+        const QRect recent = bar->itemRect(QStringLiteral("recent"));
+        const QRect c0 = bar->itemRect(QStringLiteral("crumb:0"));
+        QVERIFY(!recent.isNull() && !c0.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isBaseEditing());
+        QVERIFY(bar->editCoveredRect().contains(c0.center()));
+        QVERIFY(!bar->editCoveredRect().contains(recent.center()));
+        // The click-away as Qt delivers it: focus leaves the overlay
+        // (MouseFocusReason) BEFORE the press reaches the bar.
+        QFocusEvent out(QEvent::FocusOut, Qt::MouseFocusReason);
+        QApplication::sendEvent(bar->editWidget(), &out);
+        QVERIFY(!bar->isEditing());
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
+        QMenu* menu = visibleMenu(bar, QStringLiteral("rcxAddressBarRecentMenu"));
+        QVERIFY2(menu, "the press that closed the edit did not open the places menu");
+        menu->hide();
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, recent.center());
+        QTest::qWait(10);
+        QVERIFY(!bar->isEditing());
+        // A press on a crumb the paper covered is still spent.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isBaseEditing());
+        QFocusEvent out2(QEvent::FocusOut, Qt::MouseFocusReason);
+        QApplication::sendEvent(bar->editWidget(), &out2);
+        QVERIFY(!bar->isEditing());
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, c0.center());
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, c0.center());
+        QCOMPARE(crumbClicks, 0);
+        QVERIFY(!bar->isEditing());
+        // ...and the next click on it, with no edit in the way, is a click.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, c0.center());
+        QCOMPARE(crumbClicks, 1);
+    }
+
+    void testAltDAndCtrlLAreInertDuringAnInlineEdit() {
+        // Phase-4 follow-up: mid-edit, Ctrl+L reached QScintilla's own
+        // keymap (LineCut) and Alt+D fell through to the bar. Both are
+        // swallowed while a Scintilla inline edit is open.
+        AddressBar* bar = m_editor->addressBar();
+        QsciScintilla* sci = m_editor->scintilla();
+        sci->setFocus();
+        const int ln = lineOf(m_id.leaf);
+        QVERIFY(ln > 0);
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Name, ln));
+        QVERIFY(m_editor->isEditing());
+        const QString before = sci->text(ln);
+        QTest::keyClick(sci, Qt::Key_L, Qt::ControlModifier);
+        QVERIFY2(m_editor->isEditing(), "Ctrl+L ended the inline edit");
+        QCOMPARE(sci->text(ln), before);
+        QVERIFY2(!bar->isEditing(), "Ctrl+L opened the bar's edit over an inline edit");
+        QTest::keyClick(sci, Qt::Key_D, Qt::AltModifier);
+        QVERIFY2(m_editor->isEditing(), "Alt+D ended the inline edit");
+        QCOMPARE(sci->text(ln), before);
+        QVERIFY2(!bar->isEditing(), "Alt+D opened the bar's edit over an inline edit");
+        m_editor->cancelInlineEdit();
+        QVERIFY(!m_editor->isEditing());
+    }
+
+    void testSwitchSiblingRefusesAHopOfAnotherClass() {
+        // Phase-4 follow-up: the id has to be one of the hops the crumb's
+        // menu lists (a field of the class at that level). `parent` is
+        // QWidgetPrivate's, not RcxEditor's: refused at level 0, no undo
+        // entry, the trail untouched — and accepted at its own level.
+        drillOneLevel();
+        const QVector<uint64_t> before = m_ctrl->focusPath();
+        const int n = m_doc->undoStack.count();
+        QVERIFY(!m_ctrl->switchSibling(0, m_id.parent));
+        QCOMPARE(m_doc->undoStack.count(), n);
+        QCOMPARE(m_ctrl->focusPath(), before);
+        QVERIFY(collapsed(m_id.parent));
+        QVERIFY(!m_ctrl->switchSibling(0, m_id.dptr));              // not a hop at all
+        QVERIFY(!m_ctrl->switchSibling(0, m_id.vptr));              // already there: no-op
+        QCOMPARE(m_doc->undoStack.count(), n);
+        QVERIFY(m_ctrl->switchSibling(1, m_id.parent));
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QCOMPARE(m_doc->undoStack.count(), n + 1);
+    }
+
+    void testRootChevronMenuChecksNothingInShowAll() {
+        // Phase-4 follow-up: a show-all view (root 0) renders every root;
+        // its root crumb borrows the first root's name, but no root is
+        // "current", so no row is checked. A pick still views that root.
+        m_ctrl->setViewRootId(0);
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QCOMPARE(bar->state().viewRootId, 0ULL);
+        QMenu* menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().size(), 3);
+        for (QAction* a : menu->actions())
+            QVERIFY2(!a->isChecked(), qPrintable(a->text() + " is checked in a show-all view"));
+        menu->actions()[0]->trigger();
+        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QCOMPARE(bar->state().viewRootId, m_id.editor);
+        menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
+        QVERIFY(menu);
+        QVERIFY(menu->actions()[0]->isChecked());
+        QVERIFY(!menu->actions()[1]->isChecked());
+        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
     }
 
     void testFallbackThemeCarriesFocusGlow() {

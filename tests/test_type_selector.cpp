@@ -73,7 +73,7 @@ private slots:
     // ── Chevron span detection ──
 
     void testChevronSpanDetected() {
-        QString text = QStringLiteral("[\u25B8] source\u25BE  0x1000  struct Alpha {");
+        QString text = QStringLiteral("[\u25B8] 0x1000  struct Alpha {");
         ColumnSpan span = commandRowChevronSpan(text);
         QVERIFY(span.valid);
         QCOMPARE(span.start, 0);
@@ -82,23 +82,21 @@ private slots:
 
     void testChevronSpanRejects() {
         QVERIFY(!commandRowChevronSpan(QStringLiteral("Hi")).valid);
-        QVERIFY(!commandRowChevronSpan(QStringLiteral("\u25B8 source")).valid);
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("\u25B8 0x1000")).valid);
         // Old down-triangle glyph must not match
-        QVERIFY(!commandRowChevronSpan(QStringLiteral("[\u25BE] source")).valid);
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("[\u25BE] 0x1000")).valid);
     }
 
     // ── Existing spans unbroken by chevron prefix ──
 
     void testSpansWithPrefix() {
-        QString text = QStringLiteral("[\u25B8] source\u25BE  0x1000  struct Alpha {");
+        QString text = QStringLiteral("[\u25B8] 0x1000  struct Alpha {");
 
-        ColumnSpan src = commandRowSrcSpan(text);
-        QVERIFY(src.valid);
-        QVERIFY(text.mid(src.start, src.end - src.start).contains("source"));
-
+        // No source span any more: the address follows the chevron directly.
         ColumnSpan addr = commandRowAddrSpan(text);
         QVERIFY(addr.valid);
-        QVERIFY(text.mid(addr.start, addr.end - addr.start).contains("0x1000"));
+        QCOMPARE(addr.start, commandRowChevronSpan(text).end);
+        QCOMPARE(text.mid(addr.start, addr.end - addr.start), QStringLiteral("0x1000"));
 
         ColumnSpan rootName = commandRowRootNameSpan(text);
         QVERIFY(rootName.valid);

@@ -1568,7 +1568,7 @@ struct ColumnSpan {
     bool valid = false;
 };
 
-enum class EditTarget { Name, Type, Value, BaseAddress, Source, ArrayIndex, ArrayCount,
+enum class EditTarget { Name, Type, Value, BaseAddress, ArrayIndex, ArrayCount,
                         ArrayElementType, ArrayElementCount, PointerTarget,
                         RootClassType, RootClassName, TypeSelector, Comment };
 
@@ -1707,18 +1707,39 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
     return {start, lineLength, start < lineLength};
 }
 
-// ── CommandRow spans ──
-// Line format: "source▾ · 0x140000000"
+// ── CommandRow (Scintilla line 0) ──
+// Row shape: "[▸] <address>  <keyword> <ClassName> {" — no " {" when the
+// editor brace-wraps. The source control ('name'▾) left this row for the
+// address bar's chip; the base address stays here until P7 demotes line 0
+// to the class header alone. RcxController::updateCommandRow builds the row
+// through buildCommandRowText so a test parses the REAL string back through
+// the span functions below instead of a hand copy of the format.
 
-inline ColumnSpan commandRowSrcSpan(const QString& lineText) {
-    // Source label ends at the ▾ dropdown arrow
-    int arrow = lineText.indexOf(QChar(0x25BE));
-    if (arrow < 0) return {};
-    int start = 0;
-    while (start < arrow && !lineText[start].isLetterOrNumber()
-           && lineText[start] != '<' && lineText[start] != '\'') start++;
-    if (start >= arrow) return {};
-    return {start, arrow, true};
+// The address cell keeps its 24-char elision (23 chars + U+2026) — P7 owns
+// the cell's fate, not its width.
+inline constexpr int kCommandRowAddrMaxChars = 24;
+
+inline QString commandRowElide(QString s, int max) {
+    if (max <= 0) return {};
+    if (s.size() <= max) return s;
+    if (max == 1) return QStringLiteral("\u2026");
+    return s.left(max - 1) + QChar(0x2026);
+}
+
+inline QString buildCommandRowText(const QString& addrText, const QString& keyword,
+                                   const QString& className, bool braceWrap) {
+    return QStringLiteral("[\u25B8] ") + commandRowElide(addrText, kCommandRowAddrMaxChars)
+         + QStringLiteral("  ") + keyword + QLatin1Char(' ') + className
+         + (braceWrap ? QString() : QStringLiteral(" {"));
+}
+
+// The type-selector chevron: "[▸]" at the start of the row. The span takes
+// the trailing space too, so the click target is a little wider.
+inline ColumnSpan commandRowChevronSpan(const QString& lineText) {
+    if (lineText.size() < 3) return {};
+    if (lineText[0] == '[' && lineText[1] == QChar(0x25B8) && lineText[2] == ']')
+        return {0, qMin(4, (int)lineText.size()), true};
+    return {};
 }
 
 // ── CommandRow root-class spans ──
@@ -1737,27 +1758,30 @@ inline int commandRowRootStart(const QString& lineText) {
     return best;
 }
 
+// The address cell: everything between the chevron and the root keyword,
+// trailing space trimmed. A literal ("0x7FF6…"), a module formula
+// ("<app.exe>+0x40", "[<app.exe>+0x58]") and a bare one ("game.exe+0x40")
+// are all spanned whole — the bare shape used to be spanned from its "0x",
+// so a click edited half the formula. Only text that opens with none of
+// those (no '<', '[', letter, digit or '_') falls back to its "0x" run.
 inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
-    // Address starts after the source dropdown arrow (▾)
-    int arrow = lineText.indexOf(QChar(0x25BE));
-    if (arrow < 0) return {};
-    // Skip whitespace after arrow to find the start of the address/formula
-    int addrStart = arrow + 1;
+    const ColumnSpan chevron = commandRowChevronSpan(lineText);
+    int addrStart = chevron.valid ? chevron.end : 0;
     while (addrStart < lineText.size() && lineText[addrStart].isSpace()) addrStart++;
-    // If text starts with '<' or '[', it's a formula — use the whole thing.
-    // Only look for bare "0x" prefix if the address doesn't start with formula syntax.
-    int start;
-    if (addrStart < lineText.size()
-        && (lineText[addrStart] == '<' || lineText[addrStart] == '[')) {
-        start = addrStart;
-    } else {
-        int oxPos = lineText.indexOf(QStringLiteral("0x"), arrow);
+    if (addrStart >= lineText.size()) return {};
+    int start = addrStart;
+    const QChar c = lineText[addrStart];
+    if (c != QLatin1Char('<') && c != QLatin1Char('[') && c != QLatin1Char('_')
+        && !c.isLetterOrNumber()) {
+        const int oxPos = lineText.indexOf(QStringLiteral("0x"), addrStart);
         start = (oxPos >= 0) ? oxPos : addrStart;
     }
-    // End at root keyword (struct/class/enum) or end of line
-    int rootStart = commandRowRootStart(lineText);
+    // End at the root keyword (struct/class/enum) or the end of the line. A
+    // row that goes straight from the chevron to the keyword (P7's shape)
+    // has no address cell at all.
+    const int rootStart = commandRowRootStart(lineText);
+    if (rootStart >= 0 && start >= rootStart) return {};
     int end = (rootStart > start) ? rootStart : lineText.size();
-    // Trim trailing whitespace
     while (end > start && lineText[end - 1].isSpace()) end--;
     if (end <= start) return {};
     return {start, end, true};
@@ -1785,16 +1809,6 @@ inline ColumnSpan commandRowRootNameSpan(const QString& lineText) {
     while (nameEnd > nameStart && lineText[nameEnd - 1].isSpace()) nameEnd--;
     if (nameEnd <= nameStart) return {};
     return {nameStart, nameEnd, true};
-}
-
-// ── CommandRow type-selector chevron span ──
-// Detects "[▸]" at the start of the command row text
-
-inline ColumnSpan commandRowChevronSpan(const QString& lineText) {
-    if (lineText.size() < 3) return {};
-    if (lineText[0] == '[' && lineText[1] == QChar(0x25B8) && lineText[2] == ']')
-        return {0, qMin(4, (int)lineText.size()), true};  // include trailing space for easier clicking
-    return {};
 }
 
 // ── Array element type/count spans (within type column of array headers) ──

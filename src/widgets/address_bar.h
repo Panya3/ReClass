@@ -548,15 +548,23 @@ protected:
                 const Qt::FocusReason why = static_cast<QFocusEvent*>(e)->reason();
                 if (why != Qt::PopupFocusReason && why != Qt::ActiveWindowFocusReason
                     && why != Qt::MenuBarFocusReason) {
-                    endEdit();
                     // A click-away ends the edit. Qt moves focus BEFORE it
                     // delivers the press, so by the time mousePressEvent
                     // runs the overlay is gone, the layout has thawed, and
                     // the point may sit on a cell the user never saw (a
-                    // chevron that was under the paper). The press that
-                    // closed the edit is spent — mousePressEvent keeps only
-                    // its click-in-the-same-field case.
-                    if (why == Qt::MouseFocusReason) m_swallowNextPress = true;
+                    // chevron that was under the paper). A press THERE is
+                    // spent — mousePressEvent keeps only its click-in-the-
+                    // same-field case. A press on a cell that stayed
+                    // visible beside the overlay (recent, the chip, the
+                    // nav buttons) is a click the user aimed: it closes
+                    // the edit AND acts, in one go. The covered rect is
+                    // read here because endEdit() clears it.
+                    const QRect covered = m_coveredRect;
+                    endEdit();
+                    if (why == Qt::MouseFocusReason) {
+                        m_swallowNextPress = true;
+                        m_swallowRect = covered;
+                    }
                 }
             }
         }
@@ -596,15 +604,19 @@ protected:
         dismissRcxTooltip();
         const QString id = itemIdAt(e->pos());
         if (m_swallowNextPress) {
-            // This press already ended an edit (see eventFilter) and is
-            // spent — except on the field's own text cells: a click on the
-            // base or the empty stretch while editing is the user clicking
-            // elsewhere in the same field, and the edit re-opens there in
-            // that cell's scope (the release does it). Menus and nav never
-            // fire off a press whose target the user did not see.
+            // This press already ended an edit (see eventFilter). Under
+            // the paper the overlay covered it is spent — except on the
+            // field's own text cells: a click on the base or the empty
+            // stretch while editing is the user clicking elsewhere in the
+            // same field, and the edit re-opens there in that cell's
+            // scope (the release does it). Menus and nav never fire off
+            // a press whose target the user did not see; a cell that was
+            // visible the whole time answers as it always does.
             m_swallowNextPress = false;
+            const bool wasCovered = m_swallowRect.contains(e->pos());
+            m_swallowRect = QRect();
             const LaidItem* li = itemById(id);
-            if (!li || (li->kind != Cell::Base && li->kind != Cell::Space)) {
+            if (wasCovered && (!li || (li->kind != Cell::Base && li->kind != Cell::Space))) {
                 e->accept();
                 return;
             }
@@ -1381,13 +1393,16 @@ private:
     }
 
     // root.chev: the other root classes (rootClassEntries), the one in view
-    // checked. A pick views that root — the F12 jump, trail cleared.
+    // checked. A pick views that root — the F12 jump, trail cleared. The
+    // check follows the VIEW root, not crumbs[0]: a show-all view labels
+    // its root crumb with the first root struct while showing every root,
+    // so nothing there is "current" and no row is checked.
     void showRootMenu() {
         const QString cellId = QStringLiteral("root.chev");
         const QRect r = itemRect(cellId);
         if (r.isNull()) return;
         const QVector<RootEntry> roots = m_treeQ.roots ? m_treeQ.roots() : QVector<RootEntry>();
-        const uint64_t current = m_state.crumbs.isEmpty() ? 0 : m_state.crumbs[0].classId;
+        const uint64_t current = m_state.viewRootId;
         auto* menu = new QMenu(this);
         menu->setObjectName(QStringLiteral("rcxAddressBarRootMenu"));
         if (roots.isEmpty()) {
@@ -1633,7 +1648,8 @@ private:
     QString m_hoverId;
     QString m_pressedId;
     QString m_menuOpenId;      // cell kept pressed while its menu (or the source popup) is up
-    bool    m_swallowNextPress = false;   // the press that ended an edit does nothing else
+    bool    m_swallowNextPress = false;   // the press that ended an edit is spent...
+    QRect   m_swallowRect;                // ...only inside what the overlay covered
     // The edit overlay (base or path scope). While it is visible a state
     // push is stored but not laid out (see setState); endEdit applies the
     // deferred relayout.

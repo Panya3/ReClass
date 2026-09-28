@@ -1,45 +1,44 @@
 #include <QTest>
 #include <QString>
-#include <memory>
-#include "providers/provider.h"
-#include "providers/buffer_provider.h"
-#include "providers/null_provider.h"
+#include "core.h"
 
 using namespace rcx;
 
-// -- Replicate the label-building logic from updateCommandRow so we can test it
-//    without needing a full RcxController/RcxDocument/RcxEditor stack.
+// The command row (Scintilla line 0) as RcxController::updateCommandRow
+// builds it — through buildCommandRowText — parsed back through the SAME
+// span functions the editor's hit test, pills and hover read it with. No
+// hand copy of the format lives here: a change to the builder or to a
+// parser fails these, not a stale replica of them.
+//
+// Row shape: "[▸] <address>  <keyword> <ClassName> {". The source control
+// ('name'▾) moved to the address bar's chip; the address cell stays until
+// P7 demotes the row to the class header alone.
 
-static QString buildSourceLabel(const Provider& prov) {
-    QString provName = prov.name();
-    if (provName.isEmpty())
-        return QStringLiteral("source\u25BE");
-    return QStringLiteral("'%1'\u25BE").arg(provName);
+namespace {
+
+QString spanText(const QString& row, const ColumnSpan& s) {
+    return s.valid ? row.mid(s.start, s.end - s.start) : QString();
 }
 
-static QString buildCommandRow(const Provider& prov, uint64_t baseAddress) {
-    QString src = buildSourceLabel(prov);
-    QString addr = QStringLiteral("0x") +
-        QString::number(baseAddress, 16).toUpper();
-    return QStringLiteral("   %1  %2").arg(src, addr);
+// Parse a built row back: the address cell must follow the chevron directly
+// (nothing sits between them any more) and read as `addr`; the root spans
+// must read as the keyword and the class name.
+void checkRow(const QString& row, const QString& addr, const QString& keyword,
+              const QString& className) {
+    QVERIFY2(!row.contains(QChar(0x25BE)), qPrintable(row));   // no source control, no ▾
+    const ColumnSpan chev = commandRowChevronSpan(row);
+    QVERIFY(chev.valid);
+    QCOMPARE(chev.start, 0);
+    QCOMPARE(chev.end, 4);
+    const ColumnSpan as = commandRowAddrSpan(row);
+    QVERIFY2(as.valid, qPrintable(row));
+    QCOMPARE(as.start, chev.end);
+    QCOMPARE(spanText(row, as), addr);
+    QCOMPARE(spanText(row, commandRowRootTypeSpan(row)), keyword);
+    QCOMPARE(spanText(row, commandRowRootNameSpan(row)), className);
 }
 
-// -- Replicate commandRowSrcSpan for testing
-struct TestColumnSpan {
-    int start = 0;
-    int end = 0;
-    bool valid = false;
-};
-
-static TestColumnSpan commandRowSrcSpan(const QString& lineText) {
-    int arrow = lineText.indexOf(QChar(0x25BE));
-    if (arrow < 0) return {};
-    int start = 0;
-    while (start < arrow && !lineText[start].isLetterOrNumber()
-           && lineText[start] != '<' && lineText[start] != '\'') start++;
-    if (start >= arrow) return {};
-    return {start, arrow, true};
-}
+}  // namespace
 
 class TestCommandRow : public QObject {
     Q_OBJECT
@@ -47,91 +46,129 @@ class TestCommandRow : public QObject {
 private slots:
 
     // ---------------------------------------------------------------
-    // Source label text
+    // The built row
     // ---------------------------------------------------------------
 
-    void label_nullProvider_showsSelectSource() {
-        NullProvider p;
-        QCOMPARE(buildSourceLabel(p), QStringLiteral("source\u25BE"));
+    void row_literalAddress() {
+        const QString row = buildCommandRowText(QStringLiteral("0x140000000"), QStringLiteral("struct"),
+                                                QStringLiteral("Player"), false);
+        QCOMPARE(row, QStringLiteral("[▸] 0x140000000  struct Player {"));
+        checkRow(row, QStringLiteral("0x140000000"), QStringLiteral("struct"), QStringLiteral("Player"));
     }
 
-    void label_bufferNoName_showsSelectSource() {
-        // BufferProvider with empty name also triggers source▾
-        BufferProvider p(QByteArray(4, '\0'));
-        QCOMPARE(buildSourceLabel(p), QStringLiteral("source\u25BE"));
+    void row_zeroBaseIsComposePlaceholderShape() {
+        // compose.cpp's line-0 placeholder is this exact string; test_compose
+        // checks the other side of the equation against compose() itself.
+        const QString row = buildCommandRowText(QStringLiteral("0x0"), QStringLiteral("struct"),
+                                                QStringLiteral("Untitled"), false);
+        QCOMPARE(row, QStringLiteral("[▸] 0x0  struct Untitled {"));
+        checkRow(row, QStringLiteral("0x0"), QStringLiteral("struct"), QStringLiteral("Untitled"));
     }
 
-    void label_bufferWithName_showsFileAndName() {
-        BufferProvider p(QByteArray(4, '\0'), "dump.bin");
-        QCOMPARE(buildSourceLabel(p), QStringLiteral("'dump.bin'\u25BE"));
+    void row_formulaStartingWithAngle() {
+        const QString f = QStringLiteral("<game.exe>+0x40");
+        const QString row = buildCommandRowText(f, QStringLiteral("class"), QStringLiteral("Foo"), false);
+        QCOMPARE(row, QStringLiteral("[▸] <game.exe>+0x40  class Foo {"));
+        checkRow(row, f, QStringLiteral("class"), QStringLiteral("Foo"));
+    }
+
+    void row_formulaStartingWithBracket() {
+        const QString f = QStringLiteral("[<game.exe>+0x58]");
+        const QString row = buildCommandRowText(f, QStringLiteral("struct"), QStringLiteral("Foo"), false);
+        checkRow(row, f, QStringLiteral("struct"), QStringLiteral("Foo"));
+    }
+
+    void row_bareIdentifierFormulaIsSpannedWhole() {
+        // The defect: "game.exe+0x40" used to be spanned from its "0x", so a
+        // click edited "0x40" and the module was lost on commit.
+        const QString f = QStringLiteral("game.exe+0x40");
+        const QString row = buildCommandRowText(f, QStringLiteral("struct"), QStringLiteral("Foo"), false);
+        checkRow(row, f, QStringLiteral("struct"), QStringLiteral("Foo"));
+        // A symbol, and a formula with spaces, read the same way.
+        const QString sym = QStringLiteral("ntdll!LdrpHeap + 8");
+        checkRow(buildCommandRowText(sym, QStringLiteral("struct"), QStringLiteral("Foo"), false),
+                 sym, QStringLiteral("struct"), QStringLiteral("Foo"));
+    }
+
+    void row_braceWrapOnAndOff() {
+        const QString off = buildCommandRowText(QStringLiteral("0x10"), QStringLiteral("struct"),
+                                                QStringLiteral("Player"), false);
+        const QString on  = buildCommandRowText(QStringLiteral("0x10"), QStringLiteral("struct"),
+                                                QStringLiteral("Player"), true);
+        QCOMPARE(off, QStringLiteral("[▸] 0x10  struct Player {"));
+        QCOMPARE(on,  QStringLiteral("[▸] 0x10  struct Player"));
+        checkRow(off, QStringLiteral("0x10"), QStringLiteral("struct"), QStringLiteral("Player"));
+        checkRow(on,  QStringLiteral("0x10"), QStringLiteral("struct"), QStringLiteral("Player"));
+    }
+
+    void row_enumKeyword() {
+        const QString row = buildCommandRowText(QStringLiteral("0x20"), QStringLiteral("enum"),
+                                                QStringLiteral("Color"), false);
+        checkRow(row, QStringLiteral("0x20"), QStringLiteral("enum"), QStringLiteral("Color"));
+    }
+
+    void row_elidedAddress() {
+        // 24 chars fit as they are; the 25th turns the cell into 23 + "…",
+        // and the span covers the elided text, ellipsis included.
+        const QString fits = QStringLiteral("<a_module_name.exe>+0x40");     // 24 chars
+        QCOMPARE(fits.size(), kCommandRowAddrMaxChars);
+        checkRow(buildCommandRowText(fits, QStringLiteral("struct"), QStringLiteral("Foo"), false),
+                 fits, QStringLiteral("struct"), QStringLiteral("Foo"));
+
+        const QString longF = QStringLiteral("<a_longer_module_name.exe>+0x1A0");
+        QVERIFY(longF.size() > kCommandRowAddrMaxChars);
+        const QString elided = longF.left(kCommandRowAddrMaxChars - 1) + QChar(0x2026);
+        QCOMPARE(commandRowElide(longF, kCommandRowAddrMaxChars), elided);
+        QCOMPARE(elided.size(), kCommandRowAddrMaxChars);
+        const QString row = buildCommandRowText(longF, QStringLiteral("struct"), QStringLiteral("Foo"), false);
+        QCOMPARE(row, QStringLiteral("[▸] ") + elided + QStringLiteral("  struct Foo {"));
+        checkRow(row, elided, QStringLiteral("struct"), QStringLiteral("Foo"));
+    }
+
+    void elide_edges() {
+        QCOMPARE(commandRowElide(QStringLiteral("abc"), 0), QString());
+        QCOMPARE(commandRowElide(QStringLiteral("abc"), 1), QStringLiteral("…"));
+        QCOMPARE(commandRowElide(QStringLiteral("abc"), 3), QStringLiteral("abc"));
+        QCOMPARE(commandRowElide(QStringLiteral("abcd"), 3), QStringLiteral("ab…"));
     }
 
     // ---------------------------------------------------------------
-    // Full command row text
+    // The address span on rows the builder does not make
     // ---------------------------------------------------------------
 
-    void row_nullProvider() {
-        NullProvider p;
-        QString row = buildCommandRow(p, 0);
-        QCOMPARE(row, QStringLiteral("   source\u25BE  0x0"));
+    void span_addressOnlyRow() {
+        // The editor tests write rows with no root part at all.
+        const QString row = QStringLiteral("[▸] 0xABCD1234");
+        const ColumnSpan as = commandRowAddrSpan(row);
+        QVERIFY(as.valid);
+        QCOMPARE(as.start, 4);
+        QCOMPARE(spanText(row, as), QStringLiteral("0xABCD1234"));
+        QVERIFY(!commandRowRootNameSpan(row).valid);
     }
 
-    void row_fileProvider() {
-        BufferProvider p(QByteArray(4, '\0'), "test.bin");
-        QString row = buildCommandRow(p, 0x140000000ULL);
-        QCOMPARE(row, QStringLiteral("   'test.bin'\u25BE  0x140000000"));
+    void span_rowWithoutAddressCell() {
+        // P7's shape: chevron straight to the keyword. No address cell, the
+        // root spans intact — the parser must not hand the header back as
+        // an address.
+        const QString row = QStringLiteral("[▸] struct Foo {");
+        QVERIFY(!commandRowAddrSpan(row).valid);
+        QCOMPARE(spanText(row, commandRowRootTypeSpan(row)), QStringLiteral("struct"));
+        QCOMPARE(spanText(row, commandRowRootNameSpan(row)), QStringLiteral("Foo"));
+        QVERIFY(!commandRowAddrSpan(QStringLiteral("[▸] ")).valid);
+        QVERIFY(!commandRowAddrSpan(QString()).valid);
     }
 
-    // ---------------------------------------------------------------
-    // Source span parsing
-    // ---------------------------------------------------------------
-
-    void span_selectSource() {
-        QString row = buildCommandRow(NullProvider{}, 0);
-        auto span = commandRowSrcSpan(row);
-        QVERIFY(span.valid);
-        QString extracted = row.mid(span.start, span.end - span.start);
-        QCOMPARE(extracted, QStringLiteral("source"));
+    void span_fallsBackToHexRunForOddPrefix() {
+        // Text that opens with none of '<', '[', a letter, a digit or '_'
+        // is not a formula shape the parser knows: it takes the "0x" run.
+        const QString row = QStringLiteral("[▸] = 0x40  struct Foo {");
+        QCOMPARE(spanText(row, commandRowAddrSpan(row)), QStringLiteral("0x40"));
     }
 
-    void span_fileProvider() {
-        BufferProvider p(QByteArray(4, '\0'), "dump.bin");
-        QString row = buildCommandRow(p, 0x140000000ULL);
-        auto span = commandRowSrcSpan(row);
-        QVERIFY(span.valid);
-        QString extracted = row.mid(span.start, span.end - span.start);
-        QCOMPARE(extracted, QStringLiteral("'dump.bin'"));
-    }
-
-    void span_processProvider_simulated() {
-        // Simulate a process provider without needing Windows APIs
-        // by building the string directly
-        QString row = QStringLiteral("   'notepad.exe'\u25BE  0x7FF600000000");
-        auto span = commandRowSrcSpan(row);
-        QVERIFY(span.valid);
-        QString extracted = row.mid(span.start, span.end - span.start);
-        QCOMPARE(extracted, QStringLiteral("'notepad.exe'"));
-    }
-
-    // ---------------------------------------------------------------
-    // Provider switching simulation
-    // ---------------------------------------------------------------
-
-    void switching_nullToFileToProcess() {
-        // Start with NullProvider
-        std::unique_ptr<Provider> prov = std::make_unique<NullProvider>();
-        QCOMPARE(buildSourceLabel(*prov), QStringLiteral("source\u25BE"));
-
-        // User loads a file
-        prov = std::make_unique<BufferProvider>(QByteArray(64, '\0'), "game.exe");
-        QCOMPARE(buildSourceLabel(*prov), QStringLiteral("'game.exe'\u25BE"));
-
-        // User switches to a "process" -- simulate with a named BufferProvider
-        // (ProcessProvider needs Windows, but the label logic is the same)
-        prov = std::make_unique<BufferProvider>(QByteArray(64, '\0'), "notepad.exe");
-        // BufferProvider kind is "File", but the switching mechanism works the same
-        QCOMPARE(prov->kind(), QStringLiteral("File"));
-        QCOMPARE(prov->name(), QStringLiteral("notepad.exe"));
+    void span_chevronRejects() {
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("Hi")).valid);
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("▸ 0x0")).valid);
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("[▾] 0x0")).valid);   // the old glyph
     }
 };
 
