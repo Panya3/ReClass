@@ -11,7 +11,7 @@
 // shortcuts only show up in tooltips.
 //
 // Layout (10 pt, fm.height 17): tab row fm.height()+8 = 25, body 76
-// (padTop 2 + caption 12 + gap 7 + 3 rows × 18 + hairline 1) → 101 total.
+// (padTop 2 + 3 rows × 18 + gap 7 + caption 12 + padBottom 4 + hairline 1) → 105 total.
 //   Flat: no panel boxes, no caption bands — one 1-device-px `border`
 //   divider column per panel gap (kPanelGap 13, divider at A.right()+7),
 //   a 9 pt caption (textDim through the tone LADDER) ABOVE each panel, and
@@ -188,7 +188,8 @@ private:
         QString            tab;
     };
     struct Metrics {
-        int tabRowH = 25, rowH = 18, captionH = 12, captionGap = 4, padTop = 2, bodyH = 73;
+        int tabRowH = 25, rowH = 18, captionH = 12, captionGap = 4, padTop = 2,
+            padBottom = 4, bodyH = 73;
         int   smallIcon = 16;          // small cell height (logical)
         int   largeIconDev = 32;       // large Codicon side in DEVICE px (ribbonLargeIconDev)
         qreal largeIcon = 25.6;        // … in logical px (largeIconDev / dpr)

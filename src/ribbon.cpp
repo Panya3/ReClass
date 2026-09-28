@@ -294,17 +294,23 @@ RibbonBar::Metrics RibbonBar::metrics() const {
     m.tabRowH  = fm.height() + 8;              // 25 at 10 pt (4 px of air above/below)
     m.rowH     = qMax(18, fm.height() + 1);    // 18
     m.captionH = 12;                           // 9 pt caption; glyphs overhang the rect
-    // The body reads TOP-DOWN: padTop, caption band, captionGap, 3 item rows,
-    // the closing hairline. captionGap is 7, not 4, because the clear space
-    // between the caption and the item row next to it must EXCEED the 7.8 px
-    // between item rows — otherwise the caption band reads as a fourth row of
-    // buttons rather than a heading over them.
+    // The body reads TOP-DOWN: padTop, 3 item rows, captionGap, caption band,
+    // padBottom, the closing hairline. captionGap is 7, not 4, because the
+    // clear space between the caption and the item row next to it must EXCEED
+    // the 7.8 px between item rows — otherwise the caption band reads as a
+    // fourth row of buttons rather than a label for them.
     m.captionGap = 7;
     m.padTop   = 2;
-    // padTop + caption + captionGap + 3 rows + body bottom hairline -> 76; 101
-    // with the tab row. The band ORDER changed on 2026-09-08 (caption first),
-    // the arithmetic did not: nothing below the ribbon may move.
-    m.bodyH = m.padTop + m.captionH + m.captionGap + 3 * m.rowH + 1;
+    // Air UNDER the caption so the band is not pinned against the body's
+    // closing hairline (user, 2026-09-08: "a little bit of vertical breathing
+    // room under"). The caption's descenders live inside captionH, so without
+    // this the row sat one pixel off the rule below it.
+    m.padBottom = 4;
+    // padTop + 3 rows + captionGap + caption + padBottom + body hairline -> 80;
+    // 105 with the tab row. The captions went back UNDER their items on
+    // 2026-09-08 and gained padBottom, so the ribbon is 4 px taller than the
+    // caption-on-top arrangement it replaced.
+    m.bodyH = m.padTop + 3 * m.rowH + m.captionGap + m.captionH + m.padBottom + 1;
     const qreal dpr = devicePixelRatioF() > 0 ? devicePixelRatioF() : 1.0;
     m.smallIcon    = 16;
     m.largeIconDev = ribbonLargeIconDev(dpr);
@@ -362,13 +368,14 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
     const Metrics m = metrics();
     const QFontMetrics fm(font());
     const QFontMetrics cfm(captionFont());
-    // Caption band FIRST, items under it. The captions read as headings —
-    // "64" / "32" / "Selection" name the list, and a colon points at what
-    // follows it, so a caption painted under its own column said the opposite
-    // of what it meant (user, 2026-09-08: ": denotes the list is below").
-    const int captionTop = m.tabRowH + m.padTop;
-    const int itemsTop   = captionTop + m.captionH + m.captionGap;
+    // Items FIRST, caption band under them. Tried the other way round on
+    // 2026-09-08 and the user put it back: a caption over the column read as a
+    // heading competing with the buttons, where under it reads as a label for
+    // the group it closes. The colons went with the move, so nothing points
+    // the wrong way any more.
+    const int itemsTop   = m.tabRowH + m.padTop;
     const int itemsH     = 3 * m.rowH;
+    const int captionTop = itemsTop + itemsH + m.captionGap;
 
     int x = kLeftMargin;
     int column = 0;
@@ -501,7 +508,7 @@ RibbonBar::Layout RibbonBar::computeLayout(int tabIdx, int availW,
             ++column;
         }
         closeGroup();
-        lp.rect = QRect(panelX, captionTop, panelW, m.captionH + m.captionGap + itemsH);
+        lp.rect = QRect(panelX, itemsTop, panelW, itemsH + m.captionGap + m.captionH);
         lp.captionRect = QRect(panelX, captionTop, panelW, m.captionH);
         // One divider per gap (none before the first panel).
         if (!L.panels.isEmpty()) L.dividerXs << L.panels.last().rect.right() + kDividerInset;
@@ -968,8 +975,8 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
     const Theme& t = m_theme;
     const int bodyTop = m.tabRowH;
     const int bodyBottom = bodyTop + m.bodyH;          // exclusive
-    // Same band order as computeLayout: caption on top, items under it.
-    const int itemsTop = bodyTop + m.padTop + m.captionH + m.captionGap;
+    // Same band order as computeLayout: items on top, caption under them.
+    const int itemsTop = bodyTop + m.padTop;
     const int itemsH = 3 * m.rowH;
     const qreal dpr = devicePixelRatioF();
 
@@ -981,9 +988,12 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
         fillLeftDeviceColOfRect(p, QRectF(dx, divTop, 1, divBottom - divTop), t.border);
 
     const int tabIdx = tabIndex(m_currentTab);
-    // A caption is the SECONDARY tier: textDim through the ladder, so it can
-    // never end up as bright as the labels it captions.
-    const QColor captionTone = ribbonToneColour(t.textDim, t, t.background);
+    // A caption is the SECONDARY tier, and textDim was not secondary ENOUGH:
+    // at that tone it sat in the same visual rank as the buttons it labels
+    // (user, 2026-09-08). textMuted is one rung further down the ladder and
+    // still floors through ribbonToneColour, so a theme whose muted tone is
+    // too close to the ground gets bumped back up rather than disappearing.
+    const QColor captionTone = ribbonToneColour(t.textMuted, t, t.background);
     for (const LaidPanel& lp : m_layout.panels) {
         // `||` family separators span the rows only, and are painted SOFTER
         // than the panel dividers. Modify draws 3 dividers and up to 8 family
