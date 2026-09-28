@@ -19,9 +19,12 @@
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
 #include <QApplication>
+#include <QContextMenuEvent>
 #include <QEvent>
 #include <QFile>
 #include <QFocusEvent>
+#include <QPainter>
+#include <QTemporaryDir>
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -854,7 +857,7 @@ private slots:
         // Static after it (the tick is timer-driven, so either is fine here;
         // P2b wires sourceStatusChanged → setLiveness for the in-between).
         QVERIFY(s.liveness == liveness::None || s.liveness == liveness::Static);
-        QVERIFY(!s.canBack && !s.canForward);   // P5 wires history
+        QVERIFY(s.canBack && !s.canForward);    // the rebase was a gesture: the place left is behind
         QVERIFY(!s.canUp);                      // nothing drilled
         drillTwoLevels();
         QVERIFY(m_editor->addressBar()->state().canUp);
@@ -2579,6 +2582,830 @@ private slots:
         QCOMPARE(t.focusGlow, QColor(QStringLiteral("#E5A00D")));
         QVERIFY(t.focusGlow != t.borderFocused);
         QVERIFY(t.focusGlow != t.indHoverSpan);
+    }
+
+    // ── P5: history + keyboard ──
+    //
+    // The rule every slot below pins: one gesture = at most ONE undo entry
+    // + ONE history entry; a Back / Forward = ZERO of both, except one
+    // "Reopen path" macro when a hop on the restored trail was collapsed;
+    // undo / redo never move history.
+private:
+    // F12 on the vptr row: the definition jump, recorded at its call site.
+    void jumpToDefinitionOf(uint64_t hopId) {
+        QsciScintilla* sci = m_editor->scintilla();
+        sci->setCursorPosition(lineOf(hopId), 0);
+        QTest::keyClick(sci, Qt::Key_F12);
+        QApplication::processEvents();
+    }
+    // The device rows / columns the four edge fills pick for a logical rect
+    // at the grab's scale — qFloor(edge ± 0.5), paintutil's rule, NOT a
+    // rounded rect's edges: at 125 % the two disagree on the bottom row
+    // (a 22-px cell at y 2 ends on device row 29, where qRound puts 30).
+    struct RingEdges { int top, bottom, left, right; };
+    static RingEdges ringEdgesOf(const QImage& img, const QRect& logical) {
+        const qreal dpr = img.devicePixelRatio() > 0 ? img.devicePixelRatio() : 1.0;
+        const QRectF dev(logical.left() * dpr, logical.top() * dpr,
+                         logical.width() * dpr, logical.height() * dpr);
+        return { qFloor(dev.top() + 0.5), qFloor(dev.bottom() - 0.5),
+                 qFloor(dev.left() + 0.5), qFloor(dev.right() - 0.5) };
+    }
+    static QRect rowAcross(const RingEdges& e, int y) { return QRect(e.left, y, e.right - e.left + 1, 1); }
+    static QRect colAlong(const RingEdges& e, int x)  { return QRect(x, e.top, 1, e.bottom - e.top + 1); }
+
+private slots:
+    void testF12ThenBackRestoresRootAndTrail() {
+        drillOneLevel();                                        // RcxEditor.vptr › QWidgetPrivate
+        AddressBar* bar = m_editor->addressBar();
+        QVERIFY(!m_ctrl->canGoBack());
+        QVERIFY(!bar->state().canBack);
+        QSignalSpy hist(m_ctrl, &RcxController::historyChanged);
+        const int undoBefore = m_doc->undoStack.count();
+        jumpToDefinitionOf(m_id.vptr);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
+        QVERIFY(m_ctrl->focusPath().isEmpty());                 // a jump: fresh trail
+        QVERIFY(m_ctrl->canGoBack());
+        QVERIFY(!m_ctrl->canGoForward());
+        QVERIFY(bar->state().canBack);
+        QVERIFY(!bar->state().canForward);
+        QCOMPARE(hist.count(), 1);
+        QCOMPARE(m_ctrl->backEntries().size(), 1);
+        const NavEntry left = m_ctrl->backEntries().first();
+        QCOMPARE(left.viewRootId, m_id.editor);
+        QCOMPARE(left.focusPath, (QVector<uint64_t>{ m_id.vptr }));
+        QCOMPARE(left.baseAddress, 0ULL);
+        QCOMPARE(left.label, QStringLiteral("RcxEditor.vptr  @ 0x0"));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);         // F12 is not undoable
+        // Back: root and trail restored; the hop was still open, so no
+        // macro — and no history entry either (it is a restore).
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QVERIFY(!collapsed(m_id.vptr));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QVERIFY(!m_ctrl->canGoBack());
+        QVERIFY(m_ctrl->canGoForward());
+        QVERIFY(!bar->state().canBack);
+        QVERIFY(bar->state().canForward);
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"), QStringLiteral("QWidgetPrivate") }));
+        QCOMPARE(m_ctrl->forwardEntries().size(), 1);
+        QCOMPARE(m_ctrl->forwardEntries().first().viewRootId, m_id.priv);
+        // Forward: the jump again.
+        m_ctrl->goForward(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
+        QVERIFY(m_ctrl->focusPath().isEmpty());
+        QVERIFY(m_ctrl->canGoBack());
+        QVERIFY(!m_ctrl->canGoForward());
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        // The cells drive the same path through the editor's signals.
+        QSignalSpy back(m_editor, &RcxEditor::navBackRequested);
+        QSignalSpy fwd(m_editor, &RcxEditor::navForwardRequested);
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("back")).center());
+        QApplication::processEvents();
+        QCOMPARE(back.count(), 1);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("fwd")).center());
+        QApplication::processEvents();
+        QCOMPARE(fwd.count(), 1);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
+        // A Back / Forward is never an undo entry.
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+    }
+
+    void testRebaseThenBackIsRawAndUndoStillUndoesTheRebase() {
+        // DECIDED: Back is a RAW restore. The exact sequence:
+        //   rebaseTo("0x40")  base 0x40, undo +1 (cmd::ChangeBase), history +1
+        //   goBack            base 0x0 written directly — undo count and
+        //                     index UNCHANGED: nothing pushed, nothing undone
+        //   undoStack.undo()  undoes the ORIGINAL rebase: base 0x0 (already
+        //                     there, so the number does not move), formula
+        //                     empty, index back one
+        //   undoStack.redo()  base 0x40 again — and Forward still leads to
+        //                     0x40: undo / redo never touched history
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        const int undoBefore = m_doc->undoStack.count();
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0x40ULL);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QVERIFY(m_ctrl->canGoBack());
+        QCOMPARE(m_ctrl->backEntries().size(), 1);
+        QCOMPARE(m_ctrl->backEntries().last().baseAddress, 0ULL);
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QVERIFY(m_doc->tree.baseAddressFormula.isEmpty());
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);     // raw: nothing pushed
+        QCOMPARE(m_doc->undoStack.index(), undoBefore + 1);     // nothing undone either
+        QVERIFY(m_ctrl->canGoForward());
+        QCOMPARE(m_editor->addressBar()->state().baseAddress, 0ULL);
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);                // the rebase's old base: already in place
+        QVERIFY(m_doc->tree.baseAddressFormula.isEmpty());
+        QCOMPARE(m_doc->undoStack.index(), undoBefore);
+        QVERIFY(m_ctrl->canGoForward());                        // history untouched by undo
+        m_doc->undoStack.redo();
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0x40ULL);
+        QVERIFY(m_ctrl->canGoForward());
+        QCOMPARE(m_ctrl->forwardEntries().last().baseAddress, 0x40ULL);
+        // A formula rebase: Back restores formula AND value, Forward brings
+        // both back, still with nothing on the undo stack for either.
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x20+0x4")));
+        QApplication::processEvents();
+        const int n = m_doc->undoStack.count();
+        QCOMPARE(m_doc->tree.baseAddress, 0x24ULL);
+        QCOMPARE(m_doc->tree.baseAddressFormula, QStringLiteral("0x20+0x4"));
+        QVERIFY(!m_ctrl->canGoForward());                       // a new gesture truncates forward
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0x40ULL);
+        QVERIFY(m_doc->tree.baseAddressFormula.isEmpty());
+        QCOMPARE(m_doc->undoStack.count(), n);
+        m_ctrl->goForward(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0x24ULL);
+        QCOMPARE(m_doc->tree.baseAddressFormula, QStringLiteral("0x20+0x4"));
+        QCOMPARE(m_doc->undoStack.count(), n);
+        // Rebasing to where you are records nothing.
+        const int h = m_ctrl->backEntries().size();
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x20+0x4")));
+        QCOMPARE(m_ctrl->backEntries().size(), h);
+    }
+
+    void testSourceSwitchThenBackRestoresTheSource() {
+        // Two File sources on disk (a File switch is loadData: a real
+        // path). Switching records the place left; Back switches back and
+        // restores that place's base over the entry's own; a source whose
+        // file is gone degrades to the current one with a hint.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto writeFile = [&](const QString& name, char fill) {
+            const QString p = dir.filePath(name);
+            QFile f(p);
+            f.open(QIODevice::WriteOnly);
+            f.write(QByteArray(64, fill));
+            f.close();
+            return p;
+        };
+        const QString a = writeFile(QStringLiteral("a.bin"), 'A');
+        const QString b = writeFile(QStringLiteral("b.bin"), 'B');
+        SavedSourceEntry ea; ea.kind = QStringLiteral("File"); ea.displayName = QStringLiteral("a.bin"); ea.filePath = a;
+        SavedSourceEntry eb; eb.kind = QStringLiteral("File"); eb.displayName = QStringLiteral("b.bin"); eb.filePath = b;
+        eb.baseAddress = 0x100;
+        m_ctrl->copySavedSources({ ea, eb }, 0);
+        m_doc->loadData(a);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("a.bin"));
+        const int histBefore = m_ctrl->backEntries().size();
+        m_ctrl->switchSource(1);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("b.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0x100ULL);            // the entry's base came with it
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore + 1);
+        QCOMPARE(m_ctrl->backEntries().last().activeSourceIdx, 0);
+        QCOMPARE(m_editor->addressBar()->state().sourceName, QStringLiteral("b.bin"));
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("a.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore);     // a restore records nothing
+        QVERIFY(m_ctrl->canGoForward());
+        QCOMPARE(m_editor->addressBar()->state().sourceName, QStringLiteral("a.bin"));
+        m_ctrl->goForward(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("b.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0x100ULL);
+        // Degrade: a.bin vanishes; Back keeps b.bin, says so, and still
+        // restores the rest of the place (the base).
+        QVERIFY(QFile::remove(a));
+        QSignalSpy hint(m_ctrl, &RcxController::statusHint);
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("b.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QVERIFY(hint.count() >= 1);
+        QVERIFY2(hint.at(0).at(0).toString().contains(QStringLiteral("a.bin")),
+                 qPrintable(hint.at(0).at(0).toString()));
+    }
+
+    void testCrumbClickRecordsOneEntryAndBackReopensInOneMacro() {
+        drillTwoLevels();                                       // [vptr, parent]
+        const int undoBefore = m_doc->undoStack.count();
+        const int histBefore = m_ctrl->backEntries().size();
+        m_ctrl->collapseToFocus(1);                             // the crumb click: collapse below QWidgetPrivate
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QVERIFY(collapsed(m_id.parent));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);     // one undo entry
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore + 1); // one history entry
+        QCOMPARE(m_ctrl->backEntries().last().focusPath, (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        // A click past the end moves nothing and records nothing.
+        m_ctrl->collapseToFocus(5);
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore + 1);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        // Back: `parent` is collapsed now — reopened through ONE macro, the
+        // trail restored; still no history entry.
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QVERIFY(!collapsed(m_id.parent));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        QCOMPARE(m_doc->undoStack.text(undoBefore + 1), QStringLiteral("Reopen path"));
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore);
+        QVERIFY(m_ctrl->canGoForward());
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                           QStringLiteral("QWidgetPrivate.parent"),
+                                           QStringLiteral("QWidget") }));
+        // Undoing the reopen collapses the hop again (the trail trims with
+        // it) and leaves history exactly where it was.
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QVERIFY(collapsed(m_id.parent));
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QVERIFY(m_ctrl->canGoForward());
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore);
+        m_doc->undoStack.redo();
+        QApplication::processEvents();
+        QVERIFY(!collapsed(m_id.parent));
+        // Up is the same gesture as the crumb click: one of each.
+        const int n = m_doc->undoStack.count(), hn = m_ctrl->backEntries().size();
+        m_ctrl->goUp(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_doc->undoStack.count(), n + 1);
+        QCOMPARE(m_ctrl->backEntries().size(), hn + 1);
+    }
+
+    void testStaleEntriesAreSkipped() {
+        // The place an entry names must still exist: a deleted root leaves
+        // a stale entry that Back steps over to the previous valid one, and
+        // a stale Forward with nothing behind it does nothing at all.
+        jumpToDefinitionOf(m_id.vptr);                          // editor → priv   (A: editor)
+        QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
+        emit m_editor->rootPickRequested(m_id.widget);          // priv → widget   (B: priv)
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        m_ctrl->deleteRootStruct(m_id.priv);                    // B's root is gone
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
+        QCOMPARE(m_ctrl->backEntries().size(), 2);              // still listed...
+        QVERIFY(m_ctrl->canGoBack());                           // ...A is restorable
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);            // B skipped, A restored
+        QVERIFY(!m_ctrl->canGoBack());
+        QVERIFY(m_ctrl->backEntries().isEmpty());               // the stale entry was discarded
+        QVERIFY(m_ctrl->canGoForward());
+        QCOMPARE(m_ctrl->forwardEntries().size(), 1);
+        QCOMPARE(m_ctrl->forwardEntries().first().viewRootId, m_id.widget);
+        // Now the Forward place goes: the flag says no, the cell is off,
+        // and Forward is a no-op.
+        m_ctrl->deleteRootStruct(m_id.widget);
+        QApplication::processEvents();
+        QVERIFY(!m_ctrl->canGoForward());
+        QVERIFY(!m_editor->addressBar()->state().canForward);
+        m_ctrl->goForward(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QVERIFY(m_ctrl->forwardEntries().isEmpty());
+    }
+
+    void testOneGestureOneEntry() {
+        drillOneLevel();                                        // a click-built trail: not a gesture
+        QVERIFY(m_ctrl->backEntries().isEmpty());
+        const uint64_t ptr2 = addSibling();
+        const int undoBefore = m_doc->undoStack.count();
+        QVERIFY(m_ctrl->switchSibling(0, ptr2));
+        QApplication::processEvents();
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(m_ctrl->backEntries().size(), 1);
+        QCOMPARE(m_ctrl->backEntries().last().focusPath, (QVector<uint64_t>{ m_id.vptr }));
+        QVERIFY(m_ctrl->navigateToDrillPath(QStringLiteral("RcxEditor.vptr.parent")));
+        QApplication::processEvents();
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        QCOMPARE(m_ctrl->backEntries().last().focusPath, (QVector<uint64_t>{ ptr2 }));
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        // The trail re-committed as it stands: no entry of either kind.
+        QVERIFY(m_ctrl->navigateToDrillPath(QStringLiteral("RcxEditor.vptr.parent")));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        // A refused switch (the hop already there): nothing.
+        QVERIFY(!m_ctrl->switchSibling(0, m_id.vptr));
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        // Back twice: the cursor moves, the undo stack does not — every
+        // hop on both restored trails is still open.
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ ptr2 }));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        QCOMPARE(m_ctrl->backEntries().size(), 1);
+        QCOMPARE(m_ctrl->forwardEntries().size(), 1);
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 2);
+        QVERIFY(m_ctrl->backEntries().isEmpty());
+        QCOMPARE(m_ctrl->forwardEntries().size(), 2);
+    }
+
+    void testBackCellFollowsTheControllerFlags() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
+        QSignalSpy back(m_editor, &RcxEditor::navBackRequested);
+        const QRect cell = bar->itemRect(QStringLiteral("back"));
+        QVERIFY(!cell.isNull());
+        QVERIFY(!bar->state().canBack);
+        const double inkOff = inkAmount(grabOf(*bar), cell, editorPaperColor(t));
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, cell.center());
+        QApplication::processEvents();
+        QCOMPARE(back.count(), 0);                              // disabled: the click is ignored
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        jumpToDefinitionOf(m_id.vptr);
+        QVERIFY(bar->state().canBack);
+        const double inkOn = inkAmount(grabOf(*bar), cell, editorPaperColor(t));
+        QVERIFY2(inkOn > 3.0, qPrintable(QStringLiteral("enabled Back paints no ink (%1)").arg(inkOn)));
+        QVERIFY2(inkOff < inkOn * 0.6,
+                 qPrintable(QStringLiteral("disabled Back didn't dim: on=%1 off=%2").arg(inkOn).arg(inkOff)));
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, cell.center());
+        QApplication::processEvents();
+        QCOMPARE(back.count(), 1);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        // Used up: off again, and the accent is nowhere on the strip.
+        QVERIFY(!bar->state().canBack);
+        QImage img = grabOf(*bar);
+        QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), t.indHoverSpan), 0);
+    }
+
+    void testHistoryMenuListsEntriesAndJumps() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        jumpToDefinitionOf(m_id.vptr);                          // A: RcxEditor.vptr @ 0x0
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));      // B: QWidgetPrivate @ 0x0
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        QSignalSpy jump(m_editor, &RcxEditor::historyJumpRequested);
+        // Nearest first: the row's data is the step count its pick asks for.
+        QMenu* menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidgetPrivate  @ 0x0"),
+                                                  QStringLiteral("RcxEditor.vptr  @ 0x0") }));
+        QCOMPARE(menu->actions()[0]->data().toInt(), -1);
+        QCOMPARE(menu->actions()[1]->data().toInt(), -2);
+        menu->actions()[1]->trigger();
+        closeMenuOn(bar, QStringLiteral("hist"), menu);
+        QCOMPARE(jump.count(), 1);
+        QCOMPARE(jump.at(0).at(0).toInt(), -2);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        // Stepped, not indexed: both places walked over are on Forward now,
+        // nearest first, and the stack behind is empty.
+        QVERIFY(m_ctrl->backEntries().isEmpty());
+        QCOMPARE(m_ctrl->forwardEntries().size(), 2);
+        menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidgetPrivate  @ 0x0"),
+                                                  QStringLiteral("QWidgetPrivate  @ 0x40") }));
+        QCOMPARE(menu->actions()[0]->data().toInt(), 1);
+        QCOMPARE(menu->actions()[1]->data().toInt(), 2);
+        menu->actions()[1]->trigger();
+        closeMenuOn(bar, QStringLiteral("hist"), menu);
+        QCOMPARE(jump.at(1).at(0).toInt(), 2);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
+        QCOMPARE(m_doc->tree.baseAddress, 0x40ULL);
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        QVERIFY(m_ctrl->forwardEntries().isEmpty());
+        // Both stacks populated: Back rows, a separator, Forward rows.
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().size(), 3);
+        QCOMPARE(menu->actions()[0]->text(), QStringLiteral("RcxEditor.vptr  @ 0x0"));
+        QVERIFY(menu->actions()[1]->isSeparator());
+        QCOMPARE(menu->actions()[2]->text(), QStringLiteral("QWidgetPrivate  @ 0x40"));
+        closeMenuOn(bar, QStringLiteral("hist"), menu);
+        // The undo stack saw exactly the one rebase through all of it.
+        QCOMPARE(m_doc->undoStack.count(), 1);
+    }
+
+    void testHoldOrRightClickOnBackOpensTheHistory() {
+        // The narrow-width fallback: press-and-hold (DelayedPopup) or a
+        // right-click on Back opens the same list; a quick click is Back.
+        AddressBar bar;
+        int backs = 0;
+        AddressBar::Callbacks cb;
+        cb.onBack = [&] { ++backs; };
+        NavEntry e; e.label = QStringLiteral("RcxEditor  @ 0x0");
+        cb.backEntries = [e] { return QVector<NavEntry>{ e }; };
+        bar.setCallbacks(std::move(cb));
+        AddressBarState s = stateWith(twoLevel());
+        s.canBack = true;
+        bar.setState(s);
+        showBar(bar, 800);
+        bar.setHoldDelayMs(40);
+        const QRect back = bar.itemRect(QStringLiteral("back"));
+        QVERIFY(!back.isNull());
+        QCOMPARE(bar.historyMenuOpenCount(), 0);
+        // Hold: the menu opens while the button is still down, and the
+        // release that follows is the hold's end, not a click.
+        QTest::mousePress(&bar, Qt::LeftButton, Qt::NoModifier, back.center());
+        QTest::qWait(bar.holdDelayMs() * 4);
+        QCOMPARE(bar.historyMenuOpenCount(), 1);
+        QTest::mouseRelease(&bar, Qt::LeftButton, Qt::NoModifier, back.center());
+        QApplication::processEvents();
+        QCOMPARE(backs, 0);
+        // Whether the platform closed the popup at the pump or left it up,
+        // it is done with: the later steps look for menus of their own.
+        auto closeHistoryMenus = [&] {
+            for (QMenu* m : bar.findChildren<QMenu*>(QStringLiteral("rcxAddressBarHistoryMenu")))
+                m->hide();
+            QTest::qWait(10);
+        };
+        closeHistoryMenus();
+        // Quick click: Back, no menu.
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, back.center());
+        QTest::qWait(bar.holdDelayMs() * 4);
+        QCOMPARE(backs, 1);
+        QCOMPARE(bar.historyMenuOpenCount(), 1);
+        // Right-click: the list, with the entry, inspected before any pump.
+        QContextMenuEvent ctx(QContextMenuEvent::Mouse, back.center(), bar.mapToGlobal(back.center()));
+        QApplication::sendEvent(&bar, &ctx);
+        QMenu* menu = visibleMenu(&bar, QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionTexts(menu), QStringList{ QStringLiteral("RcxEditor  @ 0x0") });
+        QCOMPARE(bar.historyMenuOpenCount(), 2);
+        closeHistoryMenus();
+        QCOMPARE(backs, 1);
+        // Dragging off before the delay is not a hold.
+        QTest::mousePress(&bar, Qt::LeftButton, Qt::NoModifier, back.center());
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(&bar, &leave);
+        QTest::qWait(bar.holdDelayMs() * 4);
+        QCOMPARE(bar.historyMenuOpenCount(), 2);
+        // ...and the release off the strip is not a click either.
+        {
+            const QPointF off(-5, -5);
+            QMouseEvent rel(QEvent::MouseButtonRelease, off, off, QPointF(bar.mapToGlobal(off.toPoint())),
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(&bar, &rel);
+        }
+        QCOMPARE(backs, 1);
+        // With no history at all the right-click opens nothing.
+        s.canBack = false;
+        bar.setState(s);
+        QApplication::sendEvent(&bar, &ctx);
+        QVERIFY(!visibleMenu(&bar, QStringLiteral("rcxAddressBarHistoryMenu")));
+        QCOMPARE(bar.historyMenuOpenCount(), 2);
+    }
+
+    void testKeyboardModeWalksEnabledCells() {
+        AddressBar bar;
+        int backs = 0, focusReturns = 0;
+        AddressBar::Callbacks cb;
+        cb.onBack = [&] { ++backs; };
+        cb.onFocusReturn = [&] { ++focusReturns; };
+        cb.backEntries = [] { NavEntry e; e.label = QStringLiteral("x"); return QVector<NavEntry>{ e }; };
+        bar.setCallbacks(std::move(cb));
+        AddressBarState s = stateWith(twoLevel());
+        s.canBack = true;                                       // fwd and up stay disabled
+        bar.setState(s);
+        showBar(bar, 800);
+        QVERIFY(!bar.inKeyboardMode());
+        QVERIFY(bar.focusId().isEmpty());
+        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+        bar.enterKeyboardMode();
+        QVERIFY(bar.inKeyboardMode());
+        QCOMPARE(bar.focusPolicy(), Qt::StrongFocus);
+        QCOMPARE(bar.focusId(), QStringLiteral("crumb:1"));     // the deepest crumb: you are here
+        QCOMPARE(focusReturns, 0);                              // focus arriving is the point
+        // The walk: enabled cells only, no stretch, one stop for the chip.
+        const QStringList ids = bar.traversalIds();
+        QCOMPARE(ids, (QStringList{ QStringLiteral("back"), QStringLiteral("hist"), QStringLiteral("src"),
+                                    QStringLiteral("root.chev"), QStringLiteral("base"),
+                                    QStringLiteral("crumb:0"), QStringLiteral("chev:0"),
+                                    QStringLiteral("crumb:1"), QStringLiteral("chev:1"),
+                                    QStringLiteral("recent") }));
+        QTest::keyClick(&bar, Qt::Key_Right);
+        QCOMPARE(bar.focusId(), QStringLiteral("chev:1"));
+        QTest::keyClick(&bar, Qt::Key_Right);
+        QCOMPARE(bar.focusId(), QStringLiteral("recent"));
+        QTest::keyClick(&bar, Qt::Key_Right);                   // clamped, not wrapped
+        QCOMPARE(bar.focusId(), QStringLiteral("recent"));
+        QTest::keyClick(&bar, Qt::Key_Left);
+        QCOMPARE(bar.focusId(), QStringLiteral("chev:1"));
+        QTest::keyClick(&bar, Qt::Key_Home);
+        QCOMPARE(bar.focusId(), QStringLiteral("back"));
+        QTest::keyClick(&bar, Qt::Key_Tab);                     // Tab walks too (the focus chain is claimed)
+        QCOMPARE(bar.focusId(), QStringLiteral("hist"));
+        QTest::keyClick(&bar, Qt::Key_Tab, Qt::ShiftModifier);
+        QCOMPARE(bar.focusId(), QStringLiteral("back"));
+        QVERIFY(bar.inKeyboardMode());
+        QTest::keyClick(&bar, Qt::Key_End);
+        QCOMPARE(bar.focusId(), QStringLiteral("recent"));
+        // Enter on Back = the click path: the callback fires.
+        QTest::keyClick(&bar, Qt::Key_Home);
+        QTest::keyClick(&bar, Qt::Key_Return);
+        QCOMPARE(backs, 1);
+        QVERIFY(bar.inKeyboardMode());                          // a synthesised press does not end the mode
+        QTest::keyClick(&bar, Qt::Key_Space);
+        QCOMPARE(backs, 2);
+        // Down on a chevron opens its menu (no tree queries here: the
+        // "nothing to open" row), inspected before any pump.
+        QTest::keyClick(&bar, Qt::Key_End);
+        QTest::keyClick(&bar, Qt::Key_Left);
+        QCOMPARE(bar.focusId(), QStringLiteral("chev:1"));
+        QTest::keyClick(&bar, Qt::Key_Down);
+        QMenu* menu = visibleMenu(&bar, QStringLiteral("rcxAddressBarSiblingMenu"));
+        QVERIFY(menu);
+        menu->hide();
+        QTest::qWait(10);
+        QVERIFY(bar.inKeyboardMode());                          // a popup coming and going keeps the mode
+        // Down on hist: the history list.
+        QTest::keyClick(&bar, Qt::Key_Home);
+        QTest::keyClick(&bar, Qt::Key_Right);
+        QCOMPARE(bar.focusId(), QStringLiteral("hist"));
+        QTest::keyClick(&bar, Qt::Key_Down);
+        QVERIFY(visibleMenu(&bar, QStringLiteral("rcxAddressBarHistoryMenu")));
+        QCOMPARE(bar.historyMenuOpenCount(), 1);
+        visibleMenu(&bar, QStringLiteral("rcxAddressBarHistoryMenu"))->hide();
+        QTest::qWait(10);
+        // Down on a crumb: nothing to drop.
+        QTest::keyClick(&bar, Qt::Key_End);
+        QTest::keyClick(&bar, Qt::Key_Left);
+        QTest::keyClick(&bar, Qt::Key_Left);
+        QCOMPARE(bar.focusId(), QStringLiteral("crumb:1"));
+        QTest::keyClick(&bar, Qt::Key_Down);
+        QVERIFY(!visibleMenu(&bar, QStringLiteral("rcxAddressBarSiblingMenu")));
+        // F2 on a crumb: the path edit; keyboard mode yields to the overlay.
+        QTest::keyClick(&bar, Qt::Key_F2);
+        QVERIFY(bar.isPathEditing());
+        QVERIFY(!bar.inKeyboardMode());
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        // F2 on the base: the base edit.
+        bar.enterKeyboardMode();
+        while (bar.focusId() != QStringLiteral("base")) QTest::keyClick(&bar, Qt::Key_Left);
+        QTest::keyClick(&bar, Qt::Key_F2);
+        QVERIFY(bar.isBaseEditing());
+        QVERIFY(!bar.inKeyboardMode());
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        // Escape: out, NoFocus, the document asked to take focus back.
+        bar.enterKeyboardMode();
+        const int returnsBefore = focusReturns;
+        QTest::keyClick(&bar, Qt::Key_Escape);
+        QVERIFY(!bar.inKeyboardMode());
+        QVERIFY(bar.focusId().isEmpty());
+        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+        QCOMPARE(focusReturns, returnsBefore + 1);
+        // A real mouse press anywhere ends the mode too.
+        bar.enterKeyboardMode();
+        QVERIFY(bar.inKeyboardMode());
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("crumb:1")).center());
+        QVERIFY(!bar.inKeyboardMode());
+        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+        // Outside the mode the keys are nobody's: no walk, no activation.
+        QTest::keyClick(&bar, Qt::Key_Right);
+        QVERIFY(bar.focusId().isEmpty());
+        QTest::keyClick(&bar, Qt::Key_Return);
+        QCOMPARE(backs, 2);
+    }
+
+    void testKeyboardFocusRingPixels() {
+        // ONE device-exact 1-px ring in borderFocused around the focused
+        // cell — its top and bottom device rows, its left and right device
+        // columns — and none of it outside keyboard mode. No accent.
+        //
+        // A theme loaded by file name, not ThemeManager::current(): the
+        // "no accent" check below only says something where borderFocused
+        // and indHoverSpan differ, and in VS2022 Dark (the loader's
+        // fallback), Long Night and Phosphor the two tokens are the SAME
+        // colour, so the ring itself would count as the accent.
+        AddressBar bar;
+        bar.applyTheme(loadTheme(QStringLiteral("reclass_dark")));
+        const Theme& t = bar.theme();
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        QImage img = grabOf(bar);
+        const QRect all(0, 0, img.width(), img.height());
+        QCOMPARE(countColour(img, all, t.borderFocused), 0);
+        bar.enterKeyboardMode();
+        QCOMPARE(bar.focusId(), QStringLiteral("crumb:1"));
+        const QRect cell = bar.itemRect(QStringLiteral("crumb:1"));
+        img = grabOf(bar);
+        RingEdges e = ringEdgesOf(img, cell);
+        const int w = e.right - e.left + 1, h = e.bottom - e.top + 1;
+        QVERIFY(countColour(img, rowAcross(e, e.top), t.borderFocused) >= w - 2);
+        QVERIFY(countColour(img, rowAcross(e, e.bottom), t.borderFocused) >= w - 2);
+        QVERIFY(countColour(img, colAlong(e, e.left), t.borderFocused) >= h - 2);
+        QVERIFY(countColour(img, colAlong(e, e.right), t.borderFocused) >= h - 2);
+        // Exactly one row / column thick: just inside the ring there is none.
+        QCOMPARE(countColour(img, QRect(e.left + 2, e.top + 1, w - 4, 1), t.borderFocused), 0);
+        QCOMPARE(countColour(img, QRect(e.left + 2, e.bottom - 1, w - 4, 1), t.borderFocused), 0);
+        QCOMPARE(countColour(img, QRect(e.left + 1, e.top + 2, 1, h - 4), t.borderFocused), 0);
+        QCOMPARE(countColour(img, QRect(e.right - 1, e.top + 2, 1, h - 4), t.borderFocused), 0);
+        QCOMPARE(countColour(img, all, t.indHoverSpan), 0);
+        // The ring follows the focus. Home is the first ENABLED stop — with
+        // no history that is the source chip, not the disabled Back cell.
+        QTest::keyClick(&bar, Qt::Key_Home);
+        QCOMPARE(bar.focusId(), bar.traversalIds().first());
+        QCOMPARE(bar.focusId(), QStringLiteral("src"));
+        const QRect first = bar.itemRect(bar.focusId());
+        img = grabOf(bar);
+        const RingEdges eb = ringEdgesOf(img, first);
+        QCOMPARE(countColour(img, rowAcross(e, e.top), t.borderFocused), 0);
+        QVERIFY(countColour(img, rowAcross(eb, eb.top), t.borderFocused) >= (eb.right - eb.left + 1) - 2);
+        QVERIFY(countColour(img, rowAcross(eb, eb.bottom), t.borderFocused) >= (eb.right - eb.left + 1) - 2);
+        // Leaving the mode takes the ring away.
+        QTest::keyClick(&bar, Qt::Key_Escape);
+        img = grabOf(bar);
+        QCOMPARE(countColour(img, all, t.borderFocused), 0);
+    }
+
+    void testKeyboardFocusRingIsOneDeviceRowAt125Percent() {
+        // The fractional-scale half of the ring rule (test_hairline_dpr's
+        // subject, without its custom main): the bar rendered onto a 1.25
+        // device-pixel-ratio image, where a 1-logical-px pen would land on
+        // two device rows. The ring must be exactly one device row at each
+        // edge, on the row the edge fills pick (qFloor(edge ± 0.5)).
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        const Theme& t = bar.theme();
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        bar.enterKeyboardMode();
+        const QRect cell = bar.itemRect(QStringLiteral("crumb:1"));
+        const qreal dpr = 1.25;
+        QImage img(qRound(bar.width() * dpr), qRound(bar.height() * dpr), QImage::Format_ARGB32);
+        img.setDevicePixelRatio(dpr);
+        img.fill(Qt::black);
+        {
+            QPainter p(&img);
+            bar.render(&p);
+        }
+        const QRectF dev(cell.left() * dpr, cell.top() * dpr, cell.width() * dpr, cell.height() * dpr);
+        const int topY    = qFloor(dev.top() + 0.5);
+        const int bottomY = qFloor(dev.bottom() - 0.5);
+        const int leftX   = qFloor(dev.left() + 0.5);
+        const int rightX  = qFloor(dev.right() - 0.5);
+        QVERIFY2(topY != cell.top() && bottomY != cell.bottom(),
+                 "the 1.25 phase should move the ring rows off the logical rows");
+        // Which device rows across the cell's width hold the ring: the top
+        // and bottom rows only.
+        QVector<int> ringRows;
+        for (int y = qFloor(dev.top()) - 1; y <= qCeil(dev.bottom()) + 1; ++y)
+            if (countColour(img, QRect(leftX + 2, y, rightX - leftX - 4, 1), t.borderFocused) >= rightX - leftX - 6)
+                ringRows << y;
+        QCOMPARE(ringRows, (QVector<int>{ topY, bottomY }));
+        QVector<int> ringCols;
+        for (int x = qFloor(dev.left()) - 1; x <= qCeil(dev.right()) + 1; ++x)
+            if (countColour(img, QRect(x, topY + 2, 1, bottomY - topY - 4), t.borderFocused) >= bottomY - topY - 6)
+                ringCols << x;
+        QCOMPARE(ringCols, (QVector<int>{ leftX, rightX }));
+    }
+
+    void testDocumentShortcutsReachTheBar() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QsciScintilla* sci = m_editor->scintilla();
+        sci->setFocus();
+        QSignalSpy back(m_editor, &RcxEditor::navBackRequested);
+        QSignalSpy fwd(m_editor, &RcxEditor::navForwardRequested);
+        QSignalSpy up(m_editor, &RcxEditor::navUpRequested);
+        QTest::keyClick(sci, Qt::Key_Left, Qt::AltModifier);
+        QCOMPARE(back.count(), 1);
+        QTest::keyClick(sci, Qt::Key_Right, Qt::AltModifier);
+        QCOMPARE(fwd.count(), 1);
+        QTest::keyClick(sci, Qt::Key_Up, Qt::AltModifier);
+        QCOMPARE(up.count(), 1);
+        QApplication::processEvents();
+        QVERIFY(m_ctrl->focusPath().isEmpty());                 // Up collapsed the hop
+        // A plain arrow is the document's (Up moves the caret; a plain
+        // Left would cycle the caret node's type, so it is not sent here).
+        QTest::keyClick(sci, Qt::Key_Up);
+        QCOMPARE(back.count(), 1);
+        QCOMPARE(up.count(), 1);
+        // The mouse thumb buttons on the document.
+        auto thumb = [&](Qt::MouseButton b) {
+            const QPointF at(20, 40);
+            QMouseEvent press(QEvent::MouseButtonPress, at, at,
+                              QPointF(sci->viewport()->mapToGlobal(at.toPoint())), b, b, Qt::NoModifier);
+            QApplication::sendEvent(sci->viewport(), &press);
+        };
+        thumb(Qt::BackButton);
+        QCOMPARE(back.count(), 2);
+        thumb(Qt::ForwardButton);
+        QCOMPARE(fwd.count(), 2);
+        // F6: keyboard mode; Esc: focus back in the document.
+        QTest::keyClick(sci, Qt::Key_F6);
+        QVERIFY(bar->inKeyboardMode());
+        QCOMPARE(bar->window()->focusWidget(), bar);
+        QTest::keyClick(bar, Qt::Key_Escape);
+        QVERIFY(!bar->inKeyboardMode());
+        QCOMPARE(bar->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(m_editor->window()->focusWidget(), sci);
+        // During a Scintilla inline edit the arrows are the caret's and the
+        // thumb buttons are inert: no navigation under a half-typed value.
+        const int ln = lineOf(m_id.leaf);
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::Name, ln));
+        QVERIFY(m_editor->isEditing());
+        QTest::keyClick(sci, Qt::Key_Left, Qt::AltModifier);
+        QTest::keyClick(sci, Qt::Key_Right, Qt::AltModifier);
+        thumb(Qt::BackButton);
+        QCOMPARE(back.count(), 2);
+        QCOMPARE(fwd.count(), 2);
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+    }
+
+    void testReturnOnBackInKeyboardModeGoesBack() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QsciScintilla* sci = m_editor->scintilla();
+        jumpToDefinitionOf(m_id.vptr);
+        QVERIFY(bar->state().canBack);
+        QSignalSpy back(m_editor, &RcxEditor::navBackRequested);
+        sci->setFocus();
+        QTest::keyClick(sci, Qt::Key_F6);
+        QVERIFY(bar->inKeyboardMode());
+        QCOMPARE(bar->focusId(), QStringLiteral("crumb:0"));   // the lone crumb of the jumped-to root
+        QTest::keyClick(bar, Qt::Key_Home);
+        QCOMPARE(bar->focusId(), QStringLiteral("back"));
+        QTest::keyClick(bar, Qt::Key_Return);
+        QApplication::processEvents();
+        QCOMPARE(back.count(), 1);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        // Back is spent: the state push moved the ring off the disabled
+        // cell onto the deepest crumb of the restored trail; still in mode.
+        QVERIFY(bar->inKeyboardMode());
+        QVERIFY(!bar->state().canBack);
+        QCOMPARE(bar->focusId(), QStringLiteral("crumb:1"));
+        QTest::keyClick(bar, Qt::Key_Escape);
+        QVERIFY(!bar->inKeyboardMode());
+        QCOMPARE(m_editor->window()->focusWidget(), sci);
+    }
+
+    void testSplitPanesShareTheTrailAndOnlyTheSenderScrolls() {
+        // Controller-global history and trail (pinned): both bars show the
+        // same state; a crumb click in pane B rewrites both trails but
+        // scrolls only pane B. Wide enough that a ~800-px pane lays the
+        // whole three-crumb trail out (no fold), short enough to scroll.
+        m_splitter->resize(1600, 120);
+        RcxEditor* pane2 = m_ctrl->addSplitEditor(m_splitter);
+        QApplication::processEvents();
+        drillTwoLevels();
+        QApplication::processEvents();
+        AddressBar* bar1 = m_editor->addressBar();
+        AddressBar* bar2 = pane2->addressBar();
+        QVERIFY(bar1->state() == bar2->state());
+        QCOMPARE(bar2->segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                                 QStringLiteral("QWidgetPrivate.parent"),
+                                                 QStringLiteral("QWidget") }));
+        QsciScintilla* sci1 = m_editor->scintilla();
+        QsciScintilla* sci2 = pane2->scintilla();
+        sci1->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, 0UL);
+        sci2->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, 0UL);
+        QSignalSpy crumb2(pane2, &RcxEditor::crumbClicked);
+        const int undoBefore = m_doc->undoStack.count();
+        const int histBefore = m_ctrl->backEntries().size();
+        const QRect c1 = bar2->itemRect(QStringLiteral("crumb:1"));
+        QVERIFY(!c1.isNull());
+        QTest::mouseClick(bar2, Qt::LeftButton, Qt::NoModifier, c1.center());
+        QApplication::processEvents();
+        QCOMPARE(crumb2.count(), 1);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(m_ctrl->backEntries().size(), histBefore + 1);
+        QVERIFY(bar1->state() == bar2->state());
+        QCOMPARE(bar1->segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"), QStringLiteral("QWidgetPrivate") }));
+        // Pane B scrolled its hop's row up; pane A did not move.
+        const int hopLine = lineOf(m_id.vptr);
+        QVERIFY(hopLine > 0);
+        const int lines = (int)sci2->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
+        const int onScreen = (int)sci2->SendScintilla(QsciScintillaBase::SCI_LINESONSCREEN);
+        const int maxFirst = qMax(0, lines - onScreen);
+        QVERIFY2(maxFirst > 0, "pane not short enough to scroll — the assertion below would be vacuous");
+        QCOMPARE((int)sci2->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), qMin(hopLine, maxFirst));
+        QCOMPARE((int)sci1->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), 0);
+        // Back from pane A restores the trail on both and scrolls pane A.
+        sci2->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, 0UL);
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QVERIFY(bar1->state() == bar2->state());
+        QCOMPARE((int)sci2->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), 0);
     }
 };
 

@@ -52,9 +52,23 @@
 // with live validation, the resolved-address preview and the recent /
 // bookmarks / modules menu, the recent cell and Up (P3); the chevron menus
 // (a crumb's drillable fields, the other roots), the path edit with its
-// completion menu, and Alt+D / Ctrl+L (P4). History and keyboard mode land
-// in P5 — their cells are laid out and painted now so the geometry is
-// final, and their clicks are no-ops.
+// completion menu, and Alt+D / Ctrl+L (P4); the nav cluster — Back /
+// Forward / Up enabled per the controller's flags, the history menu on
+// `hist` and, so it stays reachable when the narrow-width overflow drops
+// `hist` and `up`, on a right-click or a press-and-hold of Back
+// (QToolButton's DelayedPopup) — and keyboard mode (P5).
+//
+// Keyboard mode (F6 from the document, enterKeyboardMode()): the bar takes
+// StrongFocus for as long as it lasts and walks a traversal list of the
+// enabled, laid-out cells left → right (Left / Right / Tab / Shift+Tab,
+// Home / End), starting at the deepest crumb — "you are here". Enter and
+// Space synthesise a press + release at the focused cell's centre so the
+// ordinary click path runs (menus included); Down opens the focused cell's
+// menu when it has one; F2 opens the base edit on the base and the path
+// edit on a crumb; Esc hands focus back to the document. A real mouse
+// press anywhere on the bar, or focus leaving it for anything but a popup,
+// ends the mode. The focused cell wears ONE device-exact 1-px ring in
+// borderFocused — the same four edge fills every hairline here uses.
 //
 // The edits are the one place the bar owns a child widget: a hidden
 // QLineEdit shown in one of two scopes. The BASE edit sits over the base
@@ -86,6 +100,7 @@
 #include "tab_source_icon.h"
 #include "themes/thememanager.h"
 #include "address_bar_model.h"
+#include "nav_history.h"          // NavEntry — the history menu's rows
 #include "dock_header.h"          // chromeFont
 #include "fuzzy_match.h"          // the places menu filter
 #include "gotoaddressdialog.h"    // loadRecent / clearRecent (the shared recent list)
@@ -115,6 +130,7 @@
 #include <QSize>
 #include <QString>
 #include <QStringList>
+#include <QTimer>
 #include <QVector>
 #include <QWidget>
 #include <functional>
@@ -180,10 +196,13 @@ public:
         std::function<void(QString)>       onBaseCommit;     // Enter in the base edit
         std::function<void(QString)>       onPathCommit;     // Enter in the path edit
         std::function<void(QString)>       onRecentPick;     // recent-places menu pick
-        std::function<void()>              onBack;           // P5
-        std::function<void()>              onForward;        // P5
-        std::function<void()>              onUp;             // P5
-        std::function<void(int)>           onHistoryJump;    // P5 — hist menu pick
+        std::function<void()>              onBack;           // Back cell (also Alt+Left, XButton1)
+        std::function<void()>              onForward;        // Forward cell
+        std::function<void()>              onUp;             // Up cell — the parent crumb
+        // History menu pick: negative = that many steps back, positive =
+        // forward. Stepped, not indexed, so the controller's stacks end up
+        // exactly as a run of single Back / Forward presses would leave them.
+        std::function<void(int)>           onHistoryJump;
         std::function<void()>              onRefresh;        // source context menu
         std::function<void()>              onGotoDialog;     // recent menu "Go to address…" (Ctrl+G)
         // An edit ended from the keyboard (Enter accepted, Esc): the document
@@ -197,6 +216,11 @@ public:
         std::function<QString(const QString&)> evaluate;
         std::function<QVector<Bookmark>()>     bookmarks;
         std::function<QStringList()>           modules;
+        // The history menu's rows, pulled when it opens: the controller's
+        // Back and Forward stacks, oldest first (NavHistory's order — the
+        // menu lists each nearest first).
+        std::function<QVector<NavEntry>()>     backEntries;
+        std::function<QVector<NavEntry>()>     forwardEntries;
     };
 
     // What the chevron menus and the path edit read from the tree, pulled
@@ -249,9 +273,64 @@ public:
         m_edit->installEventFilter(this);
         connect(m_edit, &QLineEdit::textChanged, this, [this](const QString&) { onEditTextChanged(); });
         applyEditStyle();
+        // Press-and-hold on Back opens the history list (QToolButton's
+        // DelayedPopup): armed by the press, disarmed by the release or the
+        // pointer leaving; a quick click stays a plain Back.
+        m_holdTimer.setSingleShot(true);
+        connect(&m_holdTimer, &QTimer::timeout, this, [this] { onHoldElapsed(); });
     }
 
     void setCallbacks(Callbacks cb) { m_cb = std::move(cb); }
+
+    // ── Keyboard mode ──
+    // F6 lands here. StrongFocus for the duration; the focused cell is
+    // named by id (the same namespace itemRect() speaks) and walked over
+    // traversalIds(). An open edit is dropped first: one focus owner.
+    void enterKeyboardMode() {
+        if (m_editVisible) endEdit();
+        const QStringList ids = traversalIds();
+        if (ids.isEmpty()) return;
+        m_kbFocusId = deepestCrumbId(ids);
+        m_kbMode = true;   // before setFocus: focusInEvent hands focus back otherwise
+        setFocusPolicy(Qt::StrongFocus);
+        setFocus(Qt::OtherFocusReason);
+        m_hoverId.clear();
+        refreshToolTip();
+        dismissRcxTooltip();
+        update();
+    }
+    // Esc (returnFocus: the document takes focus back), or a mouse press /
+    // focus leaving (the new owner already has it).
+    void leaveKeyboardMode(bool returnFocus) {
+        if (!m_kbMode) return;
+        m_kbMode = false;
+        m_kbFocusId.clear();
+        setFocusPolicy(Qt::NoFocus);
+        update();
+        if (returnFocus && m_cb.onFocusReturn) m_cb.onFocusReturn();
+    }
+    bool inKeyboardMode() const { return m_kbMode; }
+    QString focusId() const { return m_kbMode ? m_kbFocusId : QString(); }
+    // The cells keyboard mode walks, left → right: every laid-out, ENABLED
+    // cell but the stretch and the chip's chevron (the chip is one stop —
+    // both open the same popup). The divider is not a cell.
+    QStringList traversalIds() const {
+        ensureLayout();
+        QStringList ids;
+        for (const LaidItem& li : m_layout.items) {
+            if (!li.enabled || li.kind == Cell::Space || li.kind == Cell::SrcChev) continue;
+            ids << li.id;
+        }
+        return ids;
+    }
+    // Test hooks for the Back cell's hold-to-open: the delay (500 ms, the
+    // platform's DelayedPopup feel) and how many times the history menu
+    // has opened — a popup on the hidden test desktop is closed at the
+    // first event pump, so "did it open" is counted rather than seen.
+    void setHoldDelayMs(int ms) { m_holdDelayMs = qMax(1, ms); }
+    int  holdDelayMs() const { return m_holdDelayMs; }
+    int  historyMenuOpenCount() const { return m_historyMenuOpens; }
+    static constexpr int kHoldDelayMs = 500;
 
     // ── Edits (two scopes, one overlay) ──
     enum class EditScope { None, Base, Path };
@@ -352,6 +431,7 @@ public:
         if (m_editVisible) m_relayoutDeferred = true;
         else               markLayoutDirty();
         refreshToolTip();   // the hovered cell may have moved or gone
+        reconcileKeyboardFocus();   // ...and so may the keyboard-focused one
         update();
     }
 
@@ -513,6 +593,19 @@ protected:
             fillLeftDeviceColOfRect(p, QRectF(m_layout.dividerX, 4, 1, kAddressBarHeight - 8),
                                     containerBorderColor(t));
         for (const LaidItem& li : m_layout.items) paintItem(p, li);
+        // Keyboard focus: ONE device-exact 1-px ring around the focused
+        // cell in borderFocused — the four edge fills, so it is one row /
+        // one column at every scale (a QPen rect would be two at 125 %).
+        if (m_kbMode && !m_kbFocusId.isEmpty()) {
+            const QRect fr = itemRect(m_kbFocusId);
+            if (!fr.isNull()) {
+                const QRectF f(fr);
+                fillTopDeviceRowOfRect(p, f, t.borderFocused);
+                fillBottomDeviceRowOfRect(p, f, t.borderFocused);
+                fillLeftDeviceColOfRect(p, f, t.borderFocused);
+                fillRightDeviceColOfRect(p, f, t.borderFocused);
+            }
+        }
         // The seam: one device row, never a QSS border.
         fillBottomDeviceRowOfRect(p, QRectF(rect()), containerBorderColor(t));
         if (m_editVisible) paintEditChrome(p);
@@ -571,12 +664,68 @@ protected:
         return QWidget::eventFilter(obj, e);
     }
 
-    // The bar is focusable only while editing; a click on it then ends the
-    // edit (the overlay's FocusOut) and lands focus here, where it is no
-    // use — hand it back to the document.
+    // The bar is focusable only while editing or in keyboard mode; a click
+    // on it while editing ends the edit (the overlay's FocusOut) and lands
+    // focus here, where it is no use — hand it back to the document. In
+    // keyboard mode focus arriving (F6, a menu giving it back) is the point.
     void focusInEvent(QFocusEvent* e) override {
         QWidget::focusInEvent(e);
-        if (!m_editVisible && m_cb.onFocusReturn) m_cb.onFocusReturn();
+        if (!m_editVisible && !m_kbMode && m_cb.onFocusReturn) m_cb.onFocusReturn();
+    }
+
+    void focusOutEvent(QFocusEvent* e) override {
+        QWidget::focusOutEvent(e);
+        // A menu opened from the keyboard (Down, Enter on a chevron) takes
+        // focus and hands it back when it hides; the window deactivating
+        // is not the user leaving. Anything else — a click elsewhere, a
+        // Tab out of the strip — ends keyboard mode; the new owner keeps
+        // the focus it already took.
+        if (m_kbMode && e->reason() != Qt::PopupFocusReason
+            && e->reason() != Qt::ActiveWindowFocusReason && e->reason() != Qt::MenuBarFocusReason)
+            leaveKeyboardMode(false);
+    }
+
+    // Tab / Shift+Tab: QWidget::event runs the focus chain BEFORE
+    // keyPressEvent sees the key, so the walk is claimed here; outside
+    // keyboard mode the chain works as it always did.
+    bool focusNextPrevChild(bool next) override {
+        if (!m_kbMode) return QWidget::focusNextPrevChild(next);
+        stepKeyboardFocus(next ? +1 : -1);
+        return true;
+    }
+
+    void keyPressEvent(QKeyEvent* e) override {
+        if (!m_kbMode) { QWidget::keyPressEvent(e); return; }
+        const QStringList ids = traversalIds();
+        switch (e->key()) {
+        case Qt::Key_Left:   stepKeyboardFocus(-1); break;
+        case Qt::Key_Right:  stepKeyboardFocus(+1); break;
+        case Qt::Key_Home:   if (!ids.isEmpty()) setKeyboardFocus(ids.first()); break;
+        case Qt::Key_End:    if (!ids.isEmpty()) setKeyboardFocus(ids.last());  break;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Space:
+            // The ordinary click path, menus included — one activation
+            // contract for mouse and keyboard.
+            synthesiseClick(m_kbFocusId);
+            break;
+        case Qt::Key_Down:
+            openMenuFor(m_kbFocusId);
+            break;
+        case Qt::Key_F2: {
+            const LaidItem* li = itemById(m_kbFocusId);
+            if (li && li->kind == Cell::Base)       beginBaseEdit();
+            else if (li && li->kind == Cell::Crumb) beginPathEdit();
+            break;
+        }
+        case Qt::Key_Escape:
+            leaveKeyboardMode(true);
+            break;
+        default:
+            QWidget::keyPressEvent(e);
+            return;
+        }
+        e->accept();
     }
 
     void resizeEvent(QResizeEvent* e) override {
@@ -600,6 +749,9 @@ protected:
     }
 
     void mousePressEvent(QMouseEvent* e) override {
+        // A real press anywhere on the bar ends keyboard mode (the mouse
+        // is driving now); the press synthesised by Enter is not one.
+        if (m_kbMode && !m_synthPress) leaveKeyboardMode(true);
         if (e->button() != Qt::LeftButton) { QWidget::mousePressEvent(e); return; }
         dismissRcxTooltip();
         const QString id = itemIdAt(e->pos());
@@ -635,6 +787,12 @@ protected:
             e->accept();
             return;
         }
+        if (id == QLatin1String("hist")) {
+            m_pressedId.clear();
+            if (const LaidItem* li = itemById(id); li && li->enabled) showHistoryMenu(id);
+            e->accept();
+            return;
+        }
         if (id == QLatin1String("root.chev")) {
             m_pressedId.clear();
             showRootMenu();
@@ -649,6 +807,10 @@ protected:
         }
         if (!id.isEmpty()) {
             m_pressedId = id;
+            // Holding Back opens the history list — whenever there is one,
+            // even with Back itself disabled (only Forward entries left).
+            if (id == QLatin1String("back") && historyAvailable())
+                m_holdTimer.start(m_holdDelayMs);
             update();
         }
         e->accept();
@@ -657,6 +819,14 @@ protected:
     // Press-then-release on the SAME cell is a click; dragging off cancels.
     void mouseReleaseEvent(QMouseEvent* e) override {
         if (e->button() != Qt::LeftButton) { QWidget::mouseReleaseEvent(e); return; }
+        m_holdTimer.stop();
+        if (m_holdFired) {
+            // The hold already opened the menu: this release is its end,
+            // not a click on Back.
+            m_holdFired = false;
+            e->accept();
+            return;
+        }
         if (!m_pressedId.isEmpty()) {
             const QString id = m_pressedId;
             m_pressedId.clear();
@@ -668,6 +838,7 @@ protected:
 
     void leaveEvent(QEvent* e) override {
         QWidget::leaveEvent(e);
+        m_holdTimer.stop();   // dragging off Back is not a hold
         m_swallowNextPress = false;
         if (!m_hoverId.isEmpty()) {
             m_hoverId.clear();
@@ -683,6 +854,16 @@ protected:
         const QString id = itemIdAt(e->pos());
         const LaidItem* li = itemById(id);
         if (!li) { e->ignore(); return; }
+        if (li->kind == Cell::Back) {
+            // Right-click on Back = the history list (Explorer, every
+            // browser). The narrow-width fallback: below ~420 px the
+            // overflow rule drops `hist`, and this keeps the list one
+            // gesture away. Hung under the cell like the other dropdowns
+            // — not exec()'d — so it behaves like the `hist` press.
+            if (historyAvailable()) showHistoryMenu(id);
+            e->accept();
+            return;
+        }
         auto copy = [](const QString& s) { QGuiApplication::clipboard()->setText(s); };
         QMenu menu(this);
         switch (li->kind) {
@@ -1319,11 +1500,119 @@ private:
             break;
         }
         // Click-to-type on the empty stretch (Explorer): the trail turns
-        // into its dotted path. root.chev / chev:<i> open on PRESS.
+        // into its dotted path. root.chev / chev:<i> / hist open on PRESS.
         case Cell::Space:  beginPathEdit(); break;
-        // P5: the hist menu. Painted now, inert until then.
         default: break;
         }
+    }
+
+    // ── Keyboard mode internals ──
+
+    // "You are here": the deepest crumb, which is never dropped by the
+    // overflow rule and never disabled — the one cell always there to
+    // start from. Falls back to the last stop when the state has no crumbs.
+    QString deepestCrumbId(const QStringList& ids) const {
+        const QString deepest = QStringLiteral("crumb:%1").arg(m_state.crumbs.size() - 1);
+        return ids.contains(deepest) ? deepest : ids.last();
+    }
+    void setKeyboardFocus(const QString& id) {
+        if (id == m_kbFocusId) return;
+        m_kbFocusId = id;
+        update();
+    }
+    // Clamped, not wrapped: Home / End are the jumps, and running off an
+    // end of a strip this short should feel like an end.
+    void stepKeyboardFocus(int dir) {
+        const QStringList ids = traversalIds();
+        if (ids.isEmpty()) return;
+        const int i = ids.indexOf(m_kbFocusId);
+        setKeyboardFocus(ids[i < 0 ? 0 : qBound(0, i + dir, ids.size() - 1)]);
+    }
+    // A state push can disable or drop the focused cell (Back after the
+    // last entry was used, a crumb folded away): keep the ring on a cell
+    // that exists, or leave the mode when nothing is left to focus.
+    void reconcileKeyboardFocus() {
+        if (!m_kbMode) return;
+        const QStringList ids = traversalIds();
+        if (ids.isEmpty()) { leaveKeyboardMode(true); return; }
+        if (!ids.contains(m_kbFocusId)) m_kbFocusId = deepestCrumbId(ids);
+    }
+    // Enter / Space: a press and a release at the cell's centre through
+    // the real handlers, flagged so the press is not read as the mouse
+    // taking over. Whatever a click there does — menu, edit, callback —
+    // happens exactly as it would for the mouse.
+    void synthesiseClick(const QString& id) {
+        const QRect r = itemRect(id);
+        if (r.isNull()) return;
+        const QPointF c(r.center());
+        const QPointF g(mapToGlobal(r.center()));
+        m_synthPress = true;
+        QMouseEvent press(QEvent::MouseButtonPress, c, c, g, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        mousePressEvent(&press);
+        QMouseEvent release(QEvent::MouseButtonRelease, c, c, g, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        mouseReleaseEvent(&release);
+        m_synthPress = false;
+    }
+    // Down: the focused cell's dropdown, when it has one. The base has
+    // none outside its edit (its Down list belongs to the overlay); Back's
+    // list is the hold / right-click; the rest have nothing to drop.
+    void openMenuFor(const QString& id) {
+        const LaidItem* li = itemById(id);
+        if (!li || !li->enabled) return;
+        switch (li->kind) {
+        case Cell::Hist:     showHistoryMenu(id); break;
+        case Cell::Recent:   showPlacesMenu(false); break;
+        case Cell::RootChev: showRootMenu(); break;
+        case Cell::Chev:     showSiblingMenu(li->index); break;
+        case Cell::Overflow: showOverflowMenu(); break;
+        case Cell::Src:
+        case Cell::SrcChev:  activate(QStringLiteral("src")); break;
+        default: break;
+        }
+    }
+
+    // ── History menu ──
+
+    bool historyAvailable() const { return m_state.canBack || m_state.canForward; }
+
+    // Hold elapsed with Back still pressed (release and leave both stop
+    // the timer): the press becomes the menu's, not a click's.
+    void onHoldElapsed() {
+        if (m_pressedId != QLatin1String("back")) return;
+        m_pressedId.clear();
+        m_holdFired = true;
+        showHistoryMenu(QStringLiteral("back"));
+    }
+
+    // Back entries nearest first, a separator, then Forward entries nearest
+    // first — each row's data is the step count its pick asks for. The
+    // stacks arrive oldest first (NavHistory's order), so both are walked
+    // from the end. Hung under `cellId`: `hist`, or `back` for the
+    // right-click / hold fallback.
+    void showHistoryMenu(const QString& cellId) {
+        const QRect r = itemRect(cellId);
+        if (r.isNull()) return;
+        const QVector<NavEntry> back = m_cb.backEntries ? m_cb.backEntries() : QVector<NavEntry>();
+        const QVector<NavEntry> fwd  = m_cb.forwardEntries ? m_cb.forwardEntries() : QVector<NavEntry>();
+        auto* menu = new QMenu(this);
+        menu->setObjectName(QStringLiteral("rcxAddressBarHistoryMenu"));
+        auto addRow = [&](const NavEntry& e, int delta) {
+            QAction* a = menu->addAction(e.label);
+            a->setData(delta);
+            connect(a, &QAction::triggered, this, [this, delta] {
+                if (m_cb.onHistoryJump) m_cb.onHistoryJump(delta);
+            });
+        };
+        for (int i = back.size() - 1; i >= 0; --i) addRow(back[i], -(back.size() - i));
+        if (!back.isEmpty() && !fwd.isEmpty()) menu->addSeparator();
+        for (int i = fwd.size() - 1; i >= 0; --i) addRow(fwd[i], fwd.size() - i);
+        if (menu->actions().isEmpty()) {
+            QAction* none = menu->addAction(QStringLiteral("No history"));
+            none->setEnabled(false);
+        }
+        ++m_historyMenuOpens;
+        dismissRcxTooltip();
+        popupUnderCell(menu, cellId, r);
     }
 
     void showOverflowMenu() {
@@ -1550,6 +1839,7 @@ private:
     // covers runs from `coveredLeft` to the recent cell: the overlay plus
     // the paper painted beside it, where hover goes quiet.
     void openEdit(EditScope scope, const QRect& r, int coveredLeft, const QString& text) {
+        leaveKeyboardMode(false);   // one focus owner: the overlay takes over
         const QRect recent = itemRect(QStringLiteral("recent"));
         const int stop = recent.isNull() ? width() - kRightMargin : recent.left();
         m_editScope = scope;
@@ -1650,6 +1940,17 @@ private:
     QString m_menuOpenId;      // cell kept pressed while its menu (or the source popup) is up
     bool    m_swallowNextPress = false;   // the press that ended an edit is spent...
     QRect   m_swallowRect;                // ...only inside what the overlay covered
+    // Keyboard mode: the focused cell's id while it lasts; m_synthPress
+    // marks the press Enter synthesises so mousePressEvent does not read
+    // it as the mouse taking over.
+    bool    m_kbMode = false;
+    QString m_kbFocusId;
+    bool    m_synthPress = false;
+    // Back's press-and-hold (the history list without a `hist` cell).
+    QTimer  m_holdTimer;
+    bool    m_holdFired = false;          // the hold opened the menu: the release is not a click
+    int     m_holdDelayMs = kHoldDelayMs;
+    int     m_historyMenuOpens = 0;       // test hook: opens counted, not seen
     // The edit overlay (base or path scope). While it is visible a state
     // push is stored but not laid out (see setState); endEdit applies the
     // deferred relayout.

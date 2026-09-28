@@ -1826,6 +1826,8 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         cb.evaluate      = [this](const QString& s) { return m_exprEvaluator ? m_exprEvaluator(s) : QString(); };
         cb.bookmarks     = [this] { return m_bookmarkProvider ? m_bookmarkProvider() : QVector<Bookmark>(); };
         cb.modules       = [this] { return m_moduleProvider ? m_moduleProvider() : QStringList(); };
+        cb.backEntries    = [this] { return m_navBackProvider ? m_navBackProvider() : QVector<NavEntry>(); };
+        cb.forwardEntries = [this] { return m_navForwardProvider ? m_navForwardProvider() : QVector<NavEntry>(); };
         cb.onSiblingPick = [this](int level, uint64_t id) { emit siblingPickRequested(level, id); };
         cb.onRootPick    = [this](uint64_t id) { emit rootPickRequested(id); };
         cb.onBaseCommit  = [this](QString s) { emit baseCommitRequested(s); };
@@ -5475,6 +5477,21 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         }
         return handled;
     }
+    // Mouse Back / Forward (XButton1 / XButton2, Qt::BackButton /
+    // ForwardButton): the address bar's history, as in every browser.
+    // Consumed whether or not an inline edit is open — but inert during
+    // one, like Alt+Left/Right: a place change under a half-typed value
+    // would have to cancel it, and a thumb button is too easy to brush.
+    if (obj == m_sci->viewport() && event->type() == QEvent::MouseButtonPress) {
+        const Qt::MouseButton b = static_cast<QMouseEvent*>(event)->button();
+        if (b == Qt::BackButton || b == Qt::ForwardButton) {
+            if (!m_editState.active) {
+                if (b == Qt::BackButton) emit navBackRequested();
+                else                     emit navForwardRequested();
+            }
+            return true;
+        }
+    }
     if (obj == m_sci->viewport() && event->type() == QEvent::MouseButtonPress
         && m_editState.active) {
         auto* me = static_cast<QMouseEvent*>(event);
@@ -6095,6 +6112,15 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     switch (ke->key()) {
     case Qt::Key_F2:
         return beginInlineEdit(EditTarget::Name);
+    case Qt::Key_F6:
+        // Keyboard focus into the address bar (Explorer's F6 cycles its
+        // panes; here there is one strip to reach). Esc in the bar brings
+        // focus back to the document.
+        if (ke->modifiers() == Qt::NoModifier && m_addressBar) {
+            m_addressBar->enterKeyboardMode();
+            return true;
+        }
+        return false;
     case Qt::Key_F12: {
         // Go to definition — emit for the current node; controller decides
         // whether to navigate (typed pointer, struct ref, etc.) or no-op.
@@ -6238,6 +6264,12 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
     case Qt::Key_Up:
     case Qt::Key_Down: {
         int dir = (ke->key() == Qt::Key_Up) ? -1 : 1;
+        // Alt+Up: the address bar's Up one level (Explorer's key) — the
+        // parent crumb. Alt+Down is nobody's; it falls through untouched.
+        if (ke->key() == Qt::Key_Up && ke->modifiers() == Qt::AltModifier) {
+            emit navUpRequested();
+            return true;
+        }
         // Byte-selection mode owns plain Shift+Up/Down: snap the
         // selection's high end to the next/previous hex row boundary.
         // Checked before Ctrl+Shift (reorder) and before normal node
@@ -6454,6 +6486,17 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         const int dir = (ke->key() == Qt::Key_Right) ? 1 : -1;
         const Qt::KeyboardModifiers m = ke->modifiers();
 
+        // Alt+Left / Alt+Right: the address bar's Back / Forward (the
+        // browser and Explorer keys). Ahead of the byte-selection rules —
+        // history is a place change, and no selection mode owns Alt.
+        // Only here, in normal mode: during a Scintilla inline edit
+        // handleEditKey owns the arrows for the caret (see its note).
+        if (m == Qt::AltModifier) {
+            if (dir < 0) emit navBackRequested();
+            else         emit navForwardRequested();
+            return true;
+        }
+
         // ── Byte selection takes priority ──
         // Shift+arrow OR Ctrl+Shift+arrow → extend selection by 1 byte
         //   (positive dir grows `hi` rightward; negative dir shrinks
@@ -6647,6 +6690,12 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
     // gone) and Alt+D fall through to the bar, opening a second editor
     // over the one in progress. Enter/Esc end this edit first; then the
     // keys work again.
+    //
+    // Alt+Left / Alt+Right / Alt+Up (the address bar's Back / Forward /
+    // Up in normal mode) are deliberately NOT routed from here: the
+    // arrow cases below own the caret regardless of modifier, and a
+    // history restore mid-edit would recompose the row under the caret.
+    // They do whatever the arrow does; navigation waits for Enter/Esc.
     if ((ke->key() == Qt::Key_L && ke->modifiers() == Qt::ControlModifier)
         || (ke->key() == Qt::Key_D && ke->modifiers() == Qt::AltModifier))
         return true;

@@ -444,8 +444,11 @@ RcxController::RcxController(RcxDocument* doc, QWidget* parent)
     // Lift any saved sources the .rcx shipped with into our own list,
     // and (if any) auto-attach the first one. Examples like png.rcx
     // use this so opening the file just shows the bytes — no manual
-    // "now attach the .png as a source" step.
+    // "now attach the .png as a source" step. Not a navigation gesture:
+    // the source switch it performs must not seed the Back stack.
+    m_loading = true;
     ingestPendingSavedSources();
+    m_loading = false;
 }
 
 void RcxController::ingestPendingSavedSources() {
@@ -1217,7 +1220,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
 
     // F12: go to definition — navigate to the type referenced by the
     // current node. Pointer.refId, Struct.refId, or Array element struct.
-    connect(editor, &RcxEditor::goToDefinitionRequested, this, [this](int nodeIdx) {
+    connect(editor, &RcxEditor::goToDefinitionRequested, this, [this, editor](int nodeIdx) {
         uint64_t target = resolveDefinitionTarget(nodeIdx);
         if (target == 0) {
             emit statusHint(QStringLiteral("No definition to navigate to"));
@@ -1226,7 +1229,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
         // Reuse existing tab if one already views this struct, else focus
         // here. Don't open a new tab — F12 is meant to be quick nav. F12 is
         // a jump (resets the breadcrumb trail); the ▸ follow-arrow is what
-        // grows the drill trail.
+        // grows the drill trail. History is recorded HERE, at the gesture,
+        // not inside setViewRootId — load, new-tab and delete-root call
+        // that too and none of them is a place the user left.
+        if (target != m_viewRootId) recordNav(editor);
         setViewRootId(target);
         emit statusHint(QStringLiteral("Jumped to definition"));
     });
@@ -1252,12 +1258,18 @@ void RcxController::connectEditor(RcxEditor* editor) {
             [this](const QString& formula) { rebaseTo(formula); });
     // The chip's context-menu Refresh.
     connect(editor, &RcxEditor::refreshRequested, this, [this] { refresh(); });
-    // Up one level = the parent crumb: collapse the deepest hop, the same
-    // path as clicking that crumb, so it is one undo entry and the sender
-    // pane scrolls (collapseToFocus reads sender()). History joins in P5.
-    connect(editor, &RcxEditor::navUpRequested, this, [this] {
-        if (!m_focusPath.isEmpty()) collapseToFocus(m_focusPath.size() - 1);
-    });
+    // Back / Forward / Up / the history menu, all from this pane: it is the
+    // one scrolled on restore and the one whose first visible row anchors
+    // the entry recorded. Up is the parent crumb — one undo entry, one
+    // history entry, through collapseToFocus.
+    connect(editor, &RcxEditor::navBackRequested,    this, [this, editor] { goBack(editor); });
+    connect(editor, &RcxEditor::navForwardRequested, this, [this, editor] { goForward(editor); });
+    connect(editor, &RcxEditor::navUpRequested,      this, [this, editor] { goUp(editor); });
+    connect(editor, &RcxEditor::historyJumpRequested, this,
+            [this, editor](int delta) { jumpToHistory(delta, editor); });
+    // The history menu's rows, pulled when it opens.
+    editor->setAddressBarHistory([this] { return backEntries(); },
+                                 [this] { return forwardEntries(); });
     // The places menu's bookmarks and modules, pulled when it opens. The
     // module list is the provider's memoised one — never enumerateModules,
     // which is a snapshot syscall on a process with hundreds of DLLs.
@@ -1275,9 +1287,14 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // resolves the typed path and answers the bar the way the base edit is
     // answered — a success closes the overlay, a miss keeps it open with the
     // seam in markerError (statusHint has already named the segment).
-    // History joins all three in P5.
+    // switchSibling and navigateToDrillPath record history themselves;
+    // the root pick records here, at the gesture — setViewRootId never
+    // does (see the F12 connect above).
     connect(editor, &RcxEditor::siblingPickRequested, this, &RcxController::switchSibling);
-    connect(editor, &RcxEditor::rootPickRequested, this, &RcxController::setViewRootId);
+    connect(editor, &RcxEditor::rootPickRequested, this, [this, editor](uint64_t id) {
+        if (id != m_viewRootId) recordNav(editor);
+        setViewRootId(id);
+    });
     connect(editor, &RcxEditor::pathCommitRequested, this, [this, editor](const QString& path) {
         QString err;
         const bool ok = navigateToDrillPath(path, &err);
@@ -1946,6 +1963,12 @@ QVector<uint64_t> RcxController::focusChainToNode(uint64_t nodeId) const {
 }
 
 void RcxController::collapseToFocus(int crumbIndex) {
+    // The slot: the pane is the signal's sender (a crumb click in pane B
+    // scrolls pane B only), else the primary editor.
+    collapseToFocusIn(crumbIndex, gestureEditor(nullptr));
+}
+
+void RcxController::collapseToFocusIn(int crumbIndex, RcxEditor* ed) {
     if (crumbIndex < 0) return;
     // crumbIndex 0 = root class; i = the class shown by focus pointer i-1.
     // Collapse focus[crumbIndex] (the pointer that opens everything below this
@@ -1955,6 +1978,10 @@ void RcxController::collapseToFocus(int crumbIndex) {
     const uint64_t scrollPid =
         (crumbIndex >= 1 && crumbIndex - 1 < m_focusPath.size())
             ? m_focusPath[crumbIndex - 1] : 0;
+    // A crumb click is a navigation gesture: record the place being left
+    // — but only when the trail actually shortens (a click past the end
+    // moves nothing and must not leave an entry equal to here).
+    if (crumbIndex < m_focusPath.size()) recordNav(ed);
     m_focusPath.resize(qMin(crumbIndex, (int)m_focusPath.size()));
 
     bool pushed = false;
@@ -1967,8 +1994,6 @@ void RcxController::collapseToFocus(int crumbIndex) {
         }
     }
     if (!pushed) refresh();
-    RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
-    if (!ed) ed = primaryEditor();
     if (ed) ed->scrollNodeToTop(scrollPid ? scrollPid : m_viewRootId);
 }
 
@@ -2043,6 +2068,11 @@ bool RcxController::switchSibling(int level, uint64_t newPointerId) {
     if (!listed) return false;
     const uint64_t oldPointer = level < m_focusPath.size() ? m_focusPath[level] : 0;
     if (oldPointer == newPointerId) return false;   // already there: nothing to undo
+    // Past every refusal: the switch WILL happen, so this is the place
+    // being left. The pane is read now, before anything below could
+    // disturb the slot's sender.
+    RcxEditor* ed = gestureEditor(nullptr);
+    recordNav(ed);
     const int oi = oldPointer ? tree.indexOfId(oldPointer) : -1;
     const bool collapseOld = oi >= 0 && !tree.nodes[oi].collapsed;
     const bool expandNew   = tree.nodes[ni].collapsed;
@@ -2066,8 +2096,6 @@ bool RcxController::switchSibling(int level, uint64_t newPointerId) {
     m_focusPath.resize(level);
     m_focusPath.push_back(newPointerId);
     refresh();
-    RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
-    if (!ed) ed = primaryEditor();
     if (ed) ed->scrollNodeToTop(newPointerId);
     return true;
 }
@@ -2094,6 +2122,10 @@ bool RcxController::navigateToDrillPath(const QString& text, QString* err) {
         const int pi = tree.indexOfId(hop);
         if (pi >= 0 && tree.nodes[pi].collapsed) toExpand.push_back(hop);
     }
+    // The place being left — only when the commit moves somewhere (the
+    // trail re-committed as it stands is a no-op, and records nothing).
+    RcxEditor* ed = gestureEditor(nullptr);
+    if (rootDiffers || path != m_focusPath) recordNav(ed);
     // setViewRootId is the one root switch (it clears the focus path and
     // refreshes on its own — a second refresh below then shows the trail);
     // the expands are held so the crumbs never show a half-built path.
@@ -2109,8 +2141,6 @@ bool RcxController::navigateToDrillPath(const QString& text, QString* err) {
     m_suppressRefresh = wasSuppressed;
     m_focusPath = path;
     refresh();
-    RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
-    if (!ed) ed = primaryEditor();
     if (ed) {
         if (!path.isEmpty()) ed->scrollNodeToTop(path.last());
         else                 ed->scrollNodeToTop(m_viewRootId);
@@ -2277,9 +2307,9 @@ AddressBarState RcxController::addressBarState() {
     s.crumbs       = crumbs;
     s.trailPath    = trailPathText(tree, m_viewRootId, m_focusPath);
     s.viewRootId   = m_viewRootId;
-    s.canBack      = false;   // P5: NavHistory
-    s.canForward   = false;
-    s.canUp        = !m_focusPath.isEmpty();
+    s.canBack      = canGoBack();
+    s.canForward   = canGoForward();
+    s.canUp        = canGoUp();
     return s;
 }
 
@@ -8427,6 +8457,10 @@ void RcxController::attachViaPlugin(const QString& providerIdentifier, const QSt
 void RcxController::switchToSavedSource(int idx) {
     if (idx < 0 || idx >= m_savedSources.size()) return;
     if (idx == m_activeSourceIdx) return;
+    // A source switch is a navigation gesture (the base comes with the
+    // source, so the view lands somewhere else). Silent during load and
+    // during a Back/Forward restore — recordNav checks both.
+    recordNav();
 
     // Save current source's base address before switching
     if (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size()) {
@@ -9190,11 +9224,6 @@ bool RcxController::navigateToFormula(const QString& formula, QString* errOut) {
 }
 
 bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHistory) {
-    // recordHistory is accepted now so call sites don't churn when the
-    // address bar's NavHistory lands (P1/P5); there is nothing to record
-    // into yet.
-    Q_UNUSED(recordHistory);
-
     QString s = expr.trimmed();
     s.remove('`');          // WinDbg backtick separators (e.g. 7ff6`6cce0000)
     s.remove('\n');
@@ -9218,6 +9247,9 @@ bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHisto
     const uint64_t oldBase = m_doc->tree.baseAddress;
     const QString oldFormula = m_doc->tree.baseAddressFormula;
     if (result.value != oldBase || newFormula != oldFormula) {
+        // The place being left, recorded only on the path that moves: the
+        // same-base branch below changes nothing and leaves no entry.
+        if (recordHistory) recordNav();
         // Values read at the new base are not "changes": arm the tracking
         // cooldown (what the scanner's Set-as-Base did by hand) before the
         // command's apply resets the snapshot and recomposes.
@@ -9241,6 +9273,194 @@ bool RcxController::rebaseTo(const QString& expr, QString* err, bool recordHisto
     // screen, and reconcileFocusPath keeps it structurally honest.
     GotoAddressDialog::pushRecent(s);
     return true;
+}
+
+// ── Navigation history ──
+
+RcxEditor* RcxController::gestureEditor(RcxEditor* from) const {
+    if (from) return from;
+    // Inside a slot, sender() is the pane whose signal is being handled
+    // (a direct call from that slot still sees it); outside one it is null.
+    if (auto* ed = qobject_cast<RcxEditor*>(sender())) return ed;
+    return primaryEditor();
+}
+
+bool RcxController::canGoBack() const {
+    // Validity-aware, so a Back cell is never lit for entries a delete
+    // made unrestorable (back() would discard them and do nothing).
+    for (const NavEntry& e : m_nav.backEntries())
+        if (navEntryValid(m_doc->tree, e)) return true;
+    return false;
+}
+
+bool RcxController::canGoForward() const {
+    for (const NavEntry& e : m_nav.forwardEntries())
+        if (navEntryValid(m_doc->tree, e)) return true;
+    return false;
+}
+
+NavEntry RcxController::currentNavEntry(RcxEditor* from) const {
+    const NodeTree& tree = m_doc->tree;
+    NavEntry e;
+    e.viewRootId      = m_viewRootId;
+    e.focusPath       = m_focusPath;
+    e.baseAddress     = tree.baseAddress;
+    e.baseFormula     = tree.baseAddressFormula;
+    e.activeSourceIdx = m_activeSourceIdx;
+    // The anchor: the node on the pane's first visible row, so a restore
+    // scrolls back to what was on screen and not merely to the class
+    // header. The meta index IS the visible line (compose emits only
+    // visible rows — scrollNodeToTop relies on the same fact).
+    if (!from) from = primaryEditor();
+    if (from && from->scintilla()) {
+        const int first = (int)from->scintilla()->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+        if (first >= 0 && first < m_lastResult.meta.size())
+            e.anchorNodeId = m_lastResult.meta[first].nodeId;
+    }
+    e.label = trailPathText(tree, m_viewRootId, m_focusPath)
+            + QStringLiteral("  @ 0x") + QString::number(tree.baseAddress, 16).toUpper();
+    return e;
+}
+
+void RcxController::recordNav(RcxEditor* from) {
+    // A restore's own source switch and the constructor's auto-attach go
+    // through the same gestures; neither is a place the user left.
+    if (m_navRestoring || m_loading) return;
+    m_nav.push(currentNavEntry(gestureEditor(from)));
+    emit historyChanged(canGoBack(), canGoForward());
+}
+
+void RcxController::goBack(RcxEditor* from) {
+    jumpToHistory(-1, from);
+}
+
+void RcxController::goForward(RcxEditor* from) {
+    jumpToHistory(+1, from);
+}
+
+void RcxController::goUp(RcxEditor* from) {
+    if (m_focusPath.isEmpty()) return;
+    collapseToFocusIn(m_focusPath.size() - 1, gestureEditor(from));
+}
+
+void RcxController::jumpToHistory(int delta, RcxEditor* from) {
+    if (delta == 0) return;
+    from = gestureEditor(from);
+    auto valid = [this](const NavEntry& e) { return navEntryValid(m_doc->tree, e); };
+    // Step the stacks one entry at a time — each step moves the place
+    // being left onto the other stack, exactly as single Back presses
+    // would — but restore only where the walk ends: one refresh, and at
+    // most one "Reopen path" macro instead of one per intermediate place.
+    NavEntry cur = currentNavEntry(from);
+    std::optional<NavEntry> target;
+    for (int i = 0; i < qAbs(delta); ++i) {
+        std::optional<NavEntry> e = delta < 0 ? m_nav.back(cur, valid) : m_nav.forward(cur, valid);
+        if (!e) break;
+        target = e;
+        cur = *e;
+    }
+    if (target) {
+        restoreNav(*target, from);
+        return;
+    }
+    // Nothing restorable: the walk may still have discarded stale entries,
+    // so the cells re-read the flags without waiting for a refresh tick.
+    emit historyChanged(canGoBack(), canGoForward());
+    pushAddressBarState();
+}
+
+void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
+    m_navRestoring = true;
+
+    // 1. The source. switchToSavedSource brings that entry's base with it;
+    //    step 3 then writes the entry's own base over that. Degrade when
+    //    the saved entry is gone, its file vanished, or the attach was
+    //    refused (attachViaPlugin leaves the provider untouched then, so
+    //    the index it already moved is put back): the place is restored
+    //    under the source the user has, with a hint saying so.
+    if (e.activeSourceIdx >= 0 && e.activeSourceIdx != m_activeSourceIdx) {
+        bool ok = e.activeSourceIdx < m_savedSources.size();
+        QString name = ok ? m_savedSources[e.activeSourceIdx].displayName : QString();
+        if (ok) {
+            const SavedSourceEntry& se = m_savedSources[e.activeSourceIdx];
+            if (se.kind == QStringLiteral("File") && !se.filePath.isEmpty()
+                && !QFileInfo::exists(se.filePath))
+                ok = false;
+        }
+        if (ok) {
+            const int prevIdx = m_activeSourceIdx;
+            const Provider* prevProv = m_doc->provider.get();
+            switchToSavedSource(e.activeSourceIdx);
+            if (m_doc->provider.get() == prevProv) {   // refused: nothing was swapped
+                m_activeSourceIdx = prevIdx;
+                ok = false;
+            }
+        }
+        if (!ok)
+            emit statusHint(QStringLiteral("Source %1 is not available — kept the current one")
+                                .arg(name.isEmpty() ? QStringLiteral("#%1").arg(e.activeSourceIdx) : name));
+    }
+
+    // 2. The view root — directly, never through setViewRootId (which
+    //    would refresh mid-restore and which callers must not record).
+    if (e.viewRootId != m_viewRootId) {
+        m_viewRootId = e.viewRootId;
+        m_focusPath.clear();
+    }
+
+    // 3. Base + formula: a RAW restore (decided), not a cmd::ChangeBase —
+    //    the undo entry the original rebase pushed stays where it is, so
+    //    Ctrl+Z after a Back still undoes THAT rebase. Mirrors what the
+    //    command's apply does besides the assignment: values read at the
+    //    restored base are not "changes", and the snapshot is of the old
+    //    base's pages.
+    NodeTree& tree = m_doc->tree;
+    if (e.baseAddress != tree.baseAddress || e.baseFormula != tree.baseAddressFormula) {
+        tree.baseAddress = e.baseAddress;
+        tree.baseAddressFormula = e.baseFormula;
+        resetChangeTracking();
+        resetSnapshot();
+    }
+
+    // 4. The focus path. A hop the user collapsed since (a crumb click, Up,
+    //    a fold click) is document state: reopening it goes through the
+    //    undo stack — every collapsed hop in ONE macro, and no macro at all
+    //    when the path is already open (the common case: Back after F12).
+    QVector<uint64_t> toExpand;
+    for (uint64_t hop : e.focusPath) {
+        const int pi = tree.indexOfId(hop);
+        if (pi >= 0 && tree.nodes[pi].collapsed) toExpand.push_back(hop);
+    }
+    if (!toExpand.isEmpty()) {
+        const bool wasSuppressed = m_suppressRefresh;
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Reopen path"));
+        for (uint64_t hop : toExpand)
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{hop, true, false}));
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = wasSuppressed;
+    }
+    m_focusPath = e.focusPath;
+    reconcileFocusPath();
+
+    // 5. One announcement (the docks, the tab icon and the MCP bridge
+    //    listen; so does this controller, whose refresh composes the
+    //    restored place and pushes the bar state with the new flags).
+    emit m_doc->documentChanged();
+    refresh();
+
+    // 6. Scroll the pane the gesture came from back to what it showed:
+    //    the anchored row if that node still exists, else the deepest hop
+    //    (the class the trail ends in), else the root.
+    if (from) {
+        uint64_t anchor = e.anchorNodeId;
+        if (anchor == 0 || tree.indexOfId(anchor) < 0)
+            anchor = m_focusPath.isEmpty() ? m_viewRootId : m_focusPath.last();
+        if (anchor) from->scrollNodeToTop(anchor);
+    }
+
+    m_navRestoring = false;
+    emit historyChanged(canGoBack(), canGoForward());
 }
 
 void RcxController::addBookmark(const QString& name, const QString& formula) {

@@ -1,6 +1,7 @@
 #pragma once
 #include "core.h"
 #include "editor.h"
+#include "nav_history.h"
 #include "providers/snapshot_provider.h"
 #include <QObject>
 #include <QUndoStack>
@@ -533,12 +534,51 @@ public:
     // value-tracking cooldown, and keeps m_focusPath. A bare hex/decimal
     // literal clears the formula; anything else is kept as the formula. On
     // failure: *err (parser message), statusHint("Base: …"), false, nothing
-    // pushed. recordHistory is reserved for the address bar's NavHistory.
+    // pushed. recordHistory=false skips the NavHistory entry (nothing uses
+    // it today: a Back/Forward restore writes the base directly, never
+    // through here).
     bool rebaseTo(const QString& expr, QString* err = nullptr, bool recordHistory = true);
     // Bookmarks / Goto — a wrapper over rebaseTo, kept for its callers.
     bool navigateToFormula(const QString& formula, QString* errOut = nullptr);
     void addBookmark(const QString& name, const QString& formula);
     void removeBookmark(int idx);
+
+    // ── Navigation history (the address bar's Back / Forward / Up) ──
+    // Explorer's model, not the undo model: an entry is a PLACE (view root,
+    // drill path, base, active source), recorded at the navigation gestures
+    // — the F12 jump, a crumb click, every rebase, a source switch, a
+    // chevron / root pick, a path edit — and NOWHERE else (never inside
+    // setViewRootId, which load / new-tab / delete-root also call). A
+    // restore writes the place back directly: no undo entry, no history
+    // entry — except that a collapsed hop on the restored path is re-opened
+    // through ONE undo macro ("Reopen path"), because Node::collapsed is
+    // document state and reopening it must stay undoable. Undo / redo never
+    // touch history. One gesture = at most one undo entry + one history
+    // entry. Entries whose root or hops were deleted are skipped on the way
+    // back, so canGoBack() only says yes when something restorable is there.
+    bool canGoBack() const;
+    bool canGoForward() const;
+    bool canGoUp() const { return !m_focusPath.isEmpty(); }
+    // `from` is the pane the gesture came from: it is the one scrolled on
+    // restore and the one whose first visible row anchors the entry. Null
+    // = the signal's sender pane, else the primary editor.
+    void goBack(RcxEditor* from = nullptr);
+    void goForward(RcxEditor* from = nullptr);
+    // Up one level = the parent crumb: collapseToFocus on the deepest hop,
+    // which records its own history entry (it is a crumb click).
+    void goUp(RcxEditor* from = nullptr);
+    // The history menu's pick: negative = back |delta| entries, positive =
+    // forward. Steps the stacks entry by entry (so they stay exactly what a
+    // sequence of single steps would leave) but restores only the final
+    // place — one refresh, at most one "Reopen path" macro.
+    void jumpToHistory(int delta, RcxEditor* from = nullptr);
+    // The stacks as NavHistory keeps them: oldest first. The menu reverses.
+    QVector<NavEntry> backEntries() const { return m_nav.backEntries(); }
+    QVector<NavEntry> forwardEntries() const { return m_nav.forwardEntries(); }
+    // The place the controller is at right now, anchored on `from`'s first
+    // visible row. What recordNav pushes and what a step hands to
+    // NavHistory as the place being left.
+    NavEntry currentNavEntry(RcxEditor* from = nullptr) const;
 
     RcxDocument* document() const { return m_doc; }
     void setEditorFont(const QString& fontName);
@@ -624,6 +664,11 @@ signals:
     void sourceLivenessChanged(bool live);
     // Tri-state source status (transition-only) for the status-bar badge.
     void sourceStatusChanged(SourceStatus status);
+    // The Back / Forward stacks changed (an entry recorded, a restore, a
+    // stale entry discarded). The bars get the flags through the state push
+    // on the refresh that follows; this is for a menu that wants them
+    // without a refresh.
+    void historyChanged(bool canBack, bool canForward);
 
 private:
     RcxDocument*       m_doc;
@@ -644,6 +689,30 @@ private:
     QVector<uint64_t>  m_focusPath;    // breadcrumb focus: chain of expanded
                                        // typed-pointer ids from the root class
                                        // down to the deepest drilled one.
+
+    // ── Navigation history ──
+    NavHistory         m_nav;
+    bool               m_navRestoring = false;  // a restore in progress: its
+                                                // source switch must not record
+    bool               m_loading = false;       // the constructor's auto-attach
+                                                // of the first saved source
+                                                // is not a gesture
+    // Record the place being LEFT. Called BEFORE the state change at each
+    // gesture, and only when that gesture will actually move (a no-op
+    // gesture must not leave an entry equal to where the user still is).
+    // Silent while loading or restoring.
+    void recordNav(RcxEditor* from = nullptr);
+    // Write `e` back: source (degrading to the current one when the saved
+    // entry is gone or does not connect), view root, base + formula (raw —
+    // no cmd::ChangeBase), the focus path (re-expanding collapsed hops in
+    // one undo macro), then one refresh and a scroll on `from`.
+    void restoreNav(const NavEntry& e, RcxEditor* from);
+    // The pane a gesture came from: the signal's sender when the call is
+    // inside a slot, else the primary editor.
+    RcxEditor* gestureEditor(RcxEditor* from) const;
+    // collapseToFocus's body with the pane spelled out (collapseToFocus
+    // itself reads sender(), which goUp cannot rely on).
+    void collapseToFocusIn(int crumbIndex, RcxEditor* ed);
 
     // Drill target for a node — the struct id following it navigates to
     // (drillTargetId on the resolved node). 0 = nothing to follow.

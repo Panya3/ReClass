@@ -3,6 +3,7 @@
 #include "providerregistry.h"
 #include "themes/theme.h"
 #include "widgets/address_bar_model.h"   // AddressBarState, AddressBarTreeQueries (Core-only)
+#include "nav_history.h"                 // NavEntry — the history menu's rows (Core-only)
 #include <QWidget>
 #include <QSet>
 #include <QPoint>
@@ -161,6 +162,14 @@ public:
                                 std::function<QStringList()> modules) {
         m_bookmarkProvider = std::move(bookmarks);
         m_moduleProvider   = std::move(modules);
+    }
+    // The bar's history menu: the controller's Back and Forward stacks
+    // (oldest first, as NavHistory keeps them; the bar orders the rows).
+    // Pulled when the menu opens — never per refresh.
+    void setAddressBarHistory(std::function<QVector<NavEntry>()> back,
+                              std::function<QVector<NavEntry>()> forward) {
+        m_navBackProvider    = std::move(back);
+        m_navForwardProvider = std::move(forward);
     }
     // What the bar's chevron menus and its path edit read from the tree
     // (siblings of a crumb, the root classes, the fields a dotted path
@@ -496,6 +505,8 @@ private:
     std::function<QString(const QString&)> m_exprEvaluator;
     std::function<QVector<Bookmark>()>     m_bookmarkProvider;   // address bar places menu
     std::function<QStringList()>           m_moduleProvider;
+    std::function<QVector<NavEntry>()>     m_navBackProvider;    // address bar history menu
+    std::function<QVector<NavEntry>()>     m_navForwardProvider;
     QLabel* m_exprResultLabel = nullptr;
     // The unified hover preview host (HoverPopupHost, file-local in
     // editor.cpp) replaces the old m_disasmPopup + m_structPreviewPopup
