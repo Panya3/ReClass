@@ -44,6 +44,7 @@
 #include "paintutil.h"
 #include "providers/buffer_provider.h"
 #include "sourcechooserpopup.h"
+#include "typeselectorpopup.h"      // TypeEntry / TypePopupMode: the line-0 root pick
 #include "widgets/address_bar.h"
 
 using namespace rcx;
@@ -310,6 +311,18 @@ private slots:
         m_ctrl->setViewRootId(m_id.editor);
     }
 
+    // Line 0 of the editor's Scintilla, newline stripped.
+    QString lineZeroText() const {
+        QsciScintilla* sci = m_editor->scintilla();
+        const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
+        if (len <= 0) return {};
+        QByteArray buf(len + 1, '\0');
+        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
+        QString line = QString::fromUtf8(buf.constData(), len);
+        while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
+        return line;
+    }
+
     void cleanup() {
         delete m_ctrl; m_ctrl = nullptr;
         m_editor = nullptr;
@@ -571,12 +584,16 @@ private slots:
         QCOMPARE(m_ctrl->focusPath(), before);
     }
 
-    // ── rebaseTo announces itself: documentChanged once, refresh not thrice ──
-    // Upstream's full-file rewrite in 60f80cd dropped these two; carried
-    // forward (see ticket 20 resolution) because they guard the single
-    // rebase path ticket 18 established — the bookmarks dock, doc-tab source
-    // icon and MCP bridge listen to documentChanged, and nothing else in the
-    // suite pins its emission count.
+    // ── rebaseTo announces itself: documentChanged once ──
+    // Upstream's full-file rewrite in 60f80cd dropped this; carried forward
+    // (see ticket 20 resolution) because it guards the single rebase path
+    // ticket 18 established — the bookmarks dock, doc-tab source icon and
+    // MCP bridge listen to documentChanged, and nothing else in the suite
+    // pins its emission count. Its sibling, the inline command-row base
+    // commit's refresh parity, left with e904c33: that edit path is gone
+    // (the base address is the bar's edit), and upstream's
+    // testBaseCommitRebasesUndoably / testBaseCommitRefusedKeepsOverlay pin
+    // the bar's path end to end.
 
     void testGotoRebaseEmitsDocumentChanged() {
         // The bookmarks dock, the doc-tab source icon and the MCP bridge all
@@ -595,39 +612,6 @@ private slots:
         m_doc->undoStack.undo();
         m_doc->undoStack.redo();
         QCOMPARE(changed.count(), 1);
-    }
-
-    void testInlineBaseCommitAddsNoExtraRefresh() {
-        // refresh() always reaches applyDocument, which always emits
-        // documentApplied, so the spy counts recomposes. The inline command
-        // row edit must cost exactly what a direct rebaseTo costs — it used
-        // to add a third refresh after rebaseTo's own — and a refused edit
-        // exactly one (the canonical text restored over the typed text).
-        // Only RELATIVE counts are meaningful: a refresh whose command-row
-        // text changed emits documentApplied twice (applyDocument, then the
-        // mirror re-emit in setCommandRowText), so a direct rebase reads 3
-        // for its two refreshes (command apply + documentChanged).
-        QSignalSpy applied(m_editor, &RcxEditor::documentApplied);
-        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));
-        const int direct = applied.count();
-        QVERIFY(direct >= 1);
-
-        applied.clear();
-        emit m_editor->inlineEditCommitted(-1, 0, EditTarget::BaseAddress, QStringLiteral("0x50"), 0);
-        QCOMPARE(applied.count(), direct);
-        QCOMPARE(m_doc->tree.baseAddress, 0x50ULL);
-
-        applied.clear();
-        emit m_editor->inlineEditCommitted(-1, 0, EditTarget::BaseAddress, QStringLiteral("[0x1"), 0);
-        QCOMPARE(applied.count(), 1);
-        QCOMPARE(m_doc->tree.baseAddress, 0x50ULL);
-
-        // Same value re-committed: no command, one refresh (canonical text).
-        applied.clear();
-        const int n = m_doc->undoStack.count();
-        emit m_editor->inlineEditCommitted(-1, 0, EditTarget::BaseAddress, QStringLiteral("0x50"), 0);
-        QCOMPARE(applied.count(), 1);
-        QCOMPARE(m_doc->undoStack.count(), n);
     }
 
     // ── makeAddressCallbacks: one callback set for every caller ──
@@ -1785,22 +1769,22 @@ private slots:
         QVERIFY(!bar->isEditing());
     }
 
-    void testLineZeroAddressClickEditsInTheBar() {
-        // One base-edit implementation: a click on the command row's address
-        // span opens the BAR's overlay; no Scintilla inline edit starts.
+    void testLineZeroHasNoAddressCell() {
+        // Line 0 is the class header alone and the bar is the only base
+        // edit. A click where the address cell used to be (right after the
+        // chevron) starts nothing — not the bar's edit, not a Scintilla one
+        // — and the bar's own base cell still edits.
         QApplication::processEvents();
         QsciScintilla* sci = m_editor->scintilla();
-        const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
-        QVERIFY(len > 0);
-        QByteArray buf(len + 1, '\0');
-        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
-        QString line = QString::fromUtf8(buf.constData(), len);
-        while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
-        const ColumnSpan as = commandRowAddrSpan(line);
-        QVERIFY2(as.valid, qPrintable(line));
+        const QString line = lineZeroText();
+        QVERIFY2(!line.contains(QStringLiteral("0x")), qPrintable(line));
+        QCOMPARE(line, buildCommandRowText(QStringLiteral("struct"), QStringLiteral("RcxEditor"), false));
+        const ColumnSpan chev = commandRowChevronSpan(line);
+        QVERIFY(chev.valid);
+        QCOMPARE(commandRowRootTypeSpan(line).start, chev.end);
         // Character column → byte position (the row holds a ▸), then to
         // a viewport point on that glyph's row.
-        const int col = (as.start + as.end) / 2;
+        const int col = chev.end + 1;
         const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
                        + line.left(col).toUtf8().size();
         const int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
@@ -1810,12 +1794,39 @@ private slots:
         QVERIFY(!bar->isEditing());
         QTest::mouseClick(sci->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(x + 2, y + lh / 2));
         QApplication::processEvents();
-        QVERIFY2(bar->isEditing(), "line-0 address click did not open the bar's edit");
-        QVERIFY2(!m_editor->isEditing(), "a Scintilla inline edit started as well");
+        QVERIFY2(!bar->isEditing(), "a line-0 click opened the bar's edit — there is no address cell");
+        QVERIFY2(!m_editor->isEditing(), "a Scintilla inline edit started on the keyword");
+        // The bar's base cell is the edit.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QApplication::processEvents();
+        QVERIFY2(bar->isBaseEditing(), "the bar's base cell did not open the edit");
         QCOMPARE(bar->editText(), QStringLiteral("0x0"));
         QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
         QVERIFY(!bar->isEditing());
         QVERIFY(!m_editor->isEditing());
+    }
+
+    void testLineZeroStaysTheHeaderWhenTheBaseChanges() {
+        // The base lives in the bar only: a rebase changes the bar's state
+        // and leaves line 0 byte-identical — the row never showed it.
+        QApplication::processEvents();
+        const QString header = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("RcxEditor"), false);
+        QCOMPARE(lineZeroText(), header);
+        AddressBar* bar = m_editor->addressBar();
+        QCOMPARE(bar->state().baseAddress, 0ull);
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x1000")));
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.baseAddress, 0x1000ull);
+        QCOMPARE(bar->state().baseAddress, 0x1000ull);
+        QCOMPARE(bar->baseDisplayText(), QStringLiteral("0x1000"));
+        QCOMPARE(lineZeroText(), header);
+        QVERIFY(!lineZeroText().contains(QStringLiteral("1000")));
+        // A formula base is the bar's too — line 0 does not elide, print or
+        // parse it.
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x10*2+0x4")));
+        QApplication::processEvents();
+        QCOMPARE(bar->state().baseFormula, QStringLiteral("0x10*2+0x4"));
+        QCOMPARE(lineZeroText(), header);
     }
 
     void testRecentCellMenuGotoClearAndPickRebases() {
@@ -2340,20 +2351,17 @@ private slots:
         QVERIFY(first > 0);
     }
 
-    void testDoubleClickOnAddressSpanEditsInTheBar() {
-        // Phase-3 follow-up: the single press was redirected to the bar,
-        // a double-click still slipped into the legacy Scintilla edit.
+    void testDoubleClickOnLineZeroStartsNoBaseEdit() {
+        // The address cell left line 0: a double-click where it used to be
+        // (the keyword column) opens neither the bar's edit nor a Scintilla
+        // one. (Before the demotion the single press was redirected to the
+        // bar and a double-click still slipped into the legacy edit.)
         QApplication::processEvents();
         QsciScintilla* sci = m_editor->scintilla();
-        const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
-        QVERIFY(len > 0);
-        QByteArray buf(len + 1, '\0');
-        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
-        QString line = QString::fromUtf8(buf.constData(), len);
-        while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
-        const ColumnSpan as = commandRowAddrSpan(line);
-        QVERIFY2(as.valid, qPrintable(line));
-        const int col = (as.start + as.end) / 2;
+        const QString line = lineZeroText();
+        const ColumnSpan chev = commandRowChevronSpan(line);
+        QVERIFY2(chev.valid, qPrintable(line));
+        const int col = chev.end + 1;
         const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
                        + line.left(col).toUtf8().size();
         const int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
@@ -2367,12 +2375,9 @@ private slots:
                         Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(sci->viewport(), &dbl);
         QApplication::processEvents();
-        QVERIFY2(bar->isBaseEditing(), "line-0 address double-click did not open the bar's edit");
-        QVERIFY2(!m_editor->isEditing(), "a Scintilla inline edit started as well");
-        QCOMPARE(bar->editText(), QStringLiteral("0x0"));
-        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
-        QVERIFY(!bar->isEditing());
-        QVERIFY(!m_editor->isEditing());
+        QVERIFY2(!bar->isBaseEditing(), "a line-0 double-click opened the bar's edit — there is no address cell");
+        QVERIFY2(!m_editor->isEditing(), "a Scintilla inline edit started on the keyword");
+        QCOMPARE(lineZeroText(), line);
     }
 
     void testCoveredCellsGoQuietWhileEditing() {
@@ -2408,10 +2413,9 @@ private slots:
 
     void testLineZeroHasNoSourceControlTheChipHas() {
         // The 'name'▾ that used to open the source chooser from line 0
-        // moved to the bar's chip. The row now goes chevron → address: no
-        // ▾, and the address cell starts where the chevron ends. A click
-        // on that cell is the bar's base edit; only the chip asks for the
-        // popup.
+        // moved to the bar's chip. The row now goes chevron → keyword: no
+        // ▾, no address, the keyword starts where the chevron ends. A
+        // click on that cell is nothing; only the chip asks for the popup.
         QApplication::processEvents();
         QsciScintilla* sci = m_editor->scintilla();
         const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
@@ -2422,16 +2426,16 @@ private slots:
         while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
         QVERIFY2(!line.contains(QChar(0x25BE)), qPrintable(line));
         const ColumnSpan chev = commandRowChevronSpan(line);
-        const ColumnSpan as = commandRowAddrSpan(line);
-        QVERIFY(chev.valid && as.valid);
-        QCOMPARE(as.start, chev.end);
-        QCOMPARE(line.mid(as.start, as.end - as.start), QStringLiteral("0x0"));
-        QCOMPARE(line, buildCommandRowText(QStringLiteral("0x0"), QStringLiteral("struct"),
+        const ColumnSpan rt = commandRowRootTypeSpan(line);
+        QVERIFY(chev.valid && rt.valid);
+        QCOMPARE(rt.start, chev.end);
+        QVERIFY(!line.contains(QStringLiteral("0x")));
+        QCOMPARE(line, buildCommandRowText(QStringLiteral("struct"),
                                            QStringLiteral("RcxEditor"), false));
         QSignalSpy spy(m_editor, &RcxEditor::sourcePopupRequested);
         // The cell right after the chevron — where the source label was.
         const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
-                       + line.left(as.start + 1).toUtf8().size();
+                       + line.left(rt.start + 1).toUtf8().size();
         const int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
         const int y = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
         const int lh = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
@@ -2439,9 +2443,9 @@ private slots:
         QTest::mouseClick(sci->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(x + 1, y + lh / 2));
         QApplication::processEvents();
         QCOMPARE(spy.count(), 0);
-        QVERIFY2(bar->isBaseEditing(), "the cell after the chevron is the address: a base edit");
-        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY2(!bar->isBaseEditing(), "the cell after the chevron is the keyword: nothing to edit");
         QVERIFY(!bar->isEditing());
+        QVERIFY(!m_editor->isEditing());
         // The chip still opens the popup.
         const QRect src = bar->itemRect(QStringLiteral("src"));
         QVERIFY(!src.isNull());
@@ -2844,6 +2848,115 @@ private slots:
         QCOMPARE(m_ctrl->backEntries().size(), hn + 1);
     }
 
+    void testRemovedSourceIsForgottenByHistory() {
+        // NavEntry.activeSourceIdx is a raw index into the saved-source
+        // list: removing a source shifts the later ones and Clear All drops
+        // them all — the history follows (NavHistory::forgetSource /
+        // forgetAllSources), or Back silently switched to whichever source
+        // slid into the recorded slot.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto writeFile = [&](const QString& name, char fill) {
+            const QString p = dir.filePath(name);
+            QFile f(p);
+            f.open(QIODevice::WriteOnly);
+            f.write(QByteArray(64, fill));
+            f.close();
+            return p;
+        };
+        const QString a = writeFile(QStringLiteral("a.bin"), 'A');
+        const QString b = writeFile(QStringLiteral("b.bin"), 'B');
+        const QString c = writeFile(QStringLiteral("c.bin"), 'C');
+        SavedSourceEntry ea; ea.kind = QStringLiteral("File"); ea.displayName = QStringLiteral("a.bin"); ea.filePath = a;
+        SavedSourceEntry eb; eb.kind = QStringLiteral("File"); eb.displayName = QStringLiteral("b.bin"); eb.filePath = b;
+        SavedSourceEntry ec; ec.kind = QStringLiteral("File"); ec.displayName = QStringLiteral("c.bin"); ec.filePath = c;
+        ec.baseAddress = 0x200;
+        m_ctrl->copySavedSources({ ea, eb, ec }, 1);
+        m_doc->loadData(b);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+        m_ctrl->switchSource(2);                                // records the place left: b.bin, index 1
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 2);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("c.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0x200ULL);
+        QCOMPARE(m_ctrl->backEntries().last().activeSourceIdx, 1);
+        // Remove a source BEFORE the recorded one: the entry follows b.bin
+        // down to index 0, and Back lands on the SAME source.
+        m_ctrl->removeSavedSource(0);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);               // c.bin, shifted
+        QCOMPARE(m_ctrl->backEntries().last().activeSourceIdx, 0);
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("b.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QVERIFY(m_ctrl->canGoForward());
+        m_ctrl->goForward(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 1);
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("c.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0x200ULL);
+        // Remove the recorded source itself: Back keeps the current one,
+        // says so, and still restores the rest of the place (the base).
+        QCOMPARE(m_ctrl->backEntries().last().activeSourceIdx, 0);   // b.bin
+        m_ctrl->removeSavedSource(0);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);               // c.bin again, shifted
+        QCOMPARE(m_ctrl->backEntries().last().activeSourceIdx, kNavSourceRemoved);
+        QSignalSpy hint(m_ctrl, &RcxController::statusHint);
+        const Provider* prov = m_doc->provider.get();
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), 0);
+        QCOMPARE(m_doc->provider.get(), prov);                  // no source switch
+        QCOMPARE(m_doc->provider->name(), QStringLiteral("c.bin"));
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);                // the place's base came back
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QVERIFY(hint.count() >= 1);
+        QVERIFY2(hint.at(0).at(0).toString().contains(QStringLiteral("removed")),
+                 qPrintable(hint.at(0).at(0).toString()));
+        // Clear All forgets every recorded source the same way: Forward
+        // restores c.bin's place (base 0x200) under no source at all.
+        m_ctrl->clearSources();
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->forwardEntries().last().activeSourceIdx, kNavSourceRemoved);
+        hint.clear();
+        m_ctrl->goForward(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->activeSourceIndex(), -1);
+        QVERIFY(m_doc->provider->name().isEmpty());
+        QCOMPARE(m_doc->tree.baseAddress, 0x200ULL);
+        QVERIFY(hint.count() >= 1);
+    }
+
+    void testLineZeroRootPickRecordsHistory() {
+        // The command row's class chooser (TypePopupMode::Root) is a root
+        // pick like the bar's root.chev: the place left is recorded, so
+        // Back returns; re-picking the current root records nothing.
+        QVERIFY(m_ctrl->backEntries().isEmpty());
+        TypeEntry pick;
+        pick.entryKind   = TypeEntry::Composite;
+        pick.category    = TypeEntry::CatType;
+        pick.structId    = m_id.widget;
+        pick.displayName = QStringLiteral("QWidget");
+        m_ctrl->applyTypePopupResult(TypePopupMode::Root, -1, pick, pick.displayName);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
+        QVERIFY(m_ctrl->canGoBack());
+        QCOMPARE(m_ctrl->backEntries().size(), 1);
+        QCOMPARE(m_ctrl->backEntries().last().viewRootId, m_id.editor);
+        QVERIFY(m_editor->addressBar()->state().canBack);
+        m_ctrl->applyTypePopupResult(TypePopupMode::Root, -1, pick, pick.displayName);   // same root: nothing
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->backEntries().size(), 1);
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        QVERIFY(m_ctrl->canGoForward());
+    }
+
     void testStaleEntriesAreSkipped() {
         // The place an entry names must still exist: a deleted root leaves
         // a stale entry that Back steps over to the previous valid one, and
@@ -2857,7 +2970,8 @@ private slots:
         m_ctrl->deleteRootStruct(m_id.priv);                    // B's root is gone
         QApplication::processEvents();
         QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
-        QCOMPARE(m_ctrl->backEntries().size(), 2);              // still listed...
+        QCOMPARE(m_ctrl->backEntries().size(), 1);              // B is left out of the listing...
+        QCOMPARE(m_ctrl->backEntries().last().viewRootId, m_id.editor);
         QVERIFY(m_ctrl->canGoBack());                           // ...A is restorable
         m_ctrl->goBack(m_editor);
         QApplication::processEvents();
@@ -2877,6 +2991,37 @@ private slots:
         QApplication::processEvents();
         QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
         QVERIFY(m_ctrl->forwardEntries().isEmpty());
+    }
+
+    void testHistoryMenuRowsSkipStaleEntries() {
+        // A stale entry between two live ones: the menu lists only the live
+        // ones, nearest first, and a row's step count is what its pick
+        // walks — jumpToHistory discards the stale entry on the way, so an
+        // unfiltered listing put the far row one step short of its place
+        // (a pick beyond the stale row landed one place further).
+        AddressBar* bar = m_editor->addressBar();
+        jumpToDefinitionOf(m_id.vptr);                          // A: RcxEditor @ 0x0       (now: priv)
+        emit m_editor->rootPickRequested(m_id.widget);          // B: QWidgetPrivate @ 0x0  (now: widget)
+        QApplication::processEvents();
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));      // C: QWidget @ 0x0         (now: widget @ 0x40)
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->backEntries().size(), 3);
+        m_ctrl->deleteRootStruct(m_id.priv);                    // B's root is gone
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        QMenu* menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidget  @ 0x0"),
+                                                  QStringLiteral("RcxEditor  @ 0x0") }));
+        QCOMPARE(menu->actions()[0]->data().toInt(), -1);
+        QCOMPARE(menu->actions()[1]->data().toInt(), -2);
+        menu->actions()[1]->trigger();
+        closeMenuOn(bar, QStringLiteral("hist"), menu);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);            // the row named A and landed on A
+        QCOMPARE(m_doc->tree.baseAddress, 0ULL);
+        QVERIFY(m_ctrl->backEntries().isEmpty());
+        QCOMPARE(m_ctrl->forwardEntries().size(), 2);           // C and the place left; B discarded
     }
 
     void testOneGestureOneEntry() {
@@ -3406,6 +3551,17 @@ private slots:
         QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
         QVERIFY(bar1->state() == bar2->state());
         QCOMPARE((int)sci2->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), 0);
+        // The sender (pane A) scrolled to the restored hop's row: the entry
+        // was anchored on pane B's first visible row — the command row,
+        // which is no node — so the restore falls back to the deepest hop
+        // of the restored trail, `parent`.
+        const int parentLine = lineOf(m_id.parent);
+        QVERIFY(parentLine > 0);
+        const int lines1 = (int)sci1->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
+        const int onScreen1 = (int)sci1->SendScintilla(QsciScintillaBase::SCI_LINESONSCREEN);
+        const int maxFirst1 = qMax(0, lines1 - onScreen1);
+        QVERIFY2(maxFirst1 > 0, "pane A not short enough to scroll — the assertion below would be vacuous");
+        QCOMPARE((int)sci1->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), qMin(parentLine, maxFirst1));
     }
 };
 

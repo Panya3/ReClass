@@ -73,7 +73,7 @@ private slots:
     // ── Chevron span detection ──
 
     void testChevronSpanDetected() {
-        QString text = QStringLiteral("[\u25B8] 0x1000  struct Alpha {");
+        QString text = QStringLiteral("[\u25B8] struct Alpha {");
         ColumnSpan span = commandRowChevronSpan(text);
         QVERIFY(span.valid);
         QCOMPARE(span.start, 0);
@@ -90,13 +90,14 @@ private slots:
     // ── Existing spans unbroken by chevron prefix ──
 
     void testSpansWithPrefix() {
-        QString text = QStringLiteral("[\u25B8] 0x1000  struct Alpha {");
+        QString text = QStringLiteral("[\u25B8] struct Alpha {");
 
-        // No source span any more: the address follows the chevron directly.
-        ColumnSpan addr = commandRowAddrSpan(text);
-        QVERIFY(addr.valid);
-        QCOMPARE(addr.start, commandRowChevronSpan(text).end);
-        QCOMPARE(text.mid(addr.start, addr.end - addr.start), QStringLiteral("0x1000"));
+        // No source or address cell any more: the keyword follows the
+        // chevron directly.
+        ColumnSpan rootType = commandRowRootTypeSpan(text);
+        QVERIFY(rootType.valid);
+        QCOMPARE(rootType.start, commandRowChevronSpan(text).end);
+        QCOMPARE(text.mid(rootType.start, rootType.end - rootType.start), QStringLiteral("struct"));
 
         ColumnSpan rootName = commandRowRootNameSpan(text);
         QVERIFY(rootName.valid);

@@ -38,11 +38,6 @@ public:
     // call every tick.
     void setAddressBarState(const AddressBarState& s);
     AddressBar* addressBar() const { return m_addressBar; }
-    // Adapters kept until P6 for callers that only know the trail:
-    // setBreadcrumb() folds the crumbs into the bar's current state and
-    // breadcrumbBar() is the old name for addressBar().
-    void setBreadcrumb(const QVector<Crumb>& crumbs);
-    AddressBar* breadcrumbBar() const { return m_addressBar; }
 
     ViewState saveViewState() const;
     void restoreViewState(const ViewState& vs);
@@ -59,8 +54,9 @@ public:
     int currentNodeIndex() const;
     void scrollToNodeId(uint64_t nodeId);
     // Scroll a node's first display line flush to the TOP of the viewport
-    // (SCI_SETFIRSTVISIBLELINE) — used by breadcrumb drill/jump so the focused
-    // class header lands at the top. scrollToNodeId only ensure-visibles.
+    // (SCI_SETFIRSTVISIBLELINE) — used by the address bar's crumb click,
+    // sibling switch and history restore so the focused class header lands
+    // at the top. scrollToNodeId only ensure-visibles.
     void scrollNodeToTop(uint64_t nodeId);
     void smoothScrollToNodeId(uint64_t nodeId);
     void setFocusNode(uint64_t nodeId);
@@ -277,7 +273,7 @@ signals:
     void historyJumpRequested(int entry);
     void refreshRequested();                                  // source context menu
     // The recent menu's "Go to address…": MainWindow owns the Goto dialog,
-    // so this stays unconnected until main.cpp wires it (P6/P7).
+    // so this stays unconnected until main.cpp wires it.
     void gotoDialogRequested();
     // ── Byte-selection actions ──
     // Fired when the user invokes Ctrl+C / Ctrl+V / Delete with an active
@@ -674,8 +670,8 @@ private:
         None,        // padding, blanks, separators — nothing here
         FoldToggle,  // the ▸/▾ column on a fold head
         FooterPill,  // +1 / +10h / +100h / +1000h / +10 / Trim / Top
-        TypePicker,  // Type / PointerTarget / ArrayElementType / Source / chevron
-        TextEdit,    // Name / Value / BaseAddress / RootClassName / ArrayElementCount
+        TypePicker,  // Type / PointerTarget / ArrayElementType / chevron
+        TextEdit,    // Name / Value / RootClassName / ArrayElementCount
         HexByte,     // a byte cell in a hex preview row
         Chip,        // a LineChip (clickable or informational)
         Navigate,    // Ctrl held over a header type/name — opens in a new tab

@@ -83,7 +83,7 @@ inline int classIdx(const NodeTree& tree, uint64_t classId) {
     return idx >= 0 ? idx : firstRootStructIdx(tree);
 }
 // The field name a hop shows in a crumb and in the dotted path — the same
-// fallback pushBreadcrumb applies to a nameless pointer.
+// fallback the controller's addressBarState applies to a nameless pointer.
 inline QString hopFieldName(const Node& n) {
     return n.name.isEmpty() ? fmt::typeNameRaw(n.kind) : n.name;
 }

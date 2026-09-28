@@ -44,7 +44,7 @@ Theme fallbackTheme() {
 }
 
 // The strip's first ink lines up with every other strip in the window
-// (title label, breadcrumb, status) — one left edge down the whole app.
+// (title label, address bar, status) — one left edge down the whole app.
 constexpr int kLeftMargin   = kGutter;
 constexpr int kRightMargin  = 6;
 // Between panels, with the 1-device-px divider CENTRED in the gap.

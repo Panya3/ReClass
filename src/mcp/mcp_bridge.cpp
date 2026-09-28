@@ -2131,11 +2131,22 @@ QJsonObject McpBridge::toolStatusSet(const QJsonObject& args) {
     auto* tab = resolveTab(args);
 
     if (target == "commandRow" || target == "both") {
+        // Line 0 keeps its chevron (the view chooser still opens); the
+        // status text after it is inert — no span parser anchors on it.
+        // A newline would split the row into two lines and U+25BE was the
+        // old source-control anchor, so both are stripped: the status row
+        // must never grow a control of its own. The chevron is a char16_t
+        // escape — the UTF-8 byte escapes this used to carry became three
+        // Latin-1 code units inside QStringLiteral's u"" literal, not a ▸.
+        QString rowText = text;
+        rowText.remove(QChar(0x25BE));
+        rowText.remove(QLatin1Char('\n'));
+        rowText.remove(QLatin1Char('\r'));
         if (tab) {
             for (auto& pane : tab->panes) {
                 if (pane.editor) {
                     pane.editor->setCommandRowText(
-                        QStringLiteral("[\xE2\x96\xB8] [Claude: %1]").arg(text));
+                        QStringLiteral("[\u25B8] [Claude: %1]").arg(rowText));
                 }
             }
         }

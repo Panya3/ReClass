@@ -1791,15 +1791,19 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     // stripe under the bar. The band's own bottom hairline is the seam.
     layout->setSpacing(0);
 
-    // The address bar — source chip, base address and the drill-down trail —
-    // above the command row (Scintilla line 0). It is a real widget outside
-    // the Scintilla viewport, so unlike line 0 it never scrolls out of view.
-    // Always visible: with no drill it names the class in view. Its
-    // std::function callbacks are bridged to signals here; the controller
-    // connects those (crumbClicked → collapseToFocus, sourcePopupRequested
-    // → showSourcePopup, baseCommitRequested / recentPickRequested →
-    // rebaseTo, refreshRequested → refresh, navUpRequested → one crumb
-    // back; the rest as the phases behind P3 land).
+    // The address bar — Back / Forward / history / Up, the source chip, the
+    // base address and the drill-down trail — above the command row
+    // (Scintilla line 0). It is a real widget outside the Scintilla
+    // viewport, so unlike line 0 it never scrolls out of view. Always
+    // visible: with no drill it names the class in view. Its std::function
+    // callbacks are bridged to signals here; the controller connects those
+    // (crumbClicked → collapseToFocus, sourcePopupRequested →
+    // showSourcePopup, baseCommitRequested / recentPickRequested → rebaseTo,
+    // pathCommitRequested → navigateToDrillPath, siblingPickRequested →
+    // switchSibling, rootPickRequested → setViewRootId, navBack / Forward /
+    // Up / historyJumpRequested → the NavHistory walk, refreshRequested →
+    // refresh). gotoDialogRequested is the main window's (the Goto dialog
+    // lives there).
     m_addressBar = new AddressBar(this);
     {
         AddressBar::Callbacks cb;
@@ -2074,7 +2078,8 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         if (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite)
             QTimer::singleShot(0, this, &RcxEditor::validateEditLive);
 
-        // Live expression result popup (BaseAddress + value edits with operators)
+        // Live expression result popup (value edits with operators; the
+        // address bar's base edit draws its own preview)
         if (m_exprEvaluator)
             QTimer::singleShot(0, this, [this]() { updateExprResultPopup(); });
 
@@ -2466,13 +2471,6 @@ void RcxEditor::allocateMarginStyles() {
 
 void RcxEditor::setAddressBarState(const AddressBarState& s) {
     if (m_addressBar) m_addressBar->setState(s);
-}
-
-void RcxEditor::setBreadcrumb(const QVector<Crumb>& crumbs) {
-    if (!m_addressBar) return;
-    AddressBarState s = m_addressBar->state();
-    s.crumbs = crumbs;
-    m_addressBar->setState(s);
 }
 
 void RcxEditor::applyTheme(const Theme& theme) {
@@ -4919,32 +4917,24 @@ void RcxEditor::applyCommandRowPills() {
 
     // Line 0 is re-patched by setCommandRowText (SCI_REPLACETARGET), which
     // wipes indicators on it outside applyDocument's doc-wide clear — so this
-    // pass owns clearing and repainting every tone it sets on the row.
+    // pass owns clearing and repainting every tone the row can carry (the
+    // textDim tone is cleared too: the row sets none, and none may survive
+    // a patch from an earlier shape).
     clearIndicatorLine(IND_HEX_DIM, line);
     clearIndicatorLine(IND_HEX_TYPE, line);
     clearIndicatorLine(IND_CLASS_NAME, line);
 
-    // Dim the [▾] type-selector chevron
+    // Dim the [▸] type-selector chevron
     ColumnSpan chevron = commandRowChevronSpan(t);
     if (chevron.valid)
         fillIndicatorCols(IND_HEX_DIM, line, chevron.start, chevron.end);
 
-    // Base address — textDim, NOT textFaint. It is the editable cell on
-    // this row (click edits it in the address bar); painting it as
-    // furniture told the user it was decoration. The source label that
-    // used to sit before it moved to the bar's chip.
-    ColumnSpan addrSpan = commandRowAddrSpan(t);
-    if (addrSpan.valid)
-        fillIndicatorCols(IND_HEX_TYPE, line, addrSpan.start, addrSpan.end);
-
-    // Root class styling (type dim + class-name teal, no underline)
+    // Root class styling (type dim + class-name teal, no underline). The
+    // source label and the base address that used to sit between the
+    // chevron and the keyword are the address bar's now.
     ColumnSpan rt = commandRowRootTypeSpan(t);
-    if (rt.valid) {
+    if (rt.valid)
         fillIndicatorCols(IND_HEX_DIM, line, rt.start, rt.end);
-        int drop = t.indexOf(QChar(0x25BE), rt.start);
-        if (drop >= 0)
-            fillIndicatorCols(IND_HEX_DIM, line, drop, qMin(drop + 2, t.size()));
-    }
     ColumnSpan rn = commandRowRootNameSpan(t);
     if (rn.valid) {
         fillIndicatorCols(IND_CLASS_NAME, line, rn.start, rn.end);
@@ -4977,7 +4967,7 @@ RcxEditor::EndEditInfo RcxEditor::endInlineEdit() {
     // diff computes against a stale prefix and overwrites an unrelated line.
     //
     // Two anchor models:
-    //   • Value / BaseAddress: padding is always the trailing N spaces.
+    //   • Value: padding is always the trailing N spaces.
     //     User edits happen *inside* the value column (insert/replace shifts
     //     position but never count). Anchor = end-of-line; strip the last
     //     padBytes chars.
@@ -5190,18 +5180,16 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     const LineMeta* lm = metaForLine(line);
     if (!lm) return false;
 
-    // CommandRow: BaseAddress / Root class (type+name) editing
+    // CommandRow: the chevron and the root class (type+name) only
     if (lm->lineKind == LineKind::CommandRow) {
-        if (t != EditTarget::BaseAddress
-            && t != EditTarget::RootClassType && t != EditTarget::RootClassName
+        if (t != EditTarget::RootClassType && t != EditTarget::RootClassName
             && t != EditTarget::TypeSelector) return false;
         QString lineText = getLineText(m_sci, line);
         ColumnSpan s;
         if (t == EditTarget::TypeSelector)       s = commandRowChevronSpan(lineText);
-        else if (t == EditTarget::BaseAddress)   s = commandRowAddrSpan(lineText);
         else if (t == EditTarget::RootClassType) s = commandRowRootTypeSpan(lineText);
         else                                     s = commandRowRootNameSpan(lineText);
-        out = normalizeSpan(s, lineText, t, /*skipPrefixes=*/(t == EditTarget::BaseAddress));
+        out = normalizeSpan(s, lineText, t, /*skipPrefixes=*/false);
         if (lineTextOut) *lineTextOut = lineText;
         return out.valid;
     }
@@ -5236,7 +5224,6 @@ bool RcxEditor::resolvedSpanFor(int line, EditTarget t,
     case EditTarget::Name:        s = nameSpan(*lm, typeW, nameW); break;
     case EditTarget::Value:       s = narrowPtrValueSpan(*lm,
                                       valueSpan(*lm, textLen, typeW, nameW), lineText); break;
-    case EditTarget::BaseAddress: break;  // No longer on header lines
     case EditTarget::ArrayIndex:
     case EditTarget::ArrayCount:
         break;  // Array navigation removed
@@ -5351,13 +5338,11 @@ static bool hitTestTarget(QsciScintilla* sci,
         return s.valid && col >= s.start && col < s.end;
     };
 
-    // CommandRow: interactive chevron/ADDR + root class name. The source
-    // control is the address bar's chip now.
+    // CommandRow: the chevron and the root class name are its only targets.
+    // The source control and the base address are the address bar's.
     if (lm.lineKind == LineKind::CommandRow) {
         ColumnSpan chevron = commandRowChevronSpan(lineText);
         if (inSpan(chevron)) { outTarget = EditTarget::TypeSelector; outLine = line; return true; }
-        ColumnSpan as = commandRowAddrSpan(lineText);
-        if (inSpan(as)) { outTarget = EditTarget::BaseAddress; outLine = line; return true; }
 
         // RootClassType is no longer clickable — use right-click to convert
         ColumnSpan rns = commandRowRootNameSpan(lineText);
@@ -5516,7 +5501,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                 case EditTarget::Type:        raw = typeSpan(*lm, typeW); break;
                 case EditTarget::Name:        raw = nameSpan(*lm, typeW, nameW); break;
                 case EditTarget::Value:       raw = valueSpan(*lm, lineText.size(), typeW, nameW); break;
-                case EditTarget::BaseAddress: raw = commandRowAddrSpan(lineText); break;
                 case EditTarget::ArrayIndex:  raw = arrayIndexSpanFor(*lm, lineText); break;
                 case EditTarget::ArrayCount:  raw = arrayCountSpanFor(*lm, lineText); break;
                 case EditTarget::ArrayElementType:  raw = arrayElemTypeSpanFor(*lm, lineText); break;
@@ -5706,19 +5690,15 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
                     break;
                 }
             }
-            // CommandRow: try chevron/ADDR edit or consume
+            // CommandRow: the chevron opens the view chooser, the class
+            // name edits, everything else on the row is consumed. The base
+            // address is the bar's edit (never scrolls away, validates
+            // live, has the places menu) — it left this row.
             if (h.nodeId == kCommandRowId) {
                 int tLine, tCol; EditTarget t;
                 if (hitTestTarget(m_sci, m_meta, me->pos(), tLine, tCol, t)) {
                     if (t == EditTarget::TypeSelector)
                         emit typeSelectorRequested();
-                    else if (t == EditTarget::BaseAddress && m_addressBar)
-                        // One base-edit implementation: the bar's overlay
-                        // (never scrolls away, validates live, has the
-                        // places menu). The Scintilla path stays reachable
-                        // through beginInlineEdit() for its API and tests
-                        // until P7 demotes line 0.
-                        m_addressBar->beginBaseEdit();
                     else
                         beginInlineEdit(t, tLine, tCol);
                 }
@@ -5962,13 +5942,6 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         int line, tCol; EditTarget t;
         if (hitTestTarget(m_sci, m_meta, me->pos(), line, tCol, t)) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
-            // The address span edits in the bar (the same redirect the
-            // single press takes): a double-click used to slip past it and
-            // start the legacy Scintilla edit on the elided text.
-            if (t == EditTarget::BaseAddress && m_addressBar) {
-                m_addressBar->beginBaseEdit();
-                return true;
-            }
             // Narrow selection to this node before editing
             if (h.nodeId != 0 && h.nodeId != kCommandRowId)
                 emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
@@ -6763,12 +6736,11 @@ bool RcxEditor::handleEditKey(QKeyEvent* ke) {
         return true;
     case Qt::Key_V:
         if (ke->modifiers() & Qt::ControlModifier) {
-            // Sanitized paste: strip newlines (and backticks for base addresses)
+            // Sanitized paste: strip newlines (the bar's base edit strips
+            // its own backticks on commit, in rebaseTo)
             QString clip = QApplication::clipboard()->text();
             clip.remove('\n');
             clip.remove('\r');
-            if (m_editState.target == EditTarget::BaseAddress)
-                clip.remove('`');
             if (!clip.isEmpty()) {
                 QByteArray utf8 = clip.toUtf8();
                 m_sci->SendScintilla(QsciScintillaBase::SCI_REPLACESEL,
@@ -7114,10 +7086,10 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
     }
     auto* lm = metaForLine(line);
     if (!lm) return false;
-    // Allow nodeIdx=-1 only for CommandRow editing (command bar)
+    // Allow nodeIdx=-1 only for the CommandRow's root-class edits (the
+    // base address is the address bar's edit, not a Scintilla one)
     if (lm->nodeIdx < 0 && !(lm->lineKind == LineKind::CommandRow &&
-        (target == EditTarget::BaseAddress
-         || target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
+        (target == EditTarget::RootClassType || target == EditTarget::RootClassName)))
         return false;
     // Hex nodes: only Type is editable via normal flow (double-click, F2, Enter)
     // Exception: context-menu-initiated hex/ASCII edits bypass this via m_hexEditPending
@@ -7253,8 +7225,6 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
         ColumnSpan cs = commentSpanFor(*lm, 9999, lm->effectiveTypeW, lm->effectiveNameW);
         m_editState.commentCol = cs.valid ? cs.start : -1;
         m_editState.lastValidationOk = true;  // original value is always valid
-    } else if (target == EditTarget::BaseAddress) {
-        m_editState.commentCol = (int)lineText.size() + 2;  // after full command row content
     } else {
         m_editState.commentCol = -1;
     }
@@ -7268,11 +7238,10 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
 
     // For value/hex editing: extend line with trailing spaces for the edit comment area
     // (comment padding is no longer baked into every line to avoid unnecessary scroll width)
-    if ((target == EditTarget::Value || target == EditTarget::BaseAddress
-         || (isHexEdit && target == EditTarget::Name))
+    if ((target == EditTarget::Value || (isHexEdit && target == EditTarget::Name))
         && m_editState.commentCol >= 0) {
         int commentStart = m_editState.commentCol;
-        int commentWidth = (target == EditTarget::BaseAddress) ? 60 : kColComment;
+        int commentWidth = kColComment;
         int neededLen = commentStart + commentWidth;
         int currentLen = (int)lineText.size();
         if (currentLen < neededLen) {
@@ -7389,11 +7358,9 @@ bool RcxEditor::beginInlineEdit(EditTarget target, int line, int col) {
             setEditComment(QStringLiteral("Enter=Save Esc=Cancel"));
     } else if (target == EditTarget::Name && m_editState.hexOverwrite) {
         setEditComment(QStringLiteral("ASCII edit: Enter=Save Esc=Cancel"));
-    } else if (target == EditTarget::BaseAddress) {
-        // No inline hint — the hover tooltip already shows examples
     }
 
-    // Note: Type, ArrayElementType, PointerTarget, Source are handled by popups
+    // Note: Type, ArrayElementType, PointerTarget are handled by popups
     // and exit early above (never reach here).
     // Refresh hover cursor so value history popup appears with Set buttons immediately
     if (target == EditTarget::Value)
@@ -7700,11 +7667,9 @@ void RcxEditor::updatePointerTargetFilter() {
 void RcxEditor::paintEditableSpans(int line) {
     const LineMeta* lm = metaForLine(line);
     if (!lm) return;
-    // CommandRow: paint BaseAddress + root class name spans
+    // CommandRow: the root class name is its one text-editable span
     if (lm->lineKind == LineKind::CommandRow) {
         NormalizedSpan norm;
-        if (resolvedSpanFor(line, EditTarget::BaseAddress, norm))
-            fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
         // RootClassType no longer shown as editable — right-click conversion instead
         if (resolvedSpanFor(line, EditTarget::RootClassName, norm))
             fillIndicatorCols(IND_EDITABLE, line, norm.start, norm.end);
@@ -8374,18 +8339,6 @@ void RcxEditor::applyHoverCursor() {
                 && h.col >= span.start && h.col < span.end) {
                 QString tipTitle, tipBody;
                 switch (t) {
-                case EditTarget::BaseAddress:
-                    tipTitle = QStringLiteral("Base Address");
-                    tipBody = QStringLiteral(
-                        "0x7FF61234ABCD          hex address\n"
-                        "<app.exe>               module base\n"
-                        "<app.exe> + 0x1A0       module + offset\n"
-                        "[<app.exe> + 0x58]      follow pointer\n"
-                        "ntdll!SymbolName        PDB symbol\n"
-                        "\n"
-                        "Operators: + - * << >> & | ^\n"
-                        "All numbers are hexadecimal");
-                    break;
                 case EditTarget::RootClassName:
                     tipTitle = QStringLiteral("Class Name");
                     tipBody = QStringLiteral("Click to rename this type");
@@ -8528,9 +8481,7 @@ void RcxEditor::validateEditLive() {
     int editedLen = m_editState.original.size() + delta;
     QString text = (editedLen > 0)
         ? lineText.mid(m_editState.spanStart, editedLen).trimmed() : QString();
-    QString errorMsg = (m_editState.target == EditTarget::BaseAddress)
-        ? fmt::validateBaseAddress(text)
-        : fmt::validateValue(m_editState.editKind, text);
+    QString errorMsg = fmt::validateValue(m_editState.editKind, text);
 
     const LineMeta* lm = metaForLine(m_editState.line);
     const bool isSelected = lm && m_currentSelIds.contains(lm->nodeId);
@@ -8556,9 +8507,10 @@ void RcxEditor::validateEditLive() {
 
 void RcxEditor::updateExprResultPopup() {
     if (!m_editState.active || !m_exprEvaluator) return;
-    bool isAddr = (m_editState.target == EditTarget::BaseAddress);
-    bool isVal  = (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite);
-    if (!isAddr && !isVal) return;
+    // Value edits only: the address bar's base edit draws its own "→ 0x…"
+    // preview through the same evaluator.
+    const bool isVal = (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite);
+    if (!isVal) return;
 
     // Extract current edit text
     QString lineText = getLineText(m_sci, m_editState.line);
@@ -8568,7 +8520,7 @@ void RcxEditor::updateExprResultPopup() {
         ? lineText.mid(m_editState.spanStart, editedLen).trimmed() : QString();
 
     // Only show popup if text contains an operator (otherwise it's a plain value)
-    if (isVal && !text.contains('+') && !text.contains('-') && !text.contains('*')
+    if (!text.contains('+') && !text.contains('-') && !text.contains('*')
         && !text.contains('/') && !text.contains('<') && !text.contains('&')
         && !text.contains('|') && !text.contains('^') && !text.contains('~')) {
         if (m_exprResultLabel) m_exprResultLabel->hide();

@@ -59,6 +59,8 @@ static constexpr int kIndHexType   = 8;   // textDim  — hex type column + name
 static constexpr int kIndHexDim    = 9;   // textFaint — furniture only
 static constexpr int kIndZero      = 10;  // textMuted — ASCII column + 00 bytes
 static constexpr int kIndHoverSpan = 11;
+static constexpr int kIndClassName = 14;  // teal — the root class name on line 0
+static constexpr int kIndEditable  = 29;  // hidden bookkeeping: "this span edits"
 
 // Is indicator `ind` set on the character at (line, col)?
 static bool indAt(QsciScintilla* sci, int ind, int line, int col) {
@@ -531,23 +533,31 @@ private slots:
         QVERIFY(!m_editor->beginInlineEdit(EditTarget::Value, 0));
         QVERIFY(!m_editor->isEditing());
 
-        // Set CommandRow text with an ADDR value (simulates controller.updateCommandRow)
-        m_editor->setCommandRowText(
-            QStringLiteral("[\u25B8] 0xD87B5E5000"));
+        // The row is the class header alone (simulates controller.updateCommandRow)
+        m_editor->setCommandRowText(QStringLiteral("[\u25B8] struct _PEB64 {"));
+        QApplication::processEvents();
 
-        // BaseAddress should be ALLOWED on CommandRow (ADDR field)
-        bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
-        QVERIFY2(ok, "BaseAddress edit should be allowed on CommandRow");
+        // The class name is the row's one text edit
+        bool ok = m_editor->beginInlineEdit(EditTarget::RootClassName, 0);
+        QVERIFY2(ok, "RootClassName edit should be allowed on CommandRow");
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();
 
-        // There is no source control on the row any more (the address
-        // bar's chip owns it): no ▾ in the text, and the address cell
-        // starts right after the chevron — a click there is a base edit,
-        // never a source picker.
+        // No source control and no address cell (both are the address
+        // bar's): no ▾ and no hex in the text, the keyword starts where
+        // the chevron ends, and a click on the old address column — right
+        // after the chevron — starts nothing: the keyword is not clickable.
         const QString row = m_editor->scintilla()->text(0);
         QVERIFY(!row.contains(QChar(0x25BE)));
-        QCOMPARE(commandRowAddrSpan(row).start, commandRowChevronSpan(row).end);
+        QVERIFY(!row.contains(QStringLiteral("0x")));
+        const ColumnSpan chev = commandRowChevronSpan(row);
+        QCOMPARE(commandRowRootTypeSpan(row).start, chev.end);
+        QSignalSpy chooser(m_editor, &RcxEditor::typeSelectorRequested);
+        auto* sci = m_editor->scintilla();
+        sendLeftClick(sci->viewport(), colToViewport(sci, 0, chev.end + 1));
+        QApplication::processEvents();
+        QVERIFY2(!m_editor->isEditing(), "a click on the keyword column started an edit");
+        QCOMPARE(chooser.count(), 0);
     }
 
     // ── Test: inline edit lifecycle (begin → commit → re-edit) ──
@@ -1014,7 +1024,7 @@ private slots:
     }
 
     // ── Test: composed text does not contain "// base:" (moved to cmd bar) ──
-    void testBaseAddressDisplay() {
+    void testBaseAddressLeftTheDocument() {
         NodeTree tree = makeTestTree();
         tree.baseAddress = 0x10;
         BufferProvider prov = makeTestProvider();
@@ -1022,9 +1032,14 @@ private slots:
 
         m_editor->applyDocument(result);
 
-        // Root header is suppressed; verify no "// base:" anywhere in output
+        // Root header is suppressed; no "// base:" anywhere, and line 0 is
+        // the class header alone — the base address is the address bar's,
+        // it is printed nowhere in the document text.
         QVERIFY2(!result.text.contains("// base:"),
                  "Composed text should not contain '// base:' (consolidated into cmd bar)");
+        const QString line0 = result.text.left(result.text.indexOf(QLatin1Char('\n')));
+        QCOMPARE(line0, buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Untitled"), false));
+        QVERIFY(!line0.contains(QStringLiteral("0x")));
 
         // kFirstDataLine should be the first field (root header suppressed)
         const LineMeta* lm = m_editor->metaForLine(kFirstDataLine);
@@ -1034,14 +1049,14 @@ private slots:
         m_editor->applyDocument(m_result);
     }
 
-    // ── Test: CommandRow ADDR span is valid ──
-    void testBaseAddressSpan() {
+    // ── Test: the CommandRow root spans sit right after the chevron ──
+    void testCommandRowRootSpansFollowChevron() {
         m_editor->applyDocument(m_result);
 
-        // Set CommandRow text with ADDR value (simulates controller): the
-        // chevron, the address, no source label.
+        // The class header alone (simulates controller.updateCommandRow):
+        // chevron, keyword, name — no source label, no address.
         m_editor->setCommandRowText(
-            QStringLiteral("[\u25B8] 0xD87B5E5000"));
+            QStringLiteral("[\u25B8] struct _PEB64 {"));
 
         // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
@@ -1061,18 +1076,17 @@ private slots:
                 lineText.chop(1);
         }
 
-        // ADDR span should be valid (uses commandRowAddrSpan) and start
-        // right after the chevron — there is no ▾ to anchor on.
+        // No ▾ and no address: the keyword starts where the chevron ends
+        // and the name span reads the class name.
         QVERIFY(!lineText.contains(QChar(0x25BE)));
-        ColumnSpan as = commandRowAddrSpan(lineText);
-        QVERIFY2(as.valid, "ADDR span should be valid on CommandRow");
-        QVERIFY(as.start < as.end);
-        QCOMPARE(as.start, commandRowChevronSpan(lineText).end);
-
-        // The span should cover the hex address
-        QString spanText = lineText.mid(as.start, as.end - as.start);
-        QVERIFY2(spanText.contains("0x") || spanText.startsWith("0X"),
-                 qPrintable("Span should contain hex address, got: " + spanText));
+        QVERIFY(!lineText.contains(QStringLiteral("0x")));
+        ColumnSpan rt = commandRowRootTypeSpan(lineText);
+        QVERIFY2(rt.valid, "root type span should be valid on CommandRow");
+        QCOMPARE(rt.start, commandRowChevronSpan(lineText).end);
+        QCOMPARE(lineText.mid(rt.start, rt.end - rt.start), QStringLiteral("struct"));
+        ColumnSpan rn = commandRowRootNameSpan(lineText);
+        QVERIFY2(rn.valid, "root name span should be valid on CommandRow");
+        QCOMPARE(lineText.mid(rn.start, rn.end - rn.start), QStringLiteral("_PEB64"));
 
         m_editor->applyDocument(m_result);
     }
@@ -1124,19 +1138,24 @@ private slots:
     }
 
     // ── Test: base address edit begins on CommandRow (line 0) ──
-    void testBaseAddressEditBegins() {
+    void testBaseAddressEditNeverBeginsOnLineZero() {
         m_editor->applyDocument(m_result);
+        m_editor->setCommandRowText(QStringLiteral("[\u25B8] struct _PEB64 {"));
+        QApplication::processEvents();
 
-        // Set CommandRow text with ADDR value (simulates controller)
-        m_editor->setCommandRowText(
-            QStringLiteral("[\u25B8] 0xD87B5E5000"));
-
-        // Begin base address edit on line 0 (CommandRow ADDR field)
-        bool ok = m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
-        QVERIFY2(ok, "Should be able to begin base address edit on CommandRow");
+        // The base address edit is the address bar's; EditTarget::BaseAddress
+        // left with the cell. Line 0 accepts the root-class edits and
+        // refuses every other target.
+        for (EditTarget t : {EditTarget::Name, EditTarget::Type, EditTarget::Value,
+                             EditTarget::Comment, EditTarget::ArrayElementType,
+                             EditTarget::ArrayElementCount, EditTarget::PointerTarget,
+                             EditTarget::ArrayIndex, EditTarget::ArrayCount,
+                             EditTarget::TypeSelector}) {
+            QVERIFY2(!m_editor->beginInlineEdit(t, 0), "line 0 accepted a non-root edit target");
+            QVERIFY(!m_editor->isEditing());
+        }
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::RootClassName, 0));
         QVERIFY(m_editor->isEditing());
-
-        // Cancel and reset
         m_editor->cancelInlineEdit();
         m_editor->applyDocument(m_result);
     }
@@ -1318,7 +1337,7 @@ private slots:
 
         // Set CommandRow text with root class (simulates controller.updateCommandRow)
         m_editor->setCommandRowText(
-            QStringLiteral("[\u25B8] 0xD87B5E5000  struct _PEB64 {"));
+            QStringLiteral("[\u25B8] struct _PEB64 {"));
 
         // RootClassName should be allowed on CommandRow (line 0)
         bool ok = m_editor->beginInlineEdit(EditTarget::RootClassName, 0);
@@ -1333,7 +1352,7 @@ private slots:
 
         // Set CommandRow with root class
         m_editor->setCommandRowText(
-            QStringLiteral("[\u25B8] 0xD87B5E5000  struct _PEB64 {"));
+            QStringLiteral("[\u25B8] struct _PEB64 {"));
 
         // Line 0 is CommandRow
         const LineMeta* lm = m_editor->metaForLine(0);
@@ -1380,7 +1399,7 @@ private slots:
         m_editor->applyDocument(m_result);
 
         QString cmdText = QStringLiteral(
-            "[\u25B8] 0xD87B5E5000  struct _PEB64 {");
+            "[\u25B8] struct _PEB64 {");
         m_editor->setCommandRowText(cmdText);
         QApplication::processEvents();
 
@@ -1394,9 +1413,11 @@ private slots:
         while (lineText.endsWith('\n') || lineText.endsWith('\r'))
             lineText.chop(1);
 
-        ColumnSpan addrSpan = commandRowAddrSpan(lineText);
-        QVERIFY(addrSpan.valid);
-        int hoverCol = addrSpan.start + 1;
+        // The class name is the row's text edit (the address cell that
+        // used to be hovered here is the address bar's now).
+        ColumnSpan nameSpan = commandRowRootNameSpan(lineText);
+        QVERIFY(nameSpan.valid);
+        int hoverCol = nameSpan.start + 1;
 
         // Move mouse into position
         QPoint hoverPos = colToViewport(sci, 0, hoverCol);
@@ -1726,7 +1747,7 @@ private slots:
         m_editor->applyDocument(r1);
         m_editor->applyDocument(r1);
         m_editor->applySelectionOverlay(QSet<uint64_t>());
-        const QString real = QStringLiteral("[▸] 0x0  struct _PEB64 {");
+        const QString real = QStringLiteral("[▸] struct _PEB64 {");
         m_editor->setCommandRowText(real);
         QVERIFY(hasMark(0, M_CMD_ROW));
         QCOMPARE(cmdRowLeakLine(r1), -1);
@@ -1801,7 +1822,7 @@ private slots:
         ComposeResult r1 = compose(tree, prov);
         m_editor->applyDocument(r1);
         m_editor->applyDocument(r1);
-        const QString real = QStringLiteral("[▸] 0x0  struct _PEB64 {");
+        const QString real = QStringLiteral("[▸] struct _PEB64 {");
         m_editor->setCommandRowText(real);
 
         const int a = lineForAddr(r1, 0x010);   // ImageBaseAddress — above the patch
@@ -1870,7 +1891,7 @@ private slots:
         ComposeResult r1 = compose(tree, prov);
         m_editor->applyDocument(r1);
         m_editor->applyDocument(r1);
-        const QString real = QStringLiteral("[▸] 0x0  struct _PEB64 {");
+        const QString real = QStringLiteral("[▸] struct _PEB64 {");
         m_editor->setCommandRowText(real);
         QCOMPARE(lineText(0), real);
         const int lineCount = sci->lines();
@@ -3411,12 +3432,14 @@ private slots:
     int editSpanStart() { return m_editor->editSpanStart(); }
     int editSpanEnd()   { return m_editor->editEnd(); }
 
-    // Helper: begin BaseAddress edit with a specific command row text
-    bool beginAddrEdit(const QString& cmdText) {
+    // Helper: begin the root-class-name edit with a specific command row
+    // text. Line 0's one text edit — the keystroke rules below (clamps,
+    // Home/End, selection collapse, vertical keys) are exercised on it.
+    bool beginRootNameEdit(const QString& cmdText) {
         m_editor->applyDocument(m_result);
         m_editor->setCommandRowText(cmdText);
         QApplication::processEvents();
-        return m_editor->beginInlineEdit(EditTarget::BaseAddress, 0);
+        return m_editor->beginInlineEdit(EditTarget::RootClassName, 0);
     }
 
     // Helper: get line 0 text
@@ -3432,8 +3455,8 @@ private slots:
     }
 
     // ── Test: Left arrow stops at span start ──
-    void testAddrEditLeftArrowClampsAtStart() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditLeftArrowClampsAtStart() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int spanStart = editSpanStart();
 
         // Home to go to start
@@ -3458,8 +3481,8 @@ private slots:
     }
 
     // ── Test: Right arrow stops at span end ──
-    void testAddrEditRightArrowClampsAtEnd() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditRightArrowClampsAtEnd() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int spanEnd = editSpanEnd();
 
         // End to go to end
@@ -3484,8 +3507,8 @@ private slots:
     }
 
     // ── Test: Backspace stops at span start ──
-    void testAddrEditBackspaceStopsAtStart() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditBackspaceStopsAtStart() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int spanStart = editSpanStart();
 
         sendKey(Qt::Key_Home);
@@ -3505,8 +3528,8 @@ private slots:
     }
 
     // ── Test: Delete stops at span end ──
-    void testAddrEditDeleteStopsAtEnd() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditDeleteStopsAtEnd() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
 
         sendKey(Qt::Key_End);
 
@@ -3521,8 +3544,8 @@ private slots:
     }
 
     // ── Test: Home/End jump to span boundaries ──
-    void testAddrEditHomeEnd() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditHomeEnd() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int spanStart = editSpanStart();
         int spanEnd   = editSpanEnd();
 
@@ -3540,8 +3563,8 @@ private slots:
     }
 
     // ── Test: Typing characters stays within span ──
-    void testAddrEditTypingStaysInSpan() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditTypingStaysInSpan() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int spanStart = editSpanStart();
 
         // Select all and type replacement
@@ -3558,7 +3581,7 @@ private slots:
 
         // Verify the text in the span is what we typed
         QString lineText = getLine0();
-        ColumnSpan as = commandRowAddrSpan(lineText);
+        ColumnSpan as = commandRowRootNameSpan(lineText);
         QVERIFY(as.valid);
         QString spanText = lineText.mid(as.start, as.end - as.start).trimmed();
         QVERIFY2(spanText.contains("0x8+0x8"),
@@ -3569,8 +3592,8 @@ private slots:
     }
 
     // ── Test: Click outside edit span during edit commits/cancels ──
-    void testAddrEditClickOutsideCommits() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditClickOutsideCommits() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         QVERIFY(m_editor->isEditing());
 
         // Click on a data line (well outside command row)
@@ -3586,8 +3609,8 @@ private slots:
     }
 
     // ── Test: Escape cancels edit without changing text ──
-    void testAddrEditEscapeCancels() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditEscapeCancels() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         QVERIFY(m_editor->isEditing());
 
         // Type something
@@ -3604,8 +3627,8 @@ private slots:
     }
 
     // ── Test: Enter commits edit ──
-    void testAddrEditEnterCommits() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditEnterCommits() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         QVERIFY(m_editor->isEditing());
 
         QSignalSpy commitSpy(m_editor, &RcxEditor::inlineEditCommitted);
@@ -3621,30 +3644,9 @@ private slots:
         m_editor->applyDocument(m_result);
     }
 
-    // ── Test: Formula address span includes full formula ──
-    void testAddrEditFormulaSpan() {
-        // Set a formula-style command row
-        m_editor->applyDocument(m_result);
-        m_editor->setCommandRowText(
-            QStringLiteral("[\u25B8] <REECLASS.exe>+0x8  class Foo {"));
-        QApplication::processEvents();
-
-        QString lineText = getLine0();
-        ColumnSpan as = commandRowAddrSpan(lineText);
-        QVERIFY2(as.valid, "Formula ADDR span should be valid");
-
-        QString spanText = lineText.mid(as.start, as.end - as.start);
-        QVERIFY2(spanText.contains("<REECLASS.exe>"),
-                 qPrintable("Formula span should include module ref, got: " + spanText));
-        QVERIFY2(spanText.contains("+0x8"),
-                 qPrintable("Formula span should include offset, got: " + spanText));
-
-        m_editor->applyDocument(m_result);
-    }
-
     // ── Test: Up/Down/PageUp/PageDown blocked during edit ──
-    void testAddrEditVerticalKeysBlocked() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditVerticalKeysBlocked() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int line, col;
 
         getCursor(line, col);
@@ -3671,16 +3673,17 @@ private slots:
     }
 
     // ── Test: Typing at end doesn't leak into surrounding text ──
-    void testAddrEditNoLeakRight() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0x10  class Foo {")));
+    void testRootNameEditNoLeakRight() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] class Foo {")));
 
         // Go to end and type characters
         sendKey(Qt::Key_End);
         typeText("AB");
 
-        // Verify "class Foo" is still intact after the address
+        // Verify the keyword and the brace are still intact around the name
         QString lineText = getLine0();
-        QVERIFY2(lineText.contains("class") && lineText.contains("Foo"),
+        QVERIFY2(lineText.startsWith(QStringLiteral("[\u25B8] class Foo"))
+                     && lineText.endsWith(QStringLiteral("AB {")),
                  qPrintable("Root class should be intact, got: " + lineText));
 
         // Verify cursor is still within span
@@ -3695,8 +3698,8 @@ private slots:
     }
 
     // ── Test: Selection + Right collapses to right end naturally ──
-    void testAddrEditSelectionCollapseRight() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditSelectionCollapseRight() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int start = editSpanStart();
         int end   = editSpanEnd();
 
@@ -3717,8 +3720,8 @@ private slots:
     }
 
     // ── Test: Selection + Left collapses to left end naturally ──
-    void testAddrEditSelectionCollapseLeft() {
-        QVERIFY(beginAddrEdit(QStringLiteral("[\u25B8] 0xABCD1234")));
+    void testRootNameEditSelectionCollapseLeft() {
+        QVERIFY(beginRootNameEdit(QStringLiteral("[\u25B8] struct ABCD1234 {")));
         int start = editSpanStart();
         QVERIFY(m_editor->isEditing());
 
@@ -4335,39 +4338,80 @@ private slots:
 
     // ══ Command row (P1 #24) ════════════════════════════════════════════
 
-    void testCommandRowAddressIsNotFaint() {
+    // The row is the class header: the chevron, the keyword and the brace
+    // are furniture (textFaint), the class name is the teal editable name,
+    // and nothing on the row takes the textDim tone the address cell used
+    // to carry — there is no address cell.
+    void testCommandRowTones() {
         m_editor->applyDocument(m_result);
         auto* sci = m_editor->scintilla();
-        const QString cmd =
-            QStringLiteral("[\u25B8] 0xD87B5E5000  struct _PEB64 {");
+        const QString cmd = QStringLiteral("[\u25B8] struct _PEB64 {");
         m_editor->setCommandRowText(cmd);
 
         const QString t = sci->text(0);
-        ColumnSpan addr = commandRowAddrSpan(t);
-        QVERIFY(addr.valid);
-        QCOMPARE(addr.start, commandRowChevronSpan(t).end);   // no source label before it
+        QVERIFY(!t.contains(QStringLiteral("0x")));
+        const ColumnSpan chev = commandRowChevronSpan(t);
+        const ColumnSpan rt = commandRowRootTypeSpan(t);
+        const ColumnSpan rn = commandRowRootNameSpan(t);
+        QVERIFY(chev.valid && rt.valid && rn.valid);
+        QCOMPARE(rt.start, chev.end);   // nothing sits between the chevron and the keyword
 
-        // The address is editable (click = base edit in the bar), so it
-        // reads at textDim, not as furniture.
-        QVERIFY2(indAt(sci, kIndHexType, 0, addr.start),
-                 "base address is not painted at the type tone");
-        QVERIFY2(!indAt(sci, kIndHexDim, 0, addr.start),
-                 "base address is still faint");
-
-        // The chevron and the trailing brace stay furniture.
-        ColumnSpan chev = commandRowChevronSpan(t);
-        if (chev.valid)
-            QVERIFY2(indAt(sci, kIndHexDim, 0, chev.start),
-                     "the [\u25B8] chevron stopped being furniture");
+        QVERIFY2(indAt(sci, kIndHexDim, 0, chev.start),
+                 "the [\u25B8] chevron stopped being furniture");
+        QVERIFY2(indAt(sci, kIndHexDim, 0, rt.start),
+                 "the keyword stopped being furniture");
+        QVERIFY2(indAt(sci, kIndClassName, 0, rn.start),
+                 "the class name lost its teal");
+        QVERIFY2(!indAt(sci, kIndHexDim, 0, rn.start),
+                 "the class name is painted as furniture");
         const int brace = t.lastIndexOf(QLatin1Char('{'));
         QVERIFY(brace > 0);
         QVERIFY2(indAt(sci, kIndHexDim, 0, brace),
                  "the trailing { stopped being furniture");
+        for (int c = 0; c < brace; ++c)
+            QVERIFY2(!indAt(sci, kIndHexType, 0, c),
+                     qPrintable(QString("textDim tone at col %1 — the row has no address cell").arg(c)));
 
         // …and it all survives the SCI_REPLACETARGET that rewrites line 0.
         m_editor->setCommandRowText(cmd + QStringLiteral(" "));
-        QVERIFY2(indAt(sci, kIndHexType, 0, addr.start),
+        QVERIFY2(indAt(sci, kIndClassName, 0, rn.start),
                  "command-row tone lost after a setCommandRowText patch");
+        QVERIFY(!indAt(sci, kIndHexType, 0, rn.start));
+    }
+
+    // The MCP status tool writes "[▸] [Claude: text]" onto line 0. With no
+    // address cell left there is nothing for a span parser to anchor on:
+    // the text is not tinted editable, and a click on it starts nothing —
+    // even when the text carries the old source-control glyph or a hex
+    // number where the address cell used to be.
+    void testStatusRowIsInert() {
+        m_editor->applyDocument(m_result);
+        auto* sci = m_editor->scintilla();
+        for (const QString& status : {QStringLiteral("[\u25B8] [Claude: rebased to 0x1000]"),
+                                      QStringLiteral("[\u25B8] [Claude: 'game.exe'\u25BE 0x1000]")}) {
+            m_editor->setCommandRowText(status);
+            QApplication::processEvents();
+            const QString t = sci->text(0);
+            QVERIFY2(!commandRowRootNameSpan(t).valid, qPrintable(t));
+            const int addr = t.indexOf(QStringLiteral("0x1000"));
+            QVERIFY(addr > 0);
+            const int textEnd = t.indexOf(QLatin1Char(']'), addr);
+            QVERIFY(textEnd > addr);
+            for (int c = commandRowChevronSpan(t).end; c <= textEnd; ++c) {
+                QVERIFY2(!indAt(sci, kIndEditable, 0, c),
+                         qPrintable(QString("status text marked editable at col %1: %2").arg(c).arg(t)));
+                QVERIFY2(!indAt(sci, kIndHexType, 0, c),
+                         qPrintable(QString("status text tinted textDim at col %1: %2").arg(c).arg(t)));
+                QVERIFY2(!indAt(sci, kIndClassName, 0, c),
+                         qPrintable(QString("status text tinted as a class name at col %1: %2").arg(c).arg(t)));
+            }
+            QSignalSpy chooser(m_editor, &RcxEditor::typeSelectorRequested);
+            sendLeftClick(sci->viewport(), colToViewport(sci, 0, addr + 2));
+            QApplication::processEvents();
+            QVERIFY2(!m_editor->isEditing(), "a click on the status text started an edit");
+            QCOMPARE(chooser.count(), 0);
+        }
+        m_editor->applyDocument(m_result);
     }
 
     // The base address is printed IN the command row, so repeating it in the
@@ -4473,7 +4517,7 @@ private slots:
                             this, [&last](const QString& t) { last = t; });
 
         const QString cmd = QStringLiteral(
-            "[\u25B8] 0xD87B5E5000  struct _PEB64 {");
+            "[\u25B8] struct _PEB64 {");
         m_editor->applyDocument(m_result);
         m_editor->setCommandRowText(cmd);
         QVERIFY(!last.isEmpty());
@@ -4482,7 +4526,7 @@ private slots:
         // …and it stays real across a plain refresh (the patch path keeps
         // line 0, so the mirror must not fall back to the placeholder).
         m_editor->applyDocument(m_result);
-        QVERIFY2(!last.startsWith(QStringLiteral("[\u25B8] 0x0  struct Untitled")),
+        QVERIFY2(!last.startsWith(QStringLiteral("[\u25B8] struct Untitled")),
                  "documentApplied fell back to compose's placeholder row");
         QCOMPARE(last.left(last.indexOf(QLatin1Char('\n'))), cmd);
 

@@ -1452,9 +1452,9 @@ void composeNode(ComposeState& state, const NodeTree& tree,
                     pushPtrChip(ChipKind::Comment, commentText,
                                 [](LineChip&) {});
                 }
-                // Breadcrumb drilling is click-driven (selecting a typed
-                // pointer or any row inside its inline expansion adds it to the
-                // breadcrumb) — no trailing affordance glyph on the row.
+                // Trail drilling is click-driven (selecting a typed pointer
+                // or any row inside its inline expansion adds it to the
+                // address bar's trail) — no trailing affordance glyph on the row.
                 if (state.braceWrap && !effectiveCollapsed && ptrText.endsWith(QChar('{'))) {
                     ptrText.chop(1);
                     while (ptrText.endsWith(' ')) ptrText.chop(1);
@@ -1791,13 +1791,14 @@ ComposeResult compose(const NodeTree& tree, const Provider& prov, uint64_t viewR
     }
     }  // end PROFILE_SCOPE("compose.widths")
 
-    // Emit CommandRow as line 0 (chevron + base address + root class type + name)
+    // Emit CommandRow as line 0 (chevron + root class type + name).
     // Placeholder shown only until controller.updateCommandRow rewrites
-    // it with the real base address / class name — the same shape
+    // it with the real class keyword / name — the same shape
     // buildCommandRowText (core.h) produces, so the span parsers read it
     // the same way. "Untitled" matches MainWindow::rootName's empty-tree
-    // fallback at main.cpp:2554.
-    const QString cmdRowText = QStringLiteral("[\u25B8] 0x0  struct Untitled {");
+    // fallback at main.cpp:2554. The base address is the address bar's,
+    // not this row's.
+    const QString cmdRowText = QStringLiteral("[\u25B8] struct Untitled {");
     {
         LineMeta lm;
         lm.nodeIdx   = -1;

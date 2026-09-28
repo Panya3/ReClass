@@ -84,7 +84,7 @@ namespace {
 // The brand is chrome, so it is the chrome type size (10 pt DemiBold), not a
 // hand-set 12 PIXEL bold that ignored the app font and grew/shrank with the
 // DPI independently of the menus beside it. `kGutter` is the same left edge
-// the ribbon, breadcrumb and status bar start their ink on.
+// the ribbon, address bar and status bar start their ink on.
 QString appLabelSheet(const QColor& text) {
     return QStringLiteral("QLabel { color: %1; font-family: 'JetBrains Mono'; "
                           "font-size: 10pt; font-weight: 600; padding-left: %2px; }")

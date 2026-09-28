@@ -12,7 +12,7 @@ namespace rcx {
 
 // ── Shared chrome metrics ──
 // The first ink of every horizontal strip (title label, ribbon tabs and
-// panels, breadcrumb, pane tabs, status text, doc-tab icon pad) starts this
+// panels, address bar, pane tabs, status text, doc-tab icon pad) starts this
 // many logical px from the strip's left edge so the left margin reads as ONE
 // line down the window instead of five slightly different ones.
 inline constexpr int kGutter = 8;

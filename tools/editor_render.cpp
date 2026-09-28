@@ -65,7 +65,7 @@ static QByteArray buildBuffer() {
     return data;
 }
 
-// Tutorial-like tree for the breadcrumb "drill" mode: a root class RcxEditor
+// Tutorial-like tree for the address-bar "drill" mode: a root class RcxEditor
 // with a drillable __vptr (Pointer64, refId → a QWidgetVTable struct of named
 // FuncPtr64 slots) plus a non-drillable d_ptr and some hex fields.
 static NodeTree buildDrillTree() {
@@ -265,11 +265,12 @@ int main(int argc, char** argv) {
     if (mode == QStringLiteral("drill")) {
         // Address-bar proof: swap in the tutorial-like tree, view RcxEditor,
         // expand __vptr inline, then CLICK it (the click-driven trail adds
-        // it). The grab shows the always-visible bar with its trail grown to
-        // the dotted production shape "RcxEditor.__vptr › QWidgetVTable"
-        // (ancestor = class.field, deepest = bare class), the vtable expanded
-        // inline, and the fnptr rows (single address). Prints the focus path
-        // for asserting.
+        // it). The grab shows the always-visible bar — source chip, base,
+        // and the trail grown to the dotted production shape
+        // "RcxEditor.__vptr › QWidgetVTable" (ancestor = class.field,
+        // deepest = bare class) — the vtable expanded inline, and the fnptr
+        // rows (single address). Prints the crumbs with their addresses,
+        // the focus path and the view root for asserting.
         doc->tree = buildDrillTree();
         uint64_t rootId = 0, vptrId = 0;
         for (const auto& n : doc->tree.nodes) {
@@ -290,8 +291,12 @@ int main(int argc, char** argv) {
         app.processEvents();
         QStringList fp;
         for (uint64_t id : ctrl->focusPath()) fp << QString::number(id);
-        std::printf("drill: focusPath=[%s] viewRoot=%llu\n",
-                    qPrintable(fp.join(',')), (unsigned long long)ctrl->viewRootId());
+        QStringList cr;
+        for (const Crumb& c : editor->addressBar()->state().crumbs)
+            cr << QStringLiteral("%1@0x%2").arg(c.label, QString::number(c.address, 16).toUpper());
+        std::printf("drill: crumbs=[%s] focusPath=[%s] viewRoot=%llu\n",
+                    qPrintable(cr.join(',')), qPrintable(fp.join(',')),
+                    (unsigned long long)ctrl->viewRootId());
         std::fflush(stdout);
         editor->grab().save(out);
         // Also grab just the address bar, scaled 4×, to inspect the crumb

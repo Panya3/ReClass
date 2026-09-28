@@ -300,6 +300,54 @@ private slots:
         QVERIFY(!h2.canBack());                      // the stale entry is gone
     }
 
+    void testForgetSourceRemapsBothStacks() {
+        // An entry's activeSourceIdx is a raw index into the controller's
+        // saved-source list; removing a source shifts the later ones, so the
+        // history follows — or an old entry restores whichever source slid
+        // into the removed slot. Both stacks; -1 (no source) is left alone.
+        auto at = [](uint64_t root, int src) { NavEntry e = place(root); e.activeSourceIdx = src; return e; };
+        auto any = [](const NavEntry&) { return true; };
+        NavHistory h;
+        h.push(at(1, 0));
+        h.push(at(2, 1));
+        h.push(at(3, 2));
+        h.push(at(4, -1));
+        QVERIFY(h.back(at(5, 2), any).has_value());       // back [1@0 2@1 3@2], forward [5@2]
+        h.forgetSource(1);
+        QCOMPARE(h.backEntries().size(), 3);
+        QCOMPARE(h.backEntries()[0].activeSourceIdx, 0);               // before the slot: unchanged
+        QCOMPARE(h.backEntries()[1].activeSourceIdx, kNavSourceRemoved);
+        QCOMPARE(h.backEntries()[2].activeSourceIdx, 1);               // after it: shifted down
+        QCOMPARE(h.forwardEntries().size(), 1);
+        QCOMPARE(h.forwardEntries()[0].activeSourceIdx, 1);
+        h.forgetSource(-1);                                            // not an index: no-op
+        QCOMPARE(h.backEntries()[2].activeSourceIdx, 1);
+        // A removed source stays removed through a later removal below it.
+        h.forgetSource(0);
+        QCOMPARE(h.backEntries()[0].activeSourceIdx, kNavSourceRemoved);
+        QCOMPARE(h.backEntries()[1].activeSourceIdx, kNavSourceRemoved);
+        QCOMPARE(h.backEntries()[2].activeSourceIdx, 0);
+        QCOMPARE(h.forwardEntries()[0].activeSourceIdx, 0);
+        // The sentinel is not -1: "no source" and "source gone" restore
+        // differently (silently / with a hint), and are different places.
+        QVERIFY(kNavSourceRemoved != -1);
+        QVERIFY(!at(1, kNavSourceRemoved).samePlace(at(1, -1)));
+    }
+
+    void testForgetAllSourcesKeepsNoSourceEntries() {
+        auto at = [](uint64_t root, int src) { NavEntry e = place(root); e.activeSourceIdx = src; return e; };
+        auto any = [](const NavEntry&) { return true; };
+        NavHistory h;
+        h.push(at(1, 0));
+        h.push(at(2, -1));
+        h.push(at(3, 4));
+        QVERIFY(h.back(at(9, 4), any).has_value());       // back [1@0 2@-1], forward [9@4]
+        h.forgetAllSources();
+        QCOMPARE(h.backEntries()[0].activeSourceIdx, kNavSourceRemoved);
+        QCOMPARE(h.backEntries()[1].activeSourceIdx, -1);
+        QCOMPARE(h.forwardEntries()[0].activeSourceIdx, kNavSourceRemoved);
+    }
+
     void testNavEntryValidAgainstTree() {
         NodeTree tree; Ids id = buildChain(tree);
         QVERIFY(navEntryValid(tree, place(id.editor, { id.vptr, id.parent })));

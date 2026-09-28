@@ -84,7 +84,7 @@ inline QColor menuBarColor(const Theme& t) {
 }
 
 // Seam colour for every 1-px line that touches the document: the editor /
-// Code container outline, the doc-tab and breadcrumb bottoms, the pane-tab
+// Code container outline, the doc-tab and address-bar bottoms, the pane-tab
 // and status-bar tops, dock-header bottoms. At full theme.border those lines
 // compete with the strip hairlines and the panes read as a stack of parallel
 // lines; blended 35% toward the editor paper they read as seams between

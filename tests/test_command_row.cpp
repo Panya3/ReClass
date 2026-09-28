@@ -8,11 +8,14 @@ using namespace rcx;
 // builds it — through buildCommandRowText — parsed back through the SAME
 // span functions the editor's hit test, pills and hover read it with. No
 // hand copy of the format lives here: a change to the builder or to a
-// parser fails these, not a stale replica of them.
+// parser fails these, not a stale replica of them. test_breadcrumb holds
+// the other end of the equation: a live controller's line 0 equals the
+// builder's output, and stays so when the base changes.
 //
-// Row shape: "[▸] <address>  <keyword> <ClassName> {". The source control
-// ('name'▾) moved to the address bar's chip; the address cell stays until
-// P7 demotes the row to the class header alone.
+// Row shape: "[▸] <keyword> <ClassName> {" — the class header alone. The
+// source control and the base address are the address bar's; nothing sits
+// between the chevron and the keyword any more, so nothing there is left
+// to parse.
 
 namespace {
 
@@ -20,21 +23,19 @@ QString spanText(const QString& row, const ColumnSpan& s) {
     return s.valid ? row.mid(s.start, s.end - s.start) : QString();
 }
 
-// Parse a built row back: the address cell must follow the chevron directly
-// (nothing sits between them any more) and read as `addr`; the root spans
-// must read as the keyword and the class name.
-void checkRow(const QString& row, const QString& addr, const QString& keyword,
-              const QString& className) {
-    QVERIFY2(!row.contains(QChar(0x25BE)), qPrintable(row));   // no source control, no ▾
+// Parse a built row back: no source control, no address cell, the keyword
+// right after the chevron, the root spans reading as keyword and name.
+void checkRow(const QString& row, const QString& keyword, const QString& className) {
+    QVERIFY2(!row.contains(QChar(0x25BE)), qPrintable(row));              // no source control
+    QVERIFY2(!row.contains(QStringLiteral("0x")), qPrintable(row));        // no address cell
     const ColumnSpan chev = commandRowChevronSpan(row);
     QVERIFY(chev.valid);
     QCOMPARE(chev.start, 0);
     QCOMPARE(chev.end, 4);
-    const ColumnSpan as = commandRowAddrSpan(row);
-    QVERIFY2(as.valid, qPrintable(row));
-    QCOMPARE(as.start, chev.end);
-    QCOMPARE(spanText(row, as), addr);
-    QCOMPARE(spanText(row, commandRowRootTypeSpan(row)), keyword);
+    const ColumnSpan rt = commandRowRootTypeSpan(row);
+    QVERIFY2(rt.valid, qPrintable(row));
+    QCOMPARE(rt.start, chev.end);
+    QCOMPARE(spanText(row, rt), keyword);
     QCOMPARE(spanText(row, commandRowRootNameSpan(row)), className);
 }
 
@@ -49,126 +50,100 @@ private slots:
     // The built row
     // ---------------------------------------------------------------
 
-    void row_literalAddress() {
-        const QString row = buildCommandRowText(QStringLiteral("0x140000000"), QStringLiteral("struct"),
-                                                QStringLiteral("Player"), false);
-        QCOMPARE(row, QStringLiteral("[▸] 0x140000000  struct Player {"));
-        checkRow(row, QStringLiteral("0x140000000"), QStringLiteral("struct"), QStringLiteral("Player"));
+    void row_structHeader() {
+        const QString row = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Player"), false);
+        QCOMPARE(row, QStringLiteral("[▸] struct Player {"));
+        checkRow(row, QStringLiteral("struct"), QStringLiteral("Player"));
     }
 
-    void row_zeroBaseIsComposePlaceholderShape() {
+    void row_untitledIsComposePlaceholderShape() {
         // compose.cpp's line-0 placeholder is this exact string; test_compose
         // checks the other side of the equation against compose() itself.
-        const QString row = buildCommandRowText(QStringLiteral("0x0"), QStringLiteral("struct"),
-                                                QStringLiteral("Untitled"), false);
-        QCOMPARE(row, QStringLiteral("[▸] 0x0  struct Untitled {"));
-        checkRow(row, QStringLiteral("0x0"), QStringLiteral("struct"), QStringLiteral("Untitled"));
+        const QString row = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Untitled"), false);
+        QCOMPARE(row, QStringLiteral("[▸] struct Untitled {"));
+        checkRow(row, QStringLiteral("struct"), QStringLiteral("Untitled"));
     }
 
-    void row_formulaStartingWithAngle() {
-        const QString f = QStringLiteral("<game.exe>+0x40");
-        const QString row = buildCommandRowText(f, QStringLiteral("class"), QStringLiteral("Foo"), false);
-        QCOMPARE(row, QStringLiteral("[▸] <game.exe>+0x40  class Foo {"));
-        checkRow(row, f, QStringLiteral("class"), QStringLiteral("Foo"));
-    }
-
-    void row_formulaStartingWithBracket() {
-        const QString f = QStringLiteral("[<game.exe>+0x58]");
-        const QString row = buildCommandRowText(f, QStringLiteral("struct"), QStringLiteral("Foo"), false);
-        checkRow(row, f, QStringLiteral("struct"), QStringLiteral("Foo"));
-    }
-
-    void row_bareIdentifierFormulaIsSpannedWhole() {
-        // The defect: "game.exe+0x40" used to be spanned from its "0x", so a
-        // click edited "0x40" and the module was lost on commit.
-        const QString f = QStringLiteral("game.exe+0x40");
-        const QString row = buildCommandRowText(f, QStringLiteral("struct"), QStringLiteral("Foo"), false);
-        checkRow(row, f, QStringLiteral("struct"), QStringLiteral("Foo"));
-        // A symbol, and a formula with spaces, read the same way.
-        const QString sym = QStringLiteral("ntdll!LdrpHeap + 8");
-        checkRow(buildCommandRowText(sym, QStringLiteral("struct"), QStringLiteral("Foo"), false),
-                 sym, QStringLiteral("struct"), QStringLiteral("Foo"));
+    void row_classAndEnumKeywords() {
+        const QString cls = buildCommandRowText(QStringLiteral("class"), QStringLiteral("Foo"), false);
+        QCOMPARE(cls, QStringLiteral("[▸] class Foo {"));
+        checkRow(cls, QStringLiteral("class"), QStringLiteral("Foo"));
+        const QString en = buildCommandRowText(QStringLiteral("enum"), QStringLiteral("Color"), false);
+        QCOMPARE(en, QStringLiteral("[▸] enum Color {"));
+        checkRow(en, QStringLiteral("enum"), QStringLiteral("Color"));
     }
 
     void row_braceWrapOnAndOff() {
-        const QString off = buildCommandRowText(QStringLiteral("0x10"), QStringLiteral("struct"),
-                                                QStringLiteral("Player"), false);
-        const QString on  = buildCommandRowText(QStringLiteral("0x10"), QStringLiteral("struct"),
-                                                QStringLiteral("Player"), true);
-        QCOMPARE(off, QStringLiteral("[▸] 0x10  struct Player {"));
-        QCOMPARE(on,  QStringLiteral("[▸] 0x10  struct Player"));
-        checkRow(off, QStringLiteral("0x10"), QStringLiteral("struct"), QStringLiteral("Player"));
-        checkRow(on,  QStringLiteral("0x10"), QStringLiteral("struct"), QStringLiteral("Player"));
+        const QString off = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Player"), false);
+        const QString on  = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Player"), true);
+        QCOMPARE(off, QStringLiteral("[▸] struct Player {"));
+        QCOMPARE(on,  QStringLiteral("[▸] struct Player"));
+        checkRow(off, QStringLiteral("struct"), QStringLiteral("Player"));
+        checkRow(on,  QStringLiteral("struct"), QStringLiteral("Player"));
     }
 
-    void row_enumKeyword() {
-        const QString row = buildCommandRowText(QStringLiteral("0x20"), QStringLiteral("enum"),
-                                                QStringLiteral("Color"), false);
-        checkRow(row, QStringLiteral("0x20"), QStringLiteral("enum"), QStringLiteral("Color"));
+    void row_nameThatContainsAKeyword() {
+        // The root parsers anchor on the LAST whole-word keyword, so a class
+        // name built from one still reads whole.
+        for (const QString& name : {QStringLiteral("StructOfClass"), QStringLiteral("my_struct_view"),
+                                    QStringLiteral("enum_class_t"), QStringLiteral("_PEB64")}) {
+            const QString row = buildCommandRowText(QStringLiteral("struct"), name, false);
+            checkRow(row, QStringLiteral("struct"), name);
+        }
     }
 
-    void row_elidedAddress() {
-        // 24 chars fit as they are; the 25th turns the cell into 23 + "…",
-        // and the span covers the elided text, ellipsis included.
-        const QString fits = QStringLiteral("<a_module_name.exe>+0x40");     // 24 chars
-        QCOMPARE(fits.size(), kCommandRowAddrMaxChars);
-        checkRow(buildCommandRowText(fits, QStringLiteral("struct"), QStringLiteral("Foo"), false),
-                 fits, QStringLiteral("struct"), QStringLiteral("Foo"));
-
-        const QString longF = QStringLiteral("<a_longer_module_name.exe>+0x1A0");
-        QVERIFY(longF.size() > kCommandRowAddrMaxChars);
-        const QString elided = longF.left(kCommandRowAddrMaxChars - 1) + QChar(0x2026);
-        QCOMPARE(commandRowElide(longF, kCommandRowAddrMaxChars), elided);
-        QCOMPARE(elided.size(), kCommandRowAddrMaxChars);
-        const QString row = buildCommandRowText(longF, QStringLiteral("struct"), QStringLiteral("Foo"), false);
-        QCOMPARE(row, QStringLiteral("[▸] ") + elided + QStringLiteral("  struct Foo {"));
-        checkRow(row, elided, QStringLiteral("struct"), QStringLiteral("Foo"));
-    }
-
-    void elide_edges() {
-        QCOMPARE(commandRowElide(QStringLiteral("abc"), 0), QString());
-        QCOMPARE(commandRowElide(QStringLiteral("abc"), 1), QStringLiteral("…"));
-        QCOMPARE(commandRowElide(QStringLiteral("abc"), 3), QStringLiteral("abc"));
-        QCOMPARE(commandRowElide(QStringLiteral("abcd"), 3), QStringLiteral("ab…"));
+    void row_nothingBetweenChevronAndKeyword() {
+        // The guarantee the demotion made: the text after the chevron IS
+        // the header. No address cell, no source label, no elision — a
+        // long name is printed whole.
+        const QString longName = QStringLiteral("AVeryLongClassNameThatUsedToShareTheRowWithAnAddress");
+        for (const QString& kw : {QStringLiteral("struct"), QStringLiteral("class"), QStringLiteral("enum")}) {
+            const QString row = buildCommandRowText(kw, longName, false);
+            QCOMPARE(row.mid(commandRowChevronSpan(row).end), kw + QLatin1Char(' ') + longName + QStringLiteral(" {"));
+            checkRow(row, kw, longName);
+        }
     }
 
     // ---------------------------------------------------------------
-    // The address span on rows the builder does not make
+    // Rows the builder does not make
     // ---------------------------------------------------------------
 
-    void span_addressOnlyRow() {
-        // The editor tests write rows with no root part at all.
-        const QString row = QStringLiteral("[▸] 0xABCD1234");
-        const ColumnSpan as = commandRowAddrSpan(row);
-        QVERIFY(as.valid);
-        QCOMPARE(as.start, 4);
-        QCOMPARE(spanText(row, as), QStringLiteral("0xABCD1234"));
-        QVERIFY(!commandRowRootNameSpan(row).valid);
+    void span_statusRowIsInert() {
+        // The MCP status tool writes "[▸] [Claude: text]" onto line 0. With
+        // no address cell there is nothing for a parser to anchor on: only
+        // the chevron reads, the root spans stay invalid — even when the
+        // text carries the old source-control glyph or a hex number.
+        for (const QString& row : {QStringLiteral("[▸] [Claude: rebased to 0x1000]"),
+                                   QStringLiteral("[▸] [Claude: 'game.exe'▾ 0x1000]"),
+                                   QStringLiteral("[▸] [Claude: scanning]")}) {
+            QVERIFY2(commandRowChevronSpan(row).valid, qPrintable(row));
+            QVERIFY2(!commandRowRootTypeSpan(row).valid, qPrintable(row));
+            QVERIFY2(!commandRowRootNameSpan(row).valid, qPrintable(row));
+        }
     }
 
-    void span_rowWithoutAddressCell() {
-        // P7's shape: chevron straight to the keyword. No address cell, the
-        // root spans intact — the parser must not hand the header back as
-        // an address.
-        const QString row = QStringLiteral("[▸] struct Foo {");
-        QVERIFY(!commandRowAddrSpan(row).valid);
+    void span_rootParsersAnchorOnTheLastKeyword() {
+        // Text before the keyword — whatever it is — is not the header's
+        // business: the root spans still find the keyword and the name.
+        const QString row = QStringLiteral("[▸] some text  struct Player {");
         QCOMPARE(spanText(row, commandRowRootTypeSpan(row)), QStringLiteral("struct"));
-        QCOMPARE(spanText(row, commandRowRootNameSpan(row)), QStringLiteral("Foo"));
-        QVERIFY(!commandRowAddrSpan(QStringLiteral("[▸] ")).valid);
-        QVERIFY(!commandRowAddrSpan(QString()).valid);
+        QCOMPARE(spanText(row, commandRowRootNameSpan(row)), QStringLiteral("Player"));
     }
 
-    void span_fallsBackToHexRunForOddPrefix() {
-        // Text that opens with none of '<', '[', a letter, a digit or '_'
-        // is not a formula shape the parser knows: it takes the "0x" run.
-        const QString row = QStringLiteral("[▸] = 0x40  struct Foo {");
-        QCOMPARE(spanText(row, commandRowAddrSpan(row)), QStringLiteral("0x40"));
+    void span_rowWithoutRootPart() {
+        // The chevron alone, or nothing: no root spans, no crash.
+        for (const QString& row : {QStringLiteral("[▸] "), QStringLiteral("[▸]"), QString()}) {
+            QVERIFY2(!commandRowRootTypeSpan(row).valid, qPrintable(row));
+            QVERIFY2(!commandRowRootNameSpan(row).valid, qPrintable(row));
+        }
+        QVERIFY(commandRowChevronSpan(QStringLiteral("[▸] ")).valid);
+        QVERIFY(!commandRowChevronSpan(QString()).valid);
     }
 
     void span_chevronRejects() {
         QVERIFY(!commandRowChevronSpan(QStringLiteral("Hi")).valid);
-        QVERIFY(!commandRowChevronSpan(QStringLiteral("▸ 0x0")).valid);
-        QVERIFY(!commandRowChevronSpan(QStringLiteral("[▾] 0x0")).valid);   // the old glyph
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("▸ struct Foo {")).valid);
+        QVERIFY(!commandRowChevronSpan(QStringLiteral("[▾] struct Foo {")).valid);   // the old glyph
     }
 };
 

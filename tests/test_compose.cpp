@@ -2179,15 +2179,16 @@ private slots:
         BufferProvider prov(QByteArray(64, '\0'));
         ComposeResult r = compose(tree, prov);
         const QString line0 = r.text.left(r.text.indexOf(QLatin1Char('\n')));
-        QCOMPARE(line0, buildCommandRowText(QStringLiteral("0x0"), QStringLiteral("struct"),
+        QCOMPARE(line0, buildCommandRowText(QStringLiteral("struct"),
                                             QStringLiteral("Untitled"), false));
         QVERIFY(!line0.contains(QChar(0x25BE)));
-        QVERIFY(commandRowAddrSpan(line0).valid);
+        QVERIFY(!line0.contains(QStringLiteral("0x")));   // the base is the address bar's
+        QCOMPARE(commandRowRootTypeSpan(line0).start, commandRowChevronSpan(line0).end);
     }
 
     void testCommandRowRootNameSpan() {
         // Name span should cover the class name in the merged command row
-        QString text = "[\u25B8] 0x0  struct MyClass {";
+        QString text = "[\u25B8] struct MyClass {";
         ColumnSpan nameSpan = commandRowRootNameSpan(text);
         QVERIFY(nameSpan.valid);
 

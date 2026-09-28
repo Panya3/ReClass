@@ -35,7 +35,7 @@ inline uint64_t sizeRootOf(const NodeTree& tree, uint64_t viewRootId) {
 
 // "  ·  0x80 (128)" / "  ·  3 members" — the trailing size clause. The class
 // NAME is deliberately absent: it is already the head of `main` (and the doc
-// tab, and the breadcrumb), so repeating it here spent the widest part of the
+// tab, and the address bar's trail), so repeating it here spent the widest part of the
 // status bar on the word the user is looking straight at.
 inline QString sizeClause(const NodeTree& tree, uint64_t viewRootId, bool needSep) {
     const uint64_t rootId = sizeRootOf(tree, viewRootId);

@@ -735,6 +735,21 @@ if(BUILD_TESTING)
     target_link_libraries(ribbon_render PRIVATE
         ${QT}::Widgets ${QT}::Svg)
 
+    # Render harness for rcx::AddressBar. Builds the bar standalone (no
+    # controller, no editor — the widget is header-only over the Core
+    # sources) with synthetic 1 / 3 / 6-crumb states and grabs the three
+    # stacked at 300/480/760/1080/1920 px, printing every laid-out cell's
+    # logical rect + dpr so a pixel scan can crop. Hidden desktop only.
+    #   address_bar_render <out-prefix> [themeJsonPath|themeName]
+    add_executable(address_bar_render EXCLUDE_FROM_ALL tools/address_bar_render.cpp
+        src/format.cpp src/addressparser.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp
+        src/resources.qrc)
+    target_include_directories(address_bar_render PRIVATE src)
+    target_compile_definitions(address_bar_render PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(address_bar_render PRIVATE
+        ${QT}::Widgets ${QT}::Svg)
+
     # Render harness for rcx::RcxTooltip. Tooltips are separate top-level
     # windows, so MainWindow::grab() never contains them — this grabs the
     # tooltip widget itself. Renders short / multi-line / titled / long-wrapping

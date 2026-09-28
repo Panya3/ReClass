@@ -79,12 +79,6 @@ static QString docTypeNameProvider(NodeKind k) {
     return m ? QString::fromLatin1(m->typeName) : QStringLiteral("???");
 }
 
-//TODO-DELETE(elideLeft) static QString elideLeft(const QString& s, int max) {
-//    if (s.size() <= max) return s;
-//    if (max <= 1) return QStringLiteral("\u2026").left(max);
-//    return QStringLiteral("\u2026") + s.right(max - 1);
-//}
-
 // Themed comment input dialog matching the editor style. ThemedDialog +
 // DialogButton — was a raw QDialog with a QDialogButtonBox styled inline
 // (border-radius 3px, font-size 11px), out of sync with the rest of the
@@ -140,24 +134,6 @@ static QString showCommentDialog(QWidget* parent, const QString& title,
     }
     return {};
 }
-
-//TODO-DELETE(crumbFor) static QString crumbFor(const rcx::NodeTree& t, uint64_t nodeId) {
-//    QStringList parts;
-//    QSet<uint64_t> seen;
-//    uint64_t cur = nodeId;
-//    while (cur != 0 && !seen.contains(cur)) {
-//        seen.insert(cur);
-//        int idx = t.indexOfId(cur);
-//        if (idx < 0) break;
-//        const auto& n = t.nodes[idx];
-//        parts << (n.name.isEmpty() ? QStringLiteral("<unnamed>") : n.name);
-//        cur = n.parentId;
-//    }
-//    std::reverse(parts.begin(), parts.end());
-//    if (parts.size() > 4)
-//        parts = QStringList{parts.front(), QStringLiteral("\u2026"), parts[parts.size() - 2], parts.back()};
-//    return parts.join(QStringLiteral(" \u00B7 "));
-//}
 
 // ── RcxDocument ──
 
@@ -1228,8 +1204,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
         }
         // Reuse existing tab if one already views this struct, else focus
         // here. Don't open a new tab — F12 is meant to be quick nav. F12 is
-        // a jump (resets the breadcrumb trail); the ▸ follow-arrow is what
-        // grows the drill trail. History is recorded HERE, at the gesture,
+        // a jump (new view root, empty trail); the trail itself grows by
+        // clicking into an expansion (handleNodeClick) or sideways through
+        // the bar's chevrons. History is recorded HERE, at the gesture,
         // not inside setViewRootId — load, new-tab and delete-root call
         // that too and none of them is a place the user left.
         if (target != m_viewRootId) recordNav(editor);
@@ -1237,9 +1214,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
         emit statusHint(QStringLiteral("Jumped to definition"));
     });
 
-    // Breadcrumb crumb click: collapse everything below that class and scroll
-    // to it (carries the crumb index; no view-root change). The breadcrumb
-    // itself is grown by selection, in handleNodeClick.
+    // Address-bar crumb click (an ancestor crumb or a « menu pick): collapse
+    // everything below that class and scroll to it (carries the crumb
+    // index; no view-root change). The trail itself is grown by selection,
+    // in handleNodeClick.
     connect(editor, &RcxEditor::crumbClicked, this, &RcxController::collapseToFocus);
 
     // The bar's base edit: Enter → rebaseTo, and the verdict goes back to
@@ -1619,7 +1597,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
         emit selectionChanged(m_selIds.size());
     });
 
-    // Live expression evaluation for BaseAddress editing
+    // Live expression evaluation: the address bar's base edit reads it
+    // through Callbacks::evaluate for its "→ 0x…" preview, and the editor's
+    // value edits show the same result when the text carries an operator.
     editor->setExprEvaluator([this](const QString& text) -> QString {
         QString s = text.trimmed();
         s.remove('`');
@@ -1636,8 +1616,9 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::inlineEditCommitted,
             this, [this](int nodeIdx, int subLine, EditTarget target, const QString& text,
                          uint64_t resolvedAddr) {
-        // CommandRow BaseAddress/RootClass edit has nodeIdx=-1
-        if (nodeIdx < 0 && target != EditTarget::BaseAddress
+        // CommandRow root-class edits have nodeIdx=-1 (the base address is
+        // the bar's edit: onBaseCommit → rebaseTo, never this signal)
+        if (nodeIdx < 0
             && target != EditTarget::RootClassType && target != EditTarget::RootClassName) { refresh(); return; }
         switch (target) {
         case EditTarget::Name: {
@@ -1764,17 +1745,6 @@ void RcxController::connectEditor(RcxEditor* editor) {
             setNodeValue(nodeIdx, subLine, text, /*isAscii=*/false, resolvedAddr);
             break;
         }
-        case EditTarget::BaseAddress: {
-            // One rebase implementation for every entry point (this edit,
-            // Goto, bookmarks, scanner, MCP): evaluate, undoable ChangeBase,
-            // recent list, error to the status bar. A successful rebase has
-            // already refreshed (command apply + documentChanged), so the
-            // trailing refresh below would be a third recompose; a refused
-            // edit still needs it to put the canonical row back over the
-            // typed text.
-            if (rebaseTo(text)) return;
-            break;
-        }
         case EditTarget::ArrayElementType: {
             if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) break;
             const Node& node = m_doc->tree.nodes[nodeIdx];
@@ -1897,7 +1867,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
 void RcxController::setViewRootId(uint64_t id) {
     if (m_viewRootId == id) return;
     m_viewRootId = id;
-    m_focusPath.clear();   // new root view → fresh breadcrumb (no drill yet)
+    m_focusPath.clear();   // new root view → fresh trail (no drill yet)
     refresh();
 }
 
@@ -1909,7 +1879,7 @@ uint64_t RcxController::resolveDefinitionTarget(int nodeIdx) const {
 void RcxController::reconcileFocusPath() {
     // Walk the chain: each focus hop must still exist, be drillable, be
     // expanded, and sit inside the frame the previous hop opened. Trim at the
-    // first break so a fold-margin collapse can't leave a stale breadcrumb.
+    // first break so a fold-margin collapse can't leave a stale trail.
     uint64_t expectedContainer = m_viewRootId;
     int valid = 0;
     for (int i = 0; i < m_focusPath.size(); ++i) {
@@ -7320,11 +7290,11 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     updateCommandRow();
     applySelectionOverlays();
 
-    // Breadcrumb follows the selection: the chain of expanded typed pointers
+    // The trail follows the selection: the chain of expanded typed pointers
     // containing the clicked node. Selecting inside a NewClass* expansion adds
-    // it; a top-level row clears back to the root crumb. Only rebuild when the
-    // scope actually changed — most clicks land within the same crumb path and
-    // would otherwise recreate the crumb widgets needlessly.
+    // it; a top-level row clears back to the root crumb. Pushed only when the
+    // scope actually changed — most clicks land within the same path (the
+    // bar's setState would early-return on the equal state anyway).
     QVector<uint64_t> newFocus = focusChainToNode(nodeId);
     if (newFocus != m_focusPath) {
         m_focusPath = std::move(newFocus);
@@ -7343,7 +7313,7 @@ void RcxController::clearSelection() {
     m_selIds.clear();
     m_anchorLine = -1;
     bool hadFocus = !m_focusPath.isEmpty();
-    m_focusPath.clear();   // breadcrumb back to the bare root crumb
+    m_focusPath.clear();   // the trail back to the bare root crumb
     updateCommandRow();
     applySelectionOverlays();
     if (hadFocus) pushAddressBarState();
@@ -7356,15 +7326,10 @@ void RcxController::applySelectionOverlays() {
 
 
 void RcxController::updateCommandRow() {
-    // The source control left this row for the address bar's chip (the
-    // provider's name, liveness and the chooser popup all live there now).
-    // The base address stays until P7 demotes line 0 to the header alone.
-    QString addr;
-    if (!m_doc->tree.baseAddressFormula.isEmpty())
-        addr = m_doc->tree.baseAddressFormula;
-    else
-        addr = QStringLiteral("0x") +
-            QString::number(m_doc->tree.baseAddress, 16).toUpper();
+    // Line 0 is the class header alone: "[▸] struct Name {". The source
+    // control and the base address both moved to the address bar (the
+    // provider's name, liveness, the chooser popup, the base edit and its
+    // formula display all live there; pushAddressBarState carries them).
 
     // Root class keyword + name (uses current view root)
     QString keyword, className;
@@ -7394,7 +7359,7 @@ void RcxController::updateCommandRow() {
         className = QStringLiteral("Untitled");
     }
 
-    const QString combined = buildCommandRowText(addr, keyword, className, m_braceWrap);
+    const QString combined = buildCommandRowText(keyword, className, m_braceWrap);
     for (auto* ed : m_editors) {
         ed->setCommandRowText(combined);
     }
@@ -7971,8 +7936,14 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
     pushRecentType(resolved.displayName);
 
     if (mode == TypePopupMode::Root) {
-        if (resolved.entryKind == TypeEntry::Composite)
+        // The line-0 class chooser is a root pick, the same gesture as the
+        // bar's root.chev: the place left is recorded here, at the gesture
+        // (setViewRootId never records — load, new-tab and delete-root
+        // call it too), and only when the root actually changes.
+        if (resolved.entryKind == TypeEntry::Composite) {
+            if (resolved.structId != m_viewRootId) recordNav();
             setViewRootId(resolved.structId);
+        }
         return;
     }
 
@@ -8645,6 +8616,7 @@ void RcxController::selectSource(const QString& text) {
 
 void RcxController::clearSources() {
     m_savedSources.clear();
+    m_nav.forgetAllSources();   // every recorded source index just went stale
     m_activeSourceIdx = -1;
     m_doc->provider = std::make_shared<NullProvider>();
     m_doc->dataPath.clear();
@@ -8658,9 +8630,12 @@ void RcxController::removeSavedSource(int idx) {
     m_savedSources.removeAt(idx);
 
     // Keep m_activeSourceIdx pointing at the same entry it did before the
-    // removal shifted everything after `idx` down by one.
+    // removal shifted everything after `idx` down by one — and the history
+    // entries too, which hold the same raw indices (an old entry would
+    // otherwise restore whichever source slid into the removed slot).
     if (wasActive)            m_activeSourceIdx = -1;
     else if (m_activeSourceIdx > idx) m_activeSourceIdx--;
+    m_nav.forgetSource(idx);
 
     if (wasActive) {
         // Removing the connected source detaches the view — same as Clear All
@@ -9285,6 +9260,20 @@ RcxEditor* RcxController::gestureEditor(RcxEditor* from) const {
     return primaryEditor();
 }
 
+QVector<NavEntry> RcxController::backEntries() const {
+    QVector<NavEntry> out;
+    for (const NavEntry& e : m_nav.backEntries())
+        if (navEntryValid(m_doc->tree, e)) out.push_back(e);
+    return out;
+}
+
+QVector<NavEntry> RcxController::forwardEntries() const {
+    QVector<NavEntry> out;
+    for (const NavEntry& e : m_nav.forwardEntries())
+        if (navEntryValid(m_doc->tree, e)) out.push_back(e);
+    return out;
+}
+
 bool RcxController::canGoBack() const {
     // Validity-aware, so a Back cell is never lit for entries a delete
     // made unrestorable (back() would discard them and do nothing).
@@ -9399,6 +9388,11 @@ void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
         if (!ok)
             emit statusHint(QStringLiteral("Source %1 is not available — kept the current one")
                                 .arg(name.isEmpty() ? QStringLiteral("#%1").arg(e.activeSourceIdx) : name));
+    } else if (e.activeSourceIdx == kNavSourceRemoved) {
+        // The saved source this place was read from was removed since (or
+        // every source cleared) — NavHistory::forgetSource marked it. The
+        // place is still restored, under the source the user has now.
+        emit statusHint(QStringLiteral("The source this place was read from was removed — kept the current one"));
     }
 
     // 2. The view root — directly, never through setViewRootId (which
@@ -9443,11 +9437,13 @@ void RcxController::restoreNav(const NavEntry& e, RcxEditor* from) {
     m_focusPath = e.focusPath;
     reconcileFocusPath();
 
-    // 5. One announcement (the docks, the tab icon and the MCP bridge
-    //    listen; so does this controller, whose refresh composes the
-    //    restored place and pushes the bar state with the new flags).
+    // 5. One announcement, and it IS the refresh: documentChanged is
+    //    connected to refresh() (the constructor), which composes the
+    //    restored place and pushes the bar state with the new flags; the
+    //    docks, the tab icon and the MCP bridge listen too. No refresh()
+    //    call after it — that composed every Back twice (rebaseTo relies
+    //    on the same emit as its one refresh).
     emit m_doc->documentChanged();
-    refresh();
 
     // 6. Scroll the pane the gesture came from back to what it showed:
     //    the anchored row if that node still exists, else the deepest hop

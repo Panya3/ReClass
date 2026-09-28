@@ -480,14 +480,14 @@ public:
     uint64_t viewRootId() const { return m_viewRootId; }
     void scrollToNodeId(uint64_t nodeId);
 
-    // ── Drill-down breadcrumb (inline-expansion focus path) ──
-    // The breadcrumb is CLICK-driven: handleNodeClick sets the focus path to
-    // the chain of expanded typed pointers containing the clicked node, so
-    // selecting a typed pointer (or any row inside its inline expansion) adds
-    // it to the breadcrumb. No row affordance / follow-arrow.
-    // Breadcrumb crumb clicked (crumbIndex: 0 = root class, i = the class shown
-    // by focus pointer i-1): collapse everything below that class and scroll to
-    // it. The view root never changes.
+    // ── Drill-down trail (inline-expansion focus path) ──
+    // The trail the address bar renders is CLICK-driven: handleNodeClick sets
+    // the focus path to the chain of expanded typed pointers containing the
+    // clicked node, so selecting a typed pointer (or any row inside its
+    // inline expansion) adds it to the trail. No row affordance / follow-arrow.
+    // Crumb clicked (crumbIndex: 0 = root class, i = the class shown by focus
+    // pointer i-1): collapse everything below that class and scroll to it.
+    // The view root never changes.
     void collapseToFocus(int crumbIndex);
     const QVector<uint64_t>& focusPath() const { return m_focusPath; }  // test accessor
     // The focus-path chain that a selection on `nodeId` produces (the expanded
@@ -572,9 +572,13 @@ public:
     // sequence of single steps would leave) but restores only the final
     // place — one refresh, at most one "Reopen path" macro.
     void jumpToHistory(int delta, RcxEditor* from = nullptr);
-    // The stacks as NavHistory keeps them: oldest first. The menu reverses.
-    QVector<NavEntry> backEntries() const { return m_nav.backEntries(); }
-    QVector<NavEntry> forwardEntries() const { return m_nav.forwardEntries(); }
+    // The stacks as NavHistory keeps them, oldest first (the menu reverses),
+    // with the stale entries left out — a deleted root or hop that back()
+    // / forward() would discard on the way. So a row's position in the
+    // history menu equals the number of restorable steps its pick asks
+    // for; unfiltered, a pick beyond a stale row landed one place further.
+    QVector<NavEntry> backEntries() const;
+    QVector<NavEntry> forwardEntries() const;
     // The place the controller is at right now, anchored on `from`'s first
     // visible row. What recordNav pushes and what a step hands to
     // NavHistory as the place being left.
@@ -686,9 +690,10 @@ private:
     bool               m_showEnumChips = true;     // chip toggle, default ON
     bool               m_readOnlyOverride = false; // tutorial safety; see header
     uint64_t           m_viewRootId = 0;
-    QVector<uint64_t>  m_focusPath;    // breadcrumb focus: chain of expanded
-                                       // typed-pointer ids from the root class
-                                       // down to the deepest drilled one.
+    QVector<uint64_t>  m_focusPath;    // the address bar's trail: chain of
+                                       // expanded typed-pointer ids from the
+                                       // root class down to the deepest
+                                       // drilled one.
 
     // ── Navigation history ──
     NavHistory         m_nav;
@@ -728,7 +733,7 @@ private:
     QVector<uint64_t> focusChainTo(uint64_t pid) const;
     // Trim m_focusPath at the first entry that is gone, no longer a drillable
     // pointer, collapsed, or whose container breaks the chain (e.g. the user
-    // fold-collapsed an ancestor). Keeps the breadcrumb honest each refresh.
+    // fold-collapsed an ancestor). Keeps the trail honest each refresh.
     void reconcileFocusPath();
     // Display label for a class id (structTypeName / name / fallback). For
     // id 0 / show-all, the first root struct name.

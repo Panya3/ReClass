@@ -563,7 +563,7 @@ extern void (*g_namesChangedHook)();
 // Resolve the "go to definition" / drill target for a node: the struct id
 // that following this node navigates to (0 = nothing to follow). Single
 // source of truth shared by compose and the controller (F12 go-to-definition
-// + the click-driven breadcrumb focus chain). A pointer or embedded
+// + the click-driven focus chain the address bar renders). A pointer or embedded
 // struct with a wired refId follows that ref; a plain struct field views its
 // own subtree. Array-of-struct is subsumed by the refId case.
 inline uint64_t drillTargetId(const Node& n) {
@@ -573,17 +573,17 @@ inline uint64_t drillTargetId(const Node& n) {
 }
 
 // Human label for a class/struct node — its type name when set, else its
-// instance name, else "Untitled". Used for breadcrumb crumbs and matches
-// the rule in rootClassNames().
+// instance name, else "Untitled". Used for the address bar's crumbs and
+// matches the rule in rootClassNames().
 inline QString nodeClassLabel(const Node& n) {
     if (!n.structTypeName.isEmpty()) return n.structTypeName;
     if (!n.name.isEmpty()) return n.name;
     return QStringLiteral("Untitled");
 }
 
-// One rendered breadcrumb segment. The controller flattens its focus path
-// (view root + the chain of expanded hops) into a Crumb list, one crumb per
-// class you stood in, in the dotted shape the bar renders verbatim:
+// One segment of the address bar's trail. The controller flattens its focus
+// path (view root + the chain of expanded hops) into a Crumb list, one crumb
+// per class you stood in, in the dotted shape the bar renders verbatim:
 //   "RcxEditor.vptr" › "QWidgetPrivate.parent" › "QWidget"
 // Every ancestor crumb names the class you were IN plus the field you left
 // it through; the deepest crumb is the bare class you are standing in. There
@@ -1199,10 +1199,10 @@ inline QStringList rootClassNames(const NodeTree& tree) {
 // struct expanded in place (drillTargetId(n) == n.id — it is its own hop).
 // Walking parentId all the way up is right for "which root owns this byte"
 // but wrong for the focus path: with it, `Player.stats.hp` sits in `Player`,
-// so a trail through `stats` failed the container check while the breadcrumb
+// so a trail through `stats` failed the container check while the trail
 // labelled the frame from refId (0 → the first root class). Every focus-path
-// consumer — reconcile / chain / breadcrumb / sibling lists / path
-// resolution — must agree on one notion of "container"; this is it. 0 for
+// consumer — reconcile / chain / the address bar's crumbs / sibling lists /
+// path resolution — must agree on one notion of "container"; this is it. 0 for
 // roots and orphans (a dangling parentId).
 inline uint64_t containerOf(const NodeTree& tree, uint64_t nodeId) {
     int idx = tree.indexOfId(nodeId);
@@ -1568,7 +1568,7 @@ struct ColumnSpan {
     bool valid = false;
 };
 
-enum class EditTarget { Name, Type, Value, BaseAddress, ArrayIndex, ArrayCount,
+enum class EditTarget { Name, Type, Value, ArrayIndex, ArrayCount,
                         ArrayElementType, ArrayElementCount, PointerTarget,
                         RootClassType, RootClassName, TypeSelector, Comment };
 
@@ -1708,28 +1708,17 @@ inline ColumnSpan commentSpanFor(const LineMeta& lm, int lineLength, int typeW =
 }
 
 // ── CommandRow (Scintilla line 0) ──
-// Row shape: "[▸] <address>  <keyword> <ClassName> {" — no " {" when the
-// editor brace-wraps. The source control ('name'▾) left this row for the
-// address bar's chip; the base address stays here until P7 demotes line 0
-// to the class header alone. RcxController::updateCommandRow builds the row
-// through buildCommandRowText so a test parses the REAL string back through
-// the span functions below instead of a hand copy of the format.
-
-// The address cell keeps its 24-char elision (23 chars + U+2026) — P7 owns
-// the cell's fate, not its width.
-inline constexpr int kCommandRowAddrMaxChars = 24;
-
-inline QString commandRowElide(QString s, int max) {
-    if (max <= 0) return {};
-    if (s.size() <= max) return s;
-    if (max == 1) return QStringLiteral("\u2026");
-    return s.left(max - 1) + QChar(0x2026);
-}
-
-inline QString buildCommandRowText(const QString& addrText, const QString& keyword,
-                                   const QString& className, bool braceWrap) {
-    return QStringLiteral("[\u25B8] ") + commandRowElide(addrText, kCommandRowAddrMaxChars)
-         + QStringLiteral("  ") + keyword + QLatin1Char(' ') + className
+// Row shape: "[▸] <keyword> <ClassName> {" — no " {" when the editor
+// brace-wraps. The row is the class header and nothing else: the chevron
+// opens the view chooser and the class name renames the type. The source
+// control and the base address both live in the address bar now (the
+// bar never scrolls away; line 0 does). RcxController::updateCommandRow
+// builds the row through buildCommandRowText so a test parses the REAL
+// string back through the span functions below instead of a hand copy of
+// the format.
+inline QString buildCommandRowText(const QString& keyword, const QString& className,
+                                   bool braceWrap) {
+    return QStringLiteral("[\u25B8] ") + keyword + QLatin1Char(' ') + className
          + (braceWrap ? QString() : QStringLiteral(" {"));
 }
 
@@ -1743,7 +1732,9 @@ inline ColumnSpan commandRowChevronSpan(const QString& lineText) {
 }
 
 // ── CommandRow root-class spans ──
-// Combined CommandRow format ends with: "  struct ClassName {"
+// The row reads "[▸] struct ClassName {": the keyword follows the chevron
+// directly. The keyword is found by its last whole-word match, so a class
+// name that happens to contain "struct" still parses.
 
 inline int commandRowRootStart(const QString& lineText) {
     int best = -1;
@@ -1756,35 +1747,6 @@ inline int commandRowRootStart(const QString& lineText) {
     i = lineText.lastIndexOf(QStringLiteral("enum "));
     if (i > best) best = i;
     return best;
-}
-
-// The address cell: everything between the chevron and the root keyword,
-// trailing space trimmed. A literal ("0x7FF6…"), a module formula
-// ("<app.exe>+0x40", "[<app.exe>+0x58]") and a bare one ("game.exe+0x40")
-// are all spanned whole — the bare shape used to be spanned from its "0x",
-// so a click edited half the formula. Only text that opens with none of
-// those (no '<', '[', letter, digit or '_') falls back to its "0x" run.
-inline ColumnSpan commandRowAddrSpan(const QString& lineText) {
-    const ColumnSpan chevron = commandRowChevronSpan(lineText);
-    int addrStart = chevron.valid ? chevron.end : 0;
-    while (addrStart < lineText.size() && lineText[addrStart].isSpace()) addrStart++;
-    if (addrStart >= lineText.size()) return {};
-    int start = addrStart;
-    const QChar c = lineText[addrStart];
-    if (c != QLatin1Char('<') && c != QLatin1Char('[') && c != QLatin1Char('_')
-        && !c.isLetterOrNumber()) {
-        const int oxPos = lineText.indexOf(QStringLiteral("0x"), addrStart);
-        start = (oxPos >= 0) ? oxPos : addrStart;
-    }
-    // End at the root keyword (struct/class/enum) or the end of the line. A
-    // row that goes straight from the chevron to the keyword (P7's shape)
-    // has no address cell at all.
-    const int rootStart = commandRowRootStart(lineText);
-    if (rootStart >= 0 && start >= rootStart) return {};
-    int end = (rootStart > start) ? rootStart : lineText.size();
-    while (end > start && lineText[end - 1].isSpace()) end--;
-    if (end <= start) return {};
-    return {start, end, true};
 }
 
 inline ColumnSpan commandRowRootTypeSpan(const QString& lineText) {
