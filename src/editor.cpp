@@ -1832,6 +1832,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         cb.modules       = [this] { return m_moduleProvider ? m_moduleProvider() : QStringList(); };
         cb.backEntries    = [this] { return m_navBackProvider ? m_navBackProvider() : QVector<NavEntry>(); };
         cb.forwardEntries = [this] { return m_navForwardProvider ? m_navForwardProvider() : QVector<NavEntry>(); };
+        cb.currentLabel   = [this] { return m_navCurrentProvider ? m_navCurrentProvider() : QString(); };
         cb.onSiblingPick = [this](int level, uint64_t id) { emit siblingPickRequested(level, id); };
         cb.onRootPick    = [this](uint64_t id) { emit rootPickRequested(id); };
         cb.onBaseCommit  = [this](QString s) { emit baseCommitRequested(s); };
@@ -2034,6 +2035,14 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
                     menu.addAction("Convert to Struct");
                 else if (kw == QStringLiteral("struct"))
                     menu.addAction("Convert to Class");
+                else if (kw == QStringLiteral("union")) {
+                    // A union root is not a dead end: it takes the struct
+                    // row's option and the way back to struct (the
+                    // controller refuses only enum conversions). The
+                    // keyword is all that changes — member offsets stay.
+                    menu.addAction("Convert to Struct");
+                    menu.addAction("Convert to Class");
+                }
                 // enum: no conversion options
                 if (!menu.isEmpty()) {
                     QAction* chosen = menu.exec(m_sci->mapToGlobal(pos));

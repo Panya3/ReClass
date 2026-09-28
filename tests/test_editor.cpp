@@ -1367,6 +1367,45 @@ private slots:
         m_editor->applyDocument(m_result);
     }
 
+    // ── Test: a union root's name is editable on line 0 ──
+    void testCommandRowUnionRootNameEditable() {
+        // updateCommandRow prints resolvedClassKeyword(), which is "union"
+        // for a union root; the line-0 parsers used to refuse that word,
+        // so such a root had no name span — nothing tinted, nothing to
+        // rename — until it was converted. Same row, same edit as a struct.
+        m_editor->applyDocument(m_result);
+        m_editor->setCommandRowText(QStringLiteral("[▸] union _PEB64 {"));
+        const LineMeta* lm = m_editor->metaForLine(0);
+        QVERIFY(lm);
+        QCOMPARE(lm->lineKind, LineKind::CommandRow);
+
+        QString lineText;
+        const int len = (int)m_editor->scintilla()->SendScintilla(
+            QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
+        if (len > 0) {
+            QByteArray buf(len + 1, '\0');
+            m_editor->scintilla()->SendScintilla(
+                QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
+            lineText = QString::fromUtf8(buf.constData(), len);
+            while (lineText.endsWith('\n') || lineText.endsWith('\r')) lineText.chop(1);
+        }
+        const ColumnSpan rt = commandRowRootTypeSpan(lineText);
+        QVERIFY2(rt.valid, "a union root has a type span on line 0");
+        QCOMPARE(rt.start, commandRowChevronSpan(lineText).end);
+        QCOMPARE(lineText.mid(rt.start, rt.end - rt.start), QStringLiteral("union"));
+        const ColumnSpan rn = commandRowRootNameSpan(lineText);
+        QVERIFY2(rn.valid, "a union root has a name span on line 0");
+        QCOMPARE(lineText.mid(rn.start, rn.end - rn.start), QStringLiteral("_PEB64"));
+
+        QVERIFY2(m_editor->beginInlineEdit(EditTarget::RootClassName, 0),
+                 "a union root's name is not editable on the command row");
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+        QVERIFY(!m_editor->isEditing());
+
+        m_editor->applyDocument(m_result);
+    }
+
     // ── Test: root header/footer are suppressed (CommandRow replaces them) ──
     void testRootFoldSuppressed() {
         m_editor->applyDocument(m_result);

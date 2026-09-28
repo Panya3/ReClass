@@ -1742,12 +1742,19 @@ inline ColumnSpan commandRowChevronSpan(const QString& lineText) {
 // renamed the real root struct. A class name that contains a keyword
 // ("StructOfClass", "enum_class_t") still reads whole: only the first
 // word after the chevron is the keyword.
+//
+// The keyword set is every value Node::resolvedClassKeyword() can print
+// for a root: struct, class, enum — and union, which updateCommandRow
+// already emitted for a union root while the parsers here refused it, so
+// a union viewed as the root had no name span (nothing tinted, nothing to
+// rename) until it was converted to something else.
 
 inline int commandRowRootStart(const QString& lineText) {
     const ColumnSpan chev = commandRowChevronSpan(lineText);
     if (!chev.valid) return -1;
     const QStringView rest = QStringView(lineText).mid(chev.end);
-    for (const QLatin1String kw : {QLatin1String("struct "), QLatin1String("class "), QLatin1String("enum ")})
+    for (const QLatin1String kw : {QLatin1String("struct "), QLatin1String("class "),
+                                   QLatin1String("enum "), QLatin1String("union ")})
         if (rest.startsWith(kw)) return chev.end;
     return -1;
 }

@@ -1245,9 +1245,11 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::navUpRequested,      this, [this, editor] { goUp(editor); });
     connect(editor, &RcxEditor::historyJumpRequested, this,
             [this, editor](int delta) { jumpToHistory(delta, editor); });
-    // The history menu's rows, pulled when it opens.
+    // The history menu's rows, pulled when it opens — and the label of the
+    // place the user is at, its checked "you are here" row.
     editor->setAddressBarHistory([this] { return backEntries(); },
-                                 [this] { return forwardEntries(); });
+                                 [this] { return forwardEntries(); },
+                                 [this] { return currentNavLabel(); });
     // The places menu's bookmarks and modules, pulled when it opens. The
     // module list is the provider's memoised one — never enumerateModules,
     // which is a snapshot syscall on a process with hundreds of DLLs.
@@ -1987,12 +1989,92 @@ static uint64_t classAtLevel(const NodeTree& tree, uint64_t viewRootId,
     return container;
 }
 
+// The first row rendered INSIDE a hop's expansion: deeper than the hop's
+// own row, which its continuation rows share (same depth, same nodeId).
+// -1 when the expansion is empty or the rows end. What a pointer hop's
+// target address is read off (compose stamps ptrBase on every row inside
+// the dereference) — for the crumbs and the sibling menus alike.
+static int firstDeeperRowIn(const QVector<LineMeta>& meta, int line, uint64_t hopId) {
+    const int hopDepth = meta[line].depth;
+    for (int j = line + 1; j < meta.size(); ++j) {
+        if (meta[j].depth > hopDepth) return j;
+        if (meta[j].nodeId != hopId) break;   // left the hop's rows without going deeper
+    }
+    return -1;
+}
+
 QVector<SiblingEntry> RcxController::siblingsForCrumb(int level) const {
     if (level < 0 || level > m_focusPath.size()) return {};
-    const uint64_t classId = classAtLevel(m_doc->tree, m_viewRootId, m_focusPath, level);
+    const NodeTree& tree = m_doc->tree;
+    const uint64_t classId = classAtLevel(tree, m_viewRootId, m_focusPath, level);
     if (classId == 0) return {};
     const uint64_t current = level < m_focusPath.size() ? m_focusPath[level] : 0;
-    return siblingFieldsOf(m_doc->tree, classId, current);
+    QVector<SiblingEntry> sibs = siblingFieldsOf(tree, classId, current);
+
+    // Where each field leads. The container is the frame the crumb at
+    // `level` names — frameAddresses(), the crumbs' own data — and its rows
+    // start after the hop that opened it. At the root 0 is a real address
+    // (the base); deeper, 0 is "unknown", and nothing under an unknown
+    // frame can be placed either.
+    const auto& meta = m_lastResult.meta;
+    const QVector<uint64_t> frames = frameAddresses();
+    const uint64_t containerAddr = level < frames.size() ? frames[level] : 0;
+    const bool containerKnown = level == 0 || containerAddr != 0;
+    int cursor = 0;
+    if (level > 0) {
+        const QVector<int> hops = focusHopLines();
+        cursor = (level - 1 < hops.size() && hops[level - 1] >= 0) ? hops[level - 1] + 1 : -1;
+    }
+    const Provider* prov = m_doc->provider.get();
+    const bool canRead = prov && prov->isValid();
+    for (SiblingEntry& e : sibs) {
+        const int ni = tree.indexOfId(e.id);
+        if (ni < 0) continue;
+        const Node& n = tree.nodes[ni];
+        const uint64_t own = containerAddr + (n.offset > 0 ? uint64_t(n.offset) : 0);
+        if (!isPointerKind(n.kind)) {
+            // An embedded struct or an array dereferences nothing: it sits
+            // at the container plus its offset, expanded or not.
+            if (containerKnown) e.address = own;
+            continue;
+        }
+        // An expanded pointer: compose already dereferenced it — the
+        // ptrBase on the first row inside it, exactly what its crumb says.
+        // The scan starts inside the container's frame, so the right
+        // instance is found when one class is open under two pointers.
+        if (e.expanded && cursor >= 0) {
+            int line = -1;
+            for (int j = cursor; j < meta.size(); ++j) {
+                if (meta[j].nodeId != e.id) continue;
+                if (meta[j].lineKind == LineKind::Footer || meta[j].lineKind == LineKind::CommandRow)
+                    continue;
+                line = j;
+                break;
+            }
+            const int inner = line >= 0 ? firstDeeperRowIn(meta, line, e.id) : -1;
+            if (inner >= 0) { e.address = meta[inner].ptrBase; continue; }
+        }
+        // Collapsed (or expanded onto an empty class, which renders no row
+        // to read from): ONE read of the pointer value, by compose's rule —
+        // a Pointer32 is four bytes, a sentinel is null, an RVA is
+        // base-relative. No source, an unknown container or a failed read
+        // leave it unknown. Never a module enumeration: this runs when a
+        // menu opens, once per row.
+        if (!canRead || !containerKnown) continue;
+        uint64_t v = 0;
+        if (n.kind == NodeKind::Pointer32) {
+            uint32_t v32 = 0;
+            if (!prov->read(own, &v32, sizeof v32)) continue;
+            v = v32;
+            if (v == 0xFFFFFFFFu) v = 0;
+        } else {
+            if (!prov->read(own, &v, sizeof v)) continue;
+            if (v == UINT64_MAX) v = 0;
+        }
+        if (n.isRelative && v != 0) v += tree.baseAddress;
+        e.address = v;
+    }
+    return sibs;
 }
 
 QVector<SiblingEntry> RcxController::drillFieldsAt(const QString& path) const {
@@ -2127,10 +2209,90 @@ QString RcxController::classLabelOf(uint64_t id) const {
     return roots.isEmpty() ? QStringLiteral("…") : roots.first();
 }
 
+// Map each focus hop to its rendered line with ONE forward scan whose
+// cursor only advances: hop i sits inside hop i-1's expansion, so its row
+// is below hop i-1's, and searching from there also picks the right
+// instance when one class is expanded under two pointers (the same
+// `parent` node renders twice; only the one under our hop counts). The
+// editor's node→line index is private to it, and this runs once per
+// refresh (and once per menu open) on a path that is 0-3 hops deep, so a
+// scan is cheaper than plumbing an accessor; the bar's setState change
+// guard makes an equal result free downstream.
+//
+// Show-all (m_viewRootId == 0) renders every root in order, so the scan
+// starts on the first root's own rows — the root classLabelOf(0) names.
+// A hop expanded under a LATER root matches there instead, and the trail
+// then names the first root while pointing at the other one. That is the
+// pre-existing show-all ambiguity classLabelOf(0) already has (the trail
+// is click-built from one instance; only its label is guessed) and is
+// left as is: a single view root has no such case.
+QVector<int> RcxController::focusHopLines() const {
+    const auto& meta = m_lastResult.meta;
+    QVector<int> hopLine(m_focusPath.size(), -1);
+    for (int i = 0, cursor = 0; i < m_focusPath.size(); ++i) {
+        for (int j = cursor; j < meta.size(); ++j) {
+            if (meta[j].nodeId != m_focusPath[i]) continue;
+            if (meta[j].lineKind == LineKind::Footer || meta[j].lineKind == LineKind::CommandRow)
+                continue;
+            hopLine[i] = j;
+            cursor = j + 1;
+            break;
+        }
+        if (hopLine[i] < 0) break;   // nothing rendered for it: deeper hops are unknown too
+    }
+    return hopLine;
+}
+
+// The last compose already stamped every row inside a pointer expansion
+// with the dereferenced target (LineMeta::ptrBase) and every row with its
+// own absolute address (offsetAddr); the frames are read off those.
+//
+// [0] is the view root's own address: compose places a root at
+// baseAddress + offset (its absOffsets seed), and the root header row is
+// suppressed (the command row carries it), so it is computed, not scanned.
+// [i+1] is the frame hop i opens, by the hop's KIND — not by whether
+// drillTargetId returns the hop itself, which misfiled two real shapes: an
+// embedded Struct field WITH a refId (the type chooser's embed-class shape,
+// compose's "embedded struct with refId but no child nodes") and an Array
+// of struct with a refId both drill through refId, yet neither
+// dereferences anything, so compose never moves currentPtrBase for them
+// and the pointer rule handed back the ENCLOSING frame's base.
+//   Pointer: the target is the ptrBase compose stamped on the first row
+//   rendered INSIDE it (deeper than the pointer's own row — its
+//   continuation rows share its depth and its nodeId).
+//   Struct (refId or not): the frame IS its row — offsetAddr.
+//   Array: the first deeper row is the [0] element separator, whose
+//   offsetAddr is that element's base.
+// 0 when the hop has no row, the expansion is empty, or the pointer was
+// null / unreadable (compose zero-fills those under a NullProvider with
+// pBase = 0).
+QVector<uint64_t> RcxController::frameAddresses() const {
+    const NodeTree& tree = m_doc->tree;
+    const auto& meta = m_lastResult.meta;
+    const QVector<int> hopLine = focusHopLines();
+    QVector<uint64_t> out(m_focusPath.size() + 1, 0);
+    {
+        const int ri = detail::classIdx(tree, m_viewRootId);
+        const int off = ri >= 0 ? tree.nodes[ri].offset : 0;
+        out[0] = tree.baseAddress + (off > 0 ? uint64_t(off) : 0);
+    }
+    for (int i = 0; i < m_focusPath.size(); ++i) {
+        const int line = hopLine[i];
+        const int pi = tree.indexOfId(m_focusPath[i]);
+        if (line < 0 || pi < 0) break;
+        const Node& hop = tree.nodes[pi];
+        if (hop.kind == NodeKind::Struct) { out[i + 1] = meta[line].offsetAddr; continue; }
+        const int inner = firstDeeperRowIn(meta, line, hop.id);
+        if (inner < 0) continue;
+        if (hop.kind == NodeKind::Array)      out[i + 1] = meta[inner].offsetAddr;
+        else if (isPointerKind(hop.kind))     out[i + 1] = meta[inner].ptrBase;
+    }
+    return out;
+}
+
 AddressBarState RcxController::addressBarState() {
     reconcileFocusPath();
     const NodeTree& tree = m_doc->tree;
-    const auto& meta = m_lastResult.meta;
 
     // The class id a crumb names. classLabelOf(0) (show-all, no single view
     // root) names the first root struct; carry that node's id for the same
@@ -2146,80 +2308,11 @@ AddressBarState RcxController::addressBarState() {
         return ci >= 0 ? tree.nodes[ci].resolvedClassKeyword() : QString();
     };
 
-    // Per-crumb addresses come from the last compose, which already stamped
-    // every row inside a pointer expansion with the dereferenced target
-    // (LineMeta::ptrBase) and every row with its own absolute address
-    // (offsetAddr). Map each focus hop to its rendered line with ONE forward
-    // scan whose cursor only advances: hop i sits inside hop i-1's expansion,
-    // so its row is below hop i-1's, and searching from there also picks the
-    // right instance when one class is expanded under two pointers (the
-    // same `parent` node renders twice; only the one under our hop counts).
-    // The editor's node→line index is private to it, and this runs once per
-    // refresh on a path that is 0-3 hops deep, so a scan is cheaper than
-    // plumbing an accessor; the bar's setState change guard makes an equal
-    // result free downstream.
-    //
-    // Show-all (m_viewRootId == 0) renders every root in order, so the scan
-    // starts on the first root's own rows — the root classLabelOf(0) names.
-    // A hop expanded under a LATER root matches there instead, and the trail
-    // then names the first root while pointing at the other one. That is the
-    // pre-existing show-all ambiguity classLabelOf(0) already has (the trail
-    // is click-built from one instance; only its label is guessed) and is
-    // left as is: a single view root has no such case.
-    QVector<int> hopLine(m_focusPath.size(), -1);
-    for (int i = 0, cursor = 0; i < m_focusPath.size(); ++i) {
-        for (int j = cursor; j < meta.size(); ++j) {
-            if (meta[j].nodeId != m_focusPath[i]) continue;
-            if (meta[j].lineKind == LineKind::Footer || meta[j].lineKind == LineKind::CommandRow)
-                continue;
-            hopLine[i] = j;
-            cursor = j + 1;
-            break;
-        }
-        if (hopLine[i] < 0) break;   // nothing rendered for it: deeper hops are unknown too
-    }
-    // The address of the frame hop i opens, by the hop's KIND — not by
-    // whether drillTargetId returns the hop itself, which misfiled two real
-    // shapes: an embedded Struct field WITH a refId (the type chooser's
-    // embed-class shape, compose's "embedded struct with refId but no child
-    // nodes") and an Array of struct with a refId both drill through refId,
-    // yet neither dereferences anything, so compose never moves
-    // currentPtrBase for them and the pointer rule handed back the ENCLOSING
-    // frame's base.
-    //   Pointer: the target is the ptrBase compose stamped on the first row
-    //   rendered INSIDE it (deeper than the pointer's own row — its
-    //   continuation rows share its depth and its nodeId).
-    //   Struct (refId or not): the frame IS its row — offsetAddr.
-    //   Array: the first deeper row is the [0] element separator, whose
-    //   offsetAddr is that element's base.
-    // 0 when the hop has no row, the expansion is empty, or the pointer was
-    // null / unreadable (compose zero-fills those under a NullProvider with
-    // pBase = 0).
-    auto firstDeeperRow = [&](int line, const Node& hop) -> int {
-        const int hopDepth = meta[line].depth;
-        for (int j = line + 1; j < meta.size(); ++j) {
-            if (meta[j].depth > hopDepth) return j;
-            if (meta[j].nodeId != hop.id) break;   // left the hop's rows without going deeper
-        }
-        return -1;
-    };
-    auto frameAddress = [&](int i, const Node& hop) -> uint64_t {
-        const int line = hopLine[i];
-        if (line < 0) return 0;
-        if (hop.kind == NodeKind::Struct) return meta[line].offsetAddr;
-        const int inner = firstDeeperRow(line, hop);
-        if (inner < 0) return 0;
-        if (hop.kind == NodeKind::Array) return meta[inner].offsetAddr;
-        return isPointerKind(hop.kind) ? meta[inner].ptrBase : 0;
-    };
-    // The view root's own address: compose places a root at
-    // baseAddress + offset (its absOffsets seed), and the root header row is
-    // suppressed (the command row carries it), so compute rather than scan.
-    auto rootAddress = [&](uint64_t classId) -> uint64_t {
-        const int ci = classId ? tree.indexOfId(classId) : -1;
-        const int off = ci >= 0 ? tree.nodes[ci].offset : 0;
-        return tree.baseAddress + (off > 0 ? uint64_t(off) : 0);
-    };
+    // Per-crumb addresses come from the last compose (frameAddresses: the
+    // view root first, then the frame each hop opens); the sibling menus
+    // read the same vector, so a crumb and the rows under its chevron
+    // never disagree about where a class sits.
+    const QVector<uint64_t> frames = frameAddresses();
 
     // Dotted "class.field" crumbs: each crumb is the class you were IN plus the
     // field you followed OUT of it (focusPath[i] is the pointer left via);
@@ -2228,7 +2321,7 @@ AddressBarState RcxController::addressBarState() {
     // redundant-looking "field › class" pair on auto-named pointers.
     QVector<Crumb> crumbs;
     uint64_t container = m_viewRootId;  // depth 0 container = the view root
-    uint64_t address   = rootAddress(classIdFor(container));
+    uint64_t address   = frames.value(0);
     for (int i = 0; i < m_focusPath.size(); ++i) {
         int pi = tree.indexOfId(m_focusPath[i]);
         if (pi < 0) break;
@@ -2246,7 +2339,7 @@ AddressBarState RcxController::addressBarState() {
         // refId class, or the embedded struct itself (refId is 0 there, and
         // classLabelOf(0) would name the first root class instead).
         container = drillTargetId(p);
-        address   = frameAddress(i, p);
+        address   = frames.value(i + 1);
     }
     // Current (deepest) class — `container` is the frame the last hop opens, or
     // the view root when nothing is drilled.
@@ -9306,9 +9399,14 @@ NavEntry RcxController::currentNavEntry(RcxEditor* from) const {
         if (first >= 0 && first < m_lastResult.meta.size())
             e.anchorNodeId = m_lastResult.meta[first].nodeId;
     }
-    e.label = trailPathText(tree, m_viewRootId, m_focusPath)
-            + QStringLiteral("  @ 0x") + QString::number(tree.baseAddress, 16).toUpper();
+    e.label = currentNavLabel();
     return e;
+}
+
+QString RcxController::currentNavLabel() const {
+    const NodeTree& tree = m_doc->tree;
+    return trailPathText(tree, m_viewRootId, m_focusPath)
+         + QStringLiteral("  @ 0x") + QString::number(tree.baseAddress, 16).toUpper();
 }
 
 void RcxController::recordNav(RcxEditor* from) {

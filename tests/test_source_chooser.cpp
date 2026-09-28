@@ -76,8 +76,18 @@ private slots:
             entries.append(c);
         }
         m_popup->setSources(entries);
+        // popup() sizes the frame and shows it; then qWait + processEvents,
+        // never qWaitForWindowExposed: the hidden test desktop
+        // (tools/run_tests_hidden.py) never composites, so an exposure wait
+        // times out there — and its platform closes a Qt::Popup at the first
+        // event pump, so from here on the popup may be hidden again. Every
+        // test below drives the list synchronously (sendEvent on its
+        // viewport, the key on the list, currentIndex set by hand) and reads
+        // widget-level state — the row rects popup() laid out and the
+        // signals the handlers emit — none of which needs a mapped window.
+        // The same rule test_breadcrumb's menu tests follow.
         m_popup->popup(QPoint(100, 100));
-        QVERIFY(QTest::qWaitForWindowExposed(m_popup));
+        QTest::qWait(30);
         QApplication::processEvents();
 
         m_list = m_popup->findChild<QListView*>();

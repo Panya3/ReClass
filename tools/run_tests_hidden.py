@@ -11,13 +11,17 @@ documents as breaking ~16 GUI tests — that hides windows on the *same* desktop
 and trips a focus/window-station artifact. A real separate desktop keeps the
 tests' focus and activation semantics intact.
 
-KNOWN LIMITATION — tests that call `QTest::qWaitForWindowExposed()` fail here.
-An unrendered desktop never composites, so a window on it is never "exposed"
-and the wait times out. That is an artifact of the runner, not a defect in the
-code under test (test_source_chooser's 4 popup tests are the current example:
-they pass on the visible desktop). Such failures are reported separately below
-so a hidden run is never mistaken for a clean one; re-check those on the normal
-desktop before trusting a red result.
+KNOWN LIMITATION — a test that calls `QTest::qWaitForWindowExposed()` on a
+Qt::Popup fails here. An unrendered desktop never composites, so a popup on it
+is never "exposed" and the wait times out; the platform also closes a Qt::Popup
+at the first event pump after show(). That is an artifact of the runner, not a
+defect in the code under test. No in-tree test does this any more —
+test_source_chooser's four popup tests were the last, and they now show the
+popup with qWait + processEvents and drive its list synchronously, the way
+test_breadcrumb's menu tests do — but the detection stays: such failures are
+reported separately below so a hidden run is never mistaken for a clean one,
+and a new test that reintroduces the wait is flagged rather than red. Re-check
+a flagged test on the normal desktop before trusting a red result.
 
 Usage:
     python tools/run_tests_hidden.py                  # whole suite (ctest -j1)

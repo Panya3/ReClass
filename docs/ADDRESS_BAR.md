@@ -27,10 +27,10 @@ other strip starts on.
 | File | Role |
 |---|---|
 | `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the overflow rule (six fit steps, then the five narrow-pane steps), tooltips, context menus, the two edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
-| `src/widgets/address_bar_model.h` | Core-only model: `AddressBarState` (the value type pushed per refresh, `operator==` guards the relayout), `siblingFieldsOf` / `rootClassEntries` / `trailPathText` / `resolveDrillPath` over a `NodeTree`, and `AddressBarTreeQueries` (what the menus and the path edit pull on demand). |
+| `src/widgets/address_bar_model.h` | Core-only model: `AddressBarState` (the value type pushed per refresh, `operator==` guards the relayout), `siblingFieldsOf` / `rootClassEntries` / `trailPathText` / `resolveDrillPath` over a `NodeTree`, and `AddressBarTreeQueries` (what the menus and the path edit pull on demand). `SiblingEntry::address` (where a field leads) is left 0 here — the model has no memory; the controller fills it. |
 | `src/nav_history.h` | `NavEntry` (a PLACE: view root, trail, base + formula, saved-source index, scroll anchor, label) and `NavHistory` (push dedupes the head, truncates forward, cap 50, `back()` / `forward()` skip stale entries, `forgetSource` / `forgetAllSources` follow the saved-source list). |
 | `src/address_callbacks.h` | `makeAddressCallbacks(Provider*, ptrSize)` — the one `AddressParserCallbacks` block (module lookup, memory read, kernel paging) every evaluator shares. |
-| `src/controller.cpp` | `addressBarState()` / `pushAddressBarState()`, `rebaseTo`, `switchSibling`, `navigateToDrillPath`, `collapseToFocus`, `recordNav` / `goBack` / `goForward` / `goUp` / `jumpToHistory` / `restoreNav`, `containerOf` and the focus-path reconcile. |
+| `src/controller.cpp` | `addressBarState()` / `pushAddressBarState()` (over `focusHopLines` / `frameAddresses`, the compose-side lookups the crumbs and the sibling menus share), `siblingsForCrumb` (the model's list plus where each field leads), `rebaseTo`, `switchSibling`, `navigateToDrillPath`, `collapseToFocus`, `recordNav` / `goBack` / `goForward` / `goUp` / `jumpToHistory` / `restoreNav`, `currentNavLabel` (the history menu's "you are here" row), `containerOf` and the focus-path reconcile. |
 | `src/editor.cpp` | Owns the bar (layout item 0 above `m_sci`), bridges `Callbacks` to signals, routes the shortcuts through its KeyPress switch. Line 0 under it is the class header alone (see below). |
 | `src/paintutil.h` | `kGutter`, the device-exact edge fills (seam, divider, focus ring), `drawPixmapSnapped`, `pressedFill`. |
 | `tools/address_bar_render.cpp` | Harness: `address_bar_render <prefix> [theme]` — 1 / 3 / 6-crumb bars at 240 / 300 / 480 / 760 / 1080 / 1920 px, one sheet per width, every cell's rect + dpr on stdout (UTF-8, so `«` and `…` survive a redirect). |
@@ -45,7 +45,7 @@ Every cell is addressed by a string id — the namespace `itemRect(id)`,
 | Id | Cell | Width | Click |
 |---|---|---|---|
 | `back` `fwd` | Back / Forward, `arrow-left/right.svg` 14 px | 22 | one history step; right-click or press-and-hold on `back` opens the history list (so it stays reachable when `hist` is dropped). The overflow rule drops Forward at step 7d and Back — with the divider — last, at 7e, so the history list keeps an on-bar route until the very end; Alt+Left / Right still work |
-| `hist` | `chevron-down.svg` 12 px | 14 | the history menu: Back entries nearest first, a separator, Forward entries nearest first |
+| `hist` | `chevron-down.svg` 12 px | 14 | the history menu, Explorer's list: Back entries nearest first, then the place you are at — checked, disabled, worded as `currentNavLabel()` (`Trail.path  @ 0x…`, exactly what the next `recordNav` would store) — then Forward entries nearest first. No separator: the checked row is the divider |
 | `up` | `arrow-up.svg` | 22 | the parent crumb (`collapseToFocus` on the deepest hop) |
 | — | field divider: one device column, `containerBorderColor`, inset 4 px | 6 + 1 + 6 | everything right of it is "the field" |
 | `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source". Icon-only in a narrow pane (step 7a): the name lives in the tooltip, `sourceDisplayText()` is empty | 4 + 16 + 4 + text + 2 (icon-only: 4 + 16 + 2) | the source chooser, anchored under the chip; the chip reads pressed while it is up |
@@ -54,7 +54,7 @@ Every cell is addressed by a string id — the namespace `itemRect(id)`,
 | `base` | the formula if set else `0x…`, plus a `textMuted` `→ 0x…` suffix (what the formula resolves to; only beside a formula); in a narrow pane (step 7c) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + suffix + 6 | the base edit — always on the FULL formula |
 | `overflow` | `«` in `textDim`, present only when crumbs are folded | 18 | menu of the hidden crumbs, root first → `onCrumb(i)` |
 | `crumb:<i>` | one crumb: `Class.field` for an ancestor, bare `Class` for the deepest | 6 + text + 6 | ancestor → collapse below + scroll (one undo entry, one history entry); the deepest is inert (no fill, no hand) and only scrolls its header up |
-| `chev:<i>` | after crumb *i*, same › → ˅ flip | 14 | menu of the drillable fields of the class at crumb *i*, the trail's hop checked; the trailing one drills further |
+| `chev:<i>` | after crumb *i*, same › → ˅ flip | 14 | menu of the drillable fields of the class at crumb *i*, the trail's hop checked, each row saying where its field leads (`@ 0x…` in the row's tab column when known, always in its tooltip); the trailing one drills further |
 | `space` | the stretch, IBeam cursor | rest | the path edit |
 | `recent` | `chevron-down` `textFaint`, pinned at `width − 6 − 16` | 16 | the places menu: Recent (`GotoAddressDialog::loadRecent`), Bookmarks, `<module>` names, then "Go to address… Ctrl+G", "Clear recent" → `rebaseTo` |
 
@@ -73,7 +73,7 @@ tokens only).
 | Disabled | `setOpacity(0.40)` around the whole cell — never `textDim × 0.4`. Back / Forward / Up / history follow the controller's `canBack` / `canForward` / `canUp`; a disabled cell is laid out (the field never shifts when history appears) and its click is ignored. |
 | Keyboard focus | one device-exact 1-px ring in `borderFocused` (the four edge fills — a `QPen` rect is two rows at 125 %). |
 | Editing | the overlay is up; the seam row under the field turns `borderFocused` while the text parses / resolves and `markerError` while it does not (or the controller refused it). |
-| Tooltips | the widget's `toolTip` mirrors the hovered cell and the app's `GlobalTooltipBridge` shows it; `QEvent::ToolTip` is never handled here and nothing is dismissed on a hover change (the ribbon rule). Per crumb: `QWidgetPrivate  @ 0x7FF6…` from `LineMeta::ptrBase`, or `@ (unreadable)`. |
+| Tooltips | the widget's `toolTip` mirrors the hovered cell and the app's `GlobalTooltipBridge` shows it; `QEvent::ToolTip` is never handled here and nothing is dismissed on a hover change (the ribbon rule). Per crumb: `QWidgetPrivate  @ 0x7FF6…` from `LineMeta::ptrBase`, or `@ (unreadable)`. A sibling-menu row carries the same words as its `QAction::toolTip` (`vptr  →  QWidgetPrivate  @ 0x20`); the bridge resolves a `QMenu`'s action tips itself, so the menu needs no `setToolTipsVisible`. |
 
 ## Overflow
 
@@ -123,8 +123,14 @@ ellipsis to the parser and silently no-op).
 Two scopes, one hidden `QLineEdit` in `PanelSearchField`'s interior; the bar
 paints the focus seam under it. Enter is the only commit; Esc and losing
 focus restore (the Explorer / Goto-dialog rule). While an overlay is up the
-layout is frozen — a live tick's state push is stored and its relayout waits
-for the edit to end — and the cells it covers stop answering to hover.
+layout is frozen against STATE — a live tick's state push is stored and its
+relayout waits for the edit to end — and the cells it covers stop answering
+to hover. A pane RESIZE is not a state push: the cells re-lay out at the new
+width and the overlay follows them (`resizeEvent` → `followEditGeometry`,
+the same `editGeometryFor` rule a fresh open uses — the base cell grown to
+180 px for the base scope, base's right edge to `recent` for the path
+scope), the "after" paper is recomputed, and the text, caret and selection
+are left exactly as the user had them; Esc still restores.
 
 | Scope | Opened by | Text | Grammar | Commit |
 |---|---|---|---|---|
@@ -141,7 +147,14 @@ Scintilla line 0 is the class header alone:
 
 The chevron opens the view chooser (`typeSelectorRequested`), the class
 name is an inline rename (`EditTarget::RootClassName`), the keyword converts
-through its right-click menu, and the brace is furniture. The source label
+through its right-click menu, and the brace is furniture. The keyword is
+whatever `Node::resolvedClassKeyword()` prints for the root — `struct`,
+`class`, `enum` or `union` — and `commandRowRootStart` accepts exactly those
+four, glued to the chevron span's end (a union root once printed but never
+parsed: no type span, no name span, nothing to rename until it was
+converted). The right-click menu offers `struct` → Class, `class` → Struct,
+`union` → Struct or Class (`convertRootKeyword` refuses only `enum`, which
+offers nothing); the keyword is all a conversion changes. The source label
 and the base address that used to sit between the chevron and the keyword
 are the bar's cells now: line 0 scrolls away with the document, the bar
 never does, so the two navigation surfaces no longer hide each other, and
@@ -169,6 +182,27 @@ the deepest crumb lists that class's fields with nothing checked: drill
 further. `root.chev` lists the other roots (`rootClassEntries`, the same order
 as `rootClassNames`): a pick is a root jump — new view root, empty trail, one
 history entry.
+
+Every row also says **where its field leads** (`SiblingEntry::address`,
+filled by `RcxController::siblingsForCrumb` when the menu opens, never per
+refresh): an EXPANDED pointer from the last compose — the `ptrBase` stamped
+on the first row inside it, the same `frameAddresses()` data its crumb would
+show; a COLLAPSED pointer (or one expanded onto an empty class, which renders
+no row) from ONE provider read at the container's frame plus the field's
+offset, by compose's rule (a `Pointer32` reads four bytes, a sentinel is
+null, an RVA is base-relative) and only with a valid provider — never a
+module enumeration, at most one read per row; an embedded struct or array
+from its own row (container + offset). 0 = unknown: no source, a null or
+unreadable pointer, or a container frame the crumbs could not place. The
+bar prints it as `@ 0x…` after a tab in the row text —
+`siblingActionRowText` — which `QMenu` lays out right-aligned in its
+shortcut column for free (the places menu's `Go to address…\tCtrl+G` already
+uses it). It is NOT dimmed: the style paints that column in the item's own
+pen and dimming it would need a `QStyle` of the bar's own, which is not
+worth a suffix. An unknown address is left to the tooltip (`@ (unreadable)`),
+so a menu under a dead source is not a column of that word. The path edit's
+completion menu (`drillFieldsAt`) carries no addresses and keeps the plain
+row text.
 
 ## History versus undo
 
@@ -213,6 +247,13 @@ document load or a restore.
   controller-global: both panes of a split show the same state and only the
   pane the gesture came from scrolls (its first visible row is the anchor the
   entry records).
+- **The menu marks the current place.** Between the Back rows and the
+  Forward rows the history menu lists where you are — `currentNavLabel()`,
+  the label `recordNav` would store next — checked and disabled (data 0;
+  it never triggers). It is there whenever either stack has a restorable
+  entry, and it moves with every step: after Back, the place just left is
+  the first Forward row under it. Explorer's dropdown, with the check mark
+  as the divider and no separators.
 
 ## Shortcuts
 
@@ -269,10 +310,20 @@ a popup, ends keyboard mode.
   the bottom device row, the hover fill `t.hover`, and there must be no
   `indHoverSpan` pixel anywhere on the bar.
 - Line 0: `test_command_row` parses `buildCommandRowText`'s output back
-  through the real span functions; `test_breadcrumb` checks a live
-  controller's line 0 equals it and stays byte-identical across a rebase;
-  `test_editor` covers the row's tones, the root-name edit's keystroke rules
-  and the inert MCP status row.
+  through the real span functions (`row_unionKeyword` for the fourth
+  keyword); `test_breadcrumb` checks a live controller's line 0 equals it,
+  stays byte-identical across a rebase, and names a union root with an
+  editable name (`testLineZeroNamesAUnionRoot`); `test_editor` covers the
+  row's tones, the root-name edit's keystroke rules, the inert MCP status
+  row and the union root's rename (`testCommandRowUnionRootNameEditable`).
+- The finishing set: `testHistoryMenuMarksTheCurrentPlace` (the checked
+  row's text equals `currentNavLabel()` and moves with Back),
+  `testSiblingRowsSayWhereEachPointerLeads` (a `BufferProvider` holding
+  pointer values → `siblingsForCrumb(0)` addresses equal them, collapsed
+  by a read and expanded by compose alike; a `NullProvider` → 0 and
+  tooltip-only), `testEditOverlayFollowsAResize` (both scopes track the
+  base cell / path span at 1000 / 500 / 800 px with the text and selection
+  intact; Esc restores).
 - Harness: build `address_bar_render` (EXCLUDE_FROM_ALL), run it on the
   hidden desktop (`tools/run_tests_hidden.py`'s `run_hidden()`; set
   `QT_SCALE_FACTOR=1.25` in the driver's environment for the HiDPI pass) as
@@ -293,6 +344,8 @@ a popup, ends keyboard mode.
 - The bar has no `NodeTree`: what its menus and the path edit need arrives
   as `AddressBarTreeQueries`, pulled when a menu opens or a key is typed —
   never per refresh. Likewise the module list is `Provider::modulesCached()`,
-  never the enumerating syscall.
+  never the enumerating syscall, and a sibling row's address costs at most
+  one provider read, at menu-open time, only for a pointer compose has not
+  already dereferenced.
 - History is recorded at the gesture, in the controller; the widget only
   asks (`onBack`, `onHistoryJump(delta)` — stepped, not indexed).

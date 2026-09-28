@@ -99,6 +99,13 @@ struct SiblingEntry {
     bool     expanded = false;   // !collapsed — already open on screen
     bool     current = false;    // the hop the trail goes through
     int      offset = 0;         // Node::offset — the sort key
+    // Where the field leads: a pointer's dereferenced target, an embedded
+    // struct's or array's own address. 0 = unknown (no source, a null or
+    // unreadable pointer, an unknown container frame). The pure query
+    // below leaves it 0 — it has no memory; RcxController::siblingsForCrumb
+    // fills it from the last compose (expanded hops) or one provider read
+    // (collapsed pointers), at menu-open time only.
+    uint64_t address = 0;
 };
 
 // The drillable children of `classId`: NodeTree::childrenOf filtered by

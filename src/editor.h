@@ -160,12 +160,16 @@ public:
         m_moduleProvider   = std::move(modules);
     }
     // The bar's history menu: the controller's Back and Forward stacks
-    // (oldest first, as NavHistory keeps them; the bar orders the rows).
-    // Pulled when the menu opens — never per refresh.
+    // (oldest first, as NavHistory keeps them; the bar orders the rows)
+    // and the label of the place the user is at now — the checked,
+    // disabled "you are here" row between the two. Pulled when the menu
+    // opens — never per refresh.
     void setAddressBarHistory(std::function<QVector<NavEntry>()> back,
-                              std::function<QVector<NavEntry>()> forward) {
+                              std::function<QVector<NavEntry>()> forward,
+                              std::function<QString()> current = {}) {
         m_navBackProvider    = std::move(back);
         m_navForwardProvider = std::move(forward);
+        m_navCurrentProvider = std::move(current);
     }
     // What the bar's chevron menus and its path edit read from the tree
     // (siblings of a crumb, the root classes, the fields a dotted path
@@ -503,6 +507,7 @@ private:
     std::function<QStringList()>           m_moduleProvider;
     std::function<QVector<NavEntry>()>     m_navBackProvider;    // address bar history menu
     std::function<QVector<NavEntry>()>     m_navForwardProvider;
+    std::function<QString()>               m_navCurrentProvider; // its checked "you are here" row
     QLabel* m_exprResultLabel = nullptr;
     // The unified hover preview host (HoverPopupHost, file-local in
     // editor.cpp) replaces the old m_disasmPopup + m_structPreviewPopup

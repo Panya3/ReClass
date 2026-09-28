@@ -43,6 +43,7 @@
 #include "gotoaddressdialog.h"
 #include "paintutil.h"
 #include "providers/buffer_provider.h"
+#include "providers/null_provider.h"   // a source nothing can be read from
 #include "sourcechooserpopup.h"
 #include "typeselectorpopup.h"      // TypeEntry / TypePopupMode: the line-0 root pick
 #include "widgets/address_bar.h"
@@ -2131,11 +2132,22 @@ private slots:
         QVERIFY(!chev.isNull());
         QMenu* menu = openMenuOn(bar, QStringLiteral("chev:0"), QStringLiteral("rcxAddressBarSiblingMenu"));
         QVERIFY(menu);
-        const QVector<SiblingEntry> sibs = siblingFieldsOf(m_doc->tree, m_id.editor, m_id.vptr);
+        // The rows are the controller's entries (the model's list plus the
+        // address each field leads to) through the one row-text rule.
+        const QVector<SiblingEntry> sibs = m_ctrl->siblingsForCrumb(0);
         QStringList expected;
-        for (const SiblingEntry& e : sibs) expected << AddressBar::siblingActionText(e);
+        for (const SiblingEntry& e : sibs) expected << AddressBar::siblingActionRowText(e);
         QCOMPARE(actionTexts(menu), expected);
         QCOMPARE(expected.size(), 2);                          // vptr, ptr2 — dptr (no refId) is no hop
+        {
+            // Same fields, same order as the pure model query.
+            const QVector<SiblingEntry> model = siblingFieldsOf(m_doc->tree, m_id.editor, m_id.vptr);
+            QCOMPARE(model.size(), sibs.size());
+            for (int i = 0; i < model.size(); ++i) {
+                QCOMPARE(sibs[i].id, model[i].id);
+                QCOMPARE(sibs[i].current, model[i].current);
+            }
+        }
         QVERIFY2(expected[0].startsWith(QStringLiteral("vptr")), qPrintable(expected[0]));
         QVERIFY2(expected[0].contains(QStringLiteral("QWidgetPrivate")), qPrintable(expected[0]));
         QVERIFY2(expected[1].startsWith(QStringLiteral("ptr2")), qPrintable(expected[1]));
@@ -3167,10 +3179,14 @@ private slots:
         QCOMPARE(m_ctrl->backEntries().size(), 2);
         QMenu* menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
         QVERIFY(menu);
+        // …under the current place's checked row (see
+        // testHistoryMenuMarksTheCurrentPlace).
         QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidget  @ 0x0"),
-                                                  QStringLiteral("RcxEditor  @ 0x0") }));
+                                                  QStringLiteral("RcxEditor  @ 0x0"),
+                                                  QStringLiteral("QWidget  @ 0x40") }));
         QCOMPARE(menu->actions()[0]->data().toInt(), -1);
         QCOMPARE(menu->actions()[1]->data().toInt(), -2);
+        QVERIFY(!menu->actions()[2]->isEnabled());
         menu->actions()[1]->trigger();
         closeMenuOn(bar, QStringLiteral("hist"), menu);
         QCOMPARE(m_ctrl->viewRootId(), m_id.editor);            // the row named A and landed on A
@@ -3255,13 +3271,17 @@ private slots:
         QApplication::processEvents();
         QCOMPARE(m_ctrl->backEntries().size(), 2);
         QSignalSpy jump(m_editor, &RcxEditor::historyJumpRequested);
-        // Nearest first: the row's data is the step count its pick asks for.
+        // Nearest first, then the current place (checked, disabled — see
+        // testHistoryMenuMarksTheCurrentPlace): a row's data is the step
+        // count its pick asks for.
         QMenu* menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
         QVERIFY(menu);
         QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidgetPrivate  @ 0x0"),
-                                                  QStringLiteral("RcxEditor.vptr  @ 0x0") }));
+                                                  QStringLiteral("RcxEditor.vptr  @ 0x0"),
+                                                  QStringLiteral("QWidgetPrivate  @ 0x40") }));
         QCOMPARE(menu->actions()[0]->data().toInt(), -1);
         QCOMPARE(menu->actions()[1]->data().toInt(), -2);
+        QVERIFY(!menu->actions()[2]->isEnabled());              // you are here
         menu->actions()[1]->trigger();
         closeMenuOn(bar, QStringLiteral("hist"), menu);
         QCOMPARE(jump.count(), 1);
@@ -3270,30 +3290,35 @@ private slots:
         QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
         QCOMPARE(m_doc->tree.baseAddress, 0ULL);
         // Stepped, not indexed: both places walked over are on Forward now,
-        // nearest first, and the stack behind is empty.
+        // nearest first under the current row, and the stack behind is empty.
         QVERIFY(m_ctrl->backEntries().isEmpty());
         QCOMPARE(m_ctrl->forwardEntries().size(), 2);
         menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
         QVERIFY(menu);
-        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidgetPrivate  @ 0x0"),
+        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("RcxEditor.vptr  @ 0x0"),
+                                                  QStringLiteral("QWidgetPrivate  @ 0x0"),
                                                   QStringLiteral("QWidgetPrivate  @ 0x40") }));
-        QCOMPARE(menu->actions()[0]->data().toInt(), 1);
-        QCOMPARE(menu->actions()[1]->data().toInt(), 2);
-        menu->actions()[1]->trigger();
+        QVERIFY(!menu->actions()[0]->isEnabled());
+        QCOMPARE(menu->actions()[1]->data().toInt(), 1);
+        QCOMPARE(menu->actions()[2]->data().toInt(), 2);
+        menu->actions()[2]->trigger();
         closeMenuOn(bar, QStringLiteral("hist"), menu);
         QCOMPARE(jump.at(1).at(0).toInt(), 2);
         QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
         QCOMPARE(m_doc->tree.baseAddress, 0x40ULL);
         QCOMPARE(m_ctrl->backEntries().size(), 2);
         QVERIFY(m_ctrl->forwardEntries().isEmpty());
-        // Both stacks populated: Back rows, a separator, Forward rows.
+        // Both stacks populated: Back rows, the current row, Forward rows —
+        // no separator, the checked row is the divider.
         m_ctrl->goBack(m_editor);
         QApplication::processEvents();
         menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
         QVERIFY(menu);
         QCOMPARE(menu->actions().size(), 3);
         QCOMPARE(menu->actions()[0]->text(), QStringLiteral("RcxEditor.vptr  @ 0x0"));
-        QVERIFY(menu->actions()[1]->isSeparator());
+        QVERIFY(!menu->actions()[1]->isSeparator());
+        QCOMPARE(menu->actions()[1]->text(), QStringLiteral("QWidgetPrivate  @ 0x0"));
+        QVERIFY(menu->actions()[1]->isChecked());
         QCOMPARE(menu->actions()[2]->text(), QStringLiteral("QWidgetPrivate  @ 0x40"));
         closeMenuOn(bar, QStringLiteral("hist"), menu);
         // The undo stack saw exactly the one rebase through all of it.
@@ -3717,6 +3742,197 @@ private slots:
         const int maxFirst1 = qMax(0, lines1 - onScreen1);
         QVERIFY2(maxFirst1 > 0, "pane A not short enough to scroll — the assertion below would be vacuous");
         QCOMPARE((int)sci1->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), qMin(parentLine, maxFirst1));
+    }
+
+    // ── The history menu's "you are here" row ──
+
+    void testHistoryMenuMarksTheCurrentPlace() {
+        // Explorer parity: between the Back rows and the Forward rows sits
+        // the place the user is at — checked, disabled, worded exactly as
+        // the controller would record it now (trailPathText + the base).
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        jumpToDefinitionOf(m_id.vptr);                          // leaves RcxEditor.vptr @ 0x0
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));      // leaves QWidgetPrivate @ 0x0
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->backEntries().size(), 2);
+        const QString here = m_ctrl->currentNavLabel();
+        QCOMPARE(here, trailPathText(m_doc->tree, m_ctrl->viewRootId(), m_ctrl->focusPath())
+                           + QStringLiteral("  @ 0x40"));
+        QCOMPARE(here, m_ctrl->currentNavEntry(m_editor).label);
+        QMenu* menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("QWidgetPrivate  @ 0x0"),
+                                                  QStringLiteral("RcxEditor.vptr  @ 0x0"), here }));
+        QAction* cur = menu->actions()[2];
+        QVERIFY(cur->isCheckable());
+        QVERIFY(cur->isChecked());
+        QVERIFY(!cur->isEnabled());
+        QCOMPARE(cur->data().toInt(), 0);
+        for (QAction* a : menu->actions()) QVERIFY(!a->isSeparator());
+        QVERIFY(!menu->actions()[0]->isChecked());
+        QVERIFY(!menu->actions()[1]->isChecked());
+        closeMenuOn(bar, QStringLiteral("hist"), menu);
+        // One step back: the row moves with the user — the place just left
+        // sits on Forward below it, unchecked and live.
+        m_ctrl->goBack(m_editor);
+        QApplication::processEvents();
+        menu = openMenuOn(bar, QStringLiteral("hist"), QStringLiteral("rcxAddressBarHistoryMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionTexts(menu), (QStringList{ QStringLiteral("RcxEditor.vptr  @ 0x0"),
+                                                  QStringLiteral("QWidgetPrivate  @ 0x0"),
+                                                  QStringLiteral("QWidgetPrivate  @ 0x40") }));
+        QCOMPARE(menu->actions()[1]->text(), m_ctrl->currentNavLabel());
+        QVERIFY(menu->actions()[1]->isChecked());
+        QVERIFY(!menu->actions()[1]->isEnabled());
+        QVERIFY(!menu->actions()[2]->isChecked());
+        QVERIFY(menu->actions()[2]->isEnabled());
+        QCOMPARE(menu->actions()[2]->data().toInt(), 1);
+        closeMenuOn(bar, QStringLiteral("hist"), menu);
+    }
+
+    // ── Sibling rows say where each pointer leads ──
+
+    void testSiblingRowsSayWhereEachPointerLeads() {
+        // The bytes hold real pointers: RcxEditor@0 .vptr = 0x20, .ptr2 =
+        // 0x38, QWidgetPrivate@0x20 .parent = 0x30. A collapsed pointer's
+        // address is ONE provider read at container + offset; an expanded
+        // one is what compose dereferenced (ptrBase inside it) — the same
+        // number, off the data the crumbs use.
+        QByteArray bytes = chainBytes();
+        qToLittleEndian<quint64>(0x38, bytes.data() + 0x18);
+        m_doc->provider = std::make_unique<BufferProvider>(bytes);
+        const uint64_t ptr2 = addSibling();                     // ptr2 at +0x18, collapsed
+        QVector<SiblingEntry> sibs = m_ctrl->siblingsForCrumb(0);
+        QCOMPARE(sibs.size(), 2);
+        QCOMPARE(sibs[0].id, m_id.vptr);
+        QVERIFY(!sibs[0].expanded);
+        QCOMPARE(sibs[0].address, 0x20ULL);                     // read, not rendered
+        QCOMPARE(sibs[1].id, ptr2);
+        QCOMPARE(sibs[1].address, 0x38ULL);
+        // The pure model query has no memory: its entries are unplaced.
+        for (const SiblingEntry& e : siblingFieldsOf(m_doc->tree, m_id.editor, 0))
+            QCOMPARE(e.address, 0ULL);
+        // An expanded hop: compose's ptrBase; the level under it reads at
+        // that frame.
+        drillOneLevel();                                        // vptr open, trail RcxEditor.vptr
+        sibs = m_ctrl->siblingsForCrumb(0);
+        QVERIFY(sibs[0].expanded);
+        QCOMPARE(sibs[0].address, 0x20ULL);
+        QCOMPARE(sibs[1].address, 0x38ULL);
+        const QVector<SiblingEntry> inner = m_ctrl->siblingsForCrumb(1);   // QWidgetPrivate's fields
+        QCOMPARE(inner.size(), 1);
+        QCOMPARE(inner[0].id, m_id.parent);
+        QCOMPARE(inner[0].address, 0x30ULL);                    // read at 0x20 + 0
+        // The row carries it: "@ 0x…" in the tab column and in the tooltip.
+        AddressBar* bar = m_editor->addressBar();
+        QMenu* menu = openMenuOn(bar, QStringLiteral("chev:0"), QStringLiteral("rcxAddressBarSiblingMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions()[0]->text(), AddressBar::siblingActionText(sibs[0]) + QStringLiteral("\t@ 0x20"));
+        QCOMPARE(menu->actions()[1]->text(), AddressBar::siblingActionText(sibs[1]) + QStringLiteral("\t@ 0x38"));
+        QVERIFY2(menu->actions()[0]->toolTip().endsWith(QStringLiteral("@ 0x20")), qPrintable(menu->actions()[0]->toolTip()));
+        QVERIFY2(menu->actions()[1]->toolTip().endsWith(QStringLiteral("@ 0x38")), qPrintable(menu->actions()[1]->toolTip()));
+        closeMenuOn(bar, QStringLiteral("chev:0"), menu);
+        // A null provider: nothing can be read, so nothing is placed, and
+        // the rows say so in their tooltip only — the tab column stays empty.
+        m_doc->provider = std::make_unique<NullProvider>();
+        m_ctrl->refresh();
+        sibs = m_ctrl->siblingsForCrumb(0);
+        QCOMPARE(sibs.size(), 2);
+        QCOMPARE(sibs[0].address, 0ULL);
+        QCOMPARE(sibs[1].address, 0ULL);
+        menu = openMenuOn(bar, QStringLiteral("chev:0"), QStringLiteral("rcxAddressBarSiblingMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions()[0]->text(), AddressBar::siblingActionText(sibs[0]));
+        QVERIFY(!menu->actions()[0]->text().contains(QLatin1Char('\t')));
+        QVERIFY2(menu->actions()[0]->toolTip().endsWith(QStringLiteral("@ (unreadable)")), qPrintable(menu->actions()[0]->toolTip()));
+        closeMenuOn(bar, QStringLiteral("chev:0"), menu);
+    }
+
+    // ── The edit overlay follows a pane resize ──
+
+    void testEditOverlayFollowsAResize() {
+        // A resize while an edit is up moves the overlay with the cells —
+        // the field a fresh open would take at the new width — and leaves
+        // the text, caret and selection alone; Esc still restores.
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+        s.resolvedBase = 0x7FF6DEAD1234ULL;
+        bar.setState(s);
+        showBar(bar, 800);
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isBaseEditing());
+        const QString text = bar.editText();
+        bar.editWidget()->setSelection(2, 5);
+        for (int w : {1000, 500, 800}) {
+            bar.resize(w, AddressBar::kAddressBarHeight);
+            QApplication::processEvents();
+            QCOMPARE(bar.width(), w);
+            const QRect base   = bar.itemRect(QStringLiteral("base"));     // the cell at the new width
+            const QRect recent = bar.itemRect(QStringLiteral("recent"));
+            QVERIFY2(bar.isBaseEditing(), qPrintable(QString::number(w)));
+            QCOMPARE(bar.editRect(), bar.editWidget()->geometry());
+            QCOMPARE(bar.editRect().left(), base.left());
+            QVERIFY2(bar.editRect().width() >= AddressBar::kEditMinW, qPrintable(QString::number(w)));
+            QVERIFY2(bar.rect().contains(bar.editRect()), qPrintable(QString::number(w)));
+            QVERIFY2(bar.editRect().right() < recent.left(), qPrintable(QString::number(w)));
+            QCOMPARE(bar.editCoveredRect().left(), bar.editRect().left());
+            QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);   // the 'after' paper, recomputed
+            QCOMPARE(bar.editText(), text);
+            QCOMPARE(bar.editWidget()->selectedText(), text.mid(2, 5));
+        }
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        QCOMPARE(bar.state().baseFormula, s.baseFormula);
+        // The path scope follows the same way: from the base's right edge
+        // to the recent cell, at every width that has room for it.
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("space")).center());
+        QVERIFY(bar.isPathEditing());
+        const QString path = bar.editText();
+        for (int w : {1000, 800}) {
+            bar.resize(w, AddressBar::kAddressBarHeight);
+            QApplication::processEvents();
+            const QRect base   = bar.itemRect(QStringLiteral("base"));
+            const QRect recent = bar.itemRect(QStringLiteral("recent"));
+            QCOMPARE(bar.editRect(), bar.editWidget()->geometry());
+            QCOMPARE(bar.editRect().left(), base.right() + 1 + AddressBar::kCrumbPad - 2);
+            QCOMPARE(bar.editRect().right(), recent.left() - AddressBar::kChevW - 1);
+            QCOMPARE(bar.editCoveredRect().left(), base.right() + 1);
+            QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);
+            QCOMPARE(bar.editText(), path);
+        }
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+    }
+
+    // ── A union root on line 0 ──
+
+    void testLineZeroNamesAUnionRoot() {
+        // A union viewed as the root: updateCommandRow prints its keyword
+        // (resolvedClassKeyword), the line-0 parsers read it back at the
+        // chevron, the name is the inline rename, and the bar's crumb and
+        // root row carry the keyword too.
+        m_doc->tree.nodes[idx(m_id.editor)].classKeyword = QStringLiteral("union");
+        m_ctrl->refresh();
+        QApplication::processEvents();
+        const QString line = lineZeroText();
+        QCOMPARE(line, buildCommandRowText(QStringLiteral("union"), QStringLiteral("RcxEditor"), false));
+        const ColumnSpan chev = commandRowChevronSpan(line);
+        QVERIFY(chev.valid);
+        const ColumnSpan rt = commandRowRootTypeSpan(line);
+        QVERIFY2(rt.valid, qPrintable(line));
+        QCOMPARE(rt.start, chev.end);
+        QCOMPARE(line.mid(rt.start, rt.end - rt.start), QStringLiteral("union"));
+        const ColumnSpan rn = commandRowRootNameSpan(line);
+        QVERIFY2(rn.valid, qPrintable(line));
+        QCOMPARE(line.mid(rn.start, rn.end - rn.start), QStringLiteral("RcxEditor"));
+        QCOMPARE(crumbs()[0].keyword, QStringLiteral("union"));
+        QCOMPARE(AddressBar::rootActionText(rootClassEntries(m_doc->tree)[0]), QStringLiteral("union RcxEditor"));
+        QVERIFY(m_editor->beginInlineEdit(EditTarget::RootClassName, 0));
+        QVERIFY(m_editor->isEditing());
+        m_editor->cancelInlineEdit();
+        QVERIFY(!m_editor->isEditing());
     }
 };
 

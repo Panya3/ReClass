@@ -499,7 +499,13 @@ public:
     // The drillable fields of the class at crumb `level` (0 = the view root,
     // i = the class focus hop i-1 opens), the hop the trail goes through
     // flagged current; level == focusPath().size() is the deepest class and
-    // nothing is current. What a chev:<level> menu lists.
+    // nothing is current. What a chev:<level> menu lists. Each entry's
+    // address says where the field leads: an expanded hop from the last
+    // compose (the ptrBase stamped inside it — the same data the crumbs
+    // read), a collapsed pointer from ONE provider read at the container
+    // plus its offset (only with a valid provider, never a module
+    // enumeration), an embedded struct / array from its own row. Called
+    // when a menu opens, never per refresh.
     QVector<SiblingEntry> siblingsForCrumb(int level) const;
     // The drillable fields of the class a dotted path lands in ("Player" →
     // Player's fields, "Player.stats" → Stats's); an empty path lists the
@@ -583,6 +589,10 @@ public:
     // visible row. What recordNav pushes and what a step hands to
     // NavHistory as the place being left.
     NavEntry currentNavEntry(RcxEditor* from = nullptr) const;
+    // The label currentNavEntry would record now — "Trail.path  @ 0x…" —
+    // without the scroll anchor. The history menu's checked "you are
+    // here" row, so it reads exactly like the entries around it.
+    QString currentNavLabel() const;
 
     RcxDocument* document() const { return m_doc; }
     void setEditorFont(const QString& fontName);
@@ -746,6 +756,15 @@ private:
     // Push that snapshot to every editor's bar (each bar early-returns on an
     // equal state, so the refresh tail calls this unconditionally).
     void pushAddressBarState();
+    // The compose-side lookups the crumbs and the sibling menus share, over
+    // m_lastResult.meta (see addressBarState for the scan rule):
+    //   focusHopLines  — the rendered line of each focus hop, -1 when it
+    //                    (and so every deeper hop) has no row;
+    //   frameAddresses — the absolute address of the frame each crumb
+    //                    names: [0] the view root, [i+1] what hop i opens;
+    //                    0 = unknown / unreadable. Size focusPath.size()+1.
+    QVector<int>      focusHopLines() const;
+    QVector<uint64_t> frameAddresses() const;
 
     // ── Class creation (one canonical scheme, shared by every creator) ──
     // Unique struct type name: `base`, else `base_2`, `base_3`, …

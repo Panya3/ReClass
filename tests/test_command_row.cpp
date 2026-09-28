@@ -73,6 +73,24 @@ private slots:
         checkRow(en, QStringLiteral("enum"), QStringLiteral("Color"));
     }
 
+    void row_unionKeyword() {
+        // A union root: resolvedClassKeyword() prints it and the parsers
+        // take it at the chevron like the other three. Before this the row
+        // was built but never parsed — a union viewed as the root had no
+        // type span and no name span, so nothing on line 0 was tinted or
+        // renamable until it was converted to something else.
+        const QString row = buildCommandRowText(QStringLiteral("union"), QStringLiteral("Data"), false);
+        QCOMPARE(row, QStringLiteral("[▸] union Data {"));
+        checkRow(row, QStringLiteral("union"), QStringLiteral("Data"));
+        checkRow(buildCommandRowText(QStringLiteral("union"), QStringLiteral("Data"), true),
+                 QStringLiteral("union"), QStringLiteral("Data"));
+        // The same anchoring rules as the others: glued to the name or one
+        // space late, and it is not a keyword.
+        QVERIFY(!commandRowRootTypeSpan(QStringLiteral("[▸] unionData {")).valid);
+        QVERIFY(!commandRowRootTypeSpan(QStringLiteral("[▸]  union Data {")).valid);
+        QVERIFY(!commandRowRootNameSpan(QStringLiteral("[▸] [Claude: union Data added]")).valid);
+    }
+
     void row_braceWrapOnAndOff() {
         const QString off = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Player"), false);
         const QString on  = buildCommandRowText(QStringLiteral("struct"), QStringLiteral("Player"), true);
@@ -98,7 +116,8 @@ private slots:
         // the header. No address cell, no source label, no elision — a
         // long name is printed whole.
         const QString longName = QStringLiteral("AVeryLongClassNameThatUsedToShareTheRowWithAnAddress");
-        for (const QString& kw : {QStringLiteral("struct"), QStringLiteral("class"), QStringLiteral("enum")}) {
+        for (const QString& kw : {QStringLiteral("struct"), QStringLiteral("class"),
+                                  QStringLiteral("enum"), QStringLiteral("union")}) {
             const QString row = buildCommandRowText(kw, longName, false);
             QCOMPARE(row.mid(commandRowChevronSpan(row).end), kw + QLatin1Char(' ') + longName + QStringLiteral(" {"));
             checkRow(row, kw, longName);

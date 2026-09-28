@@ -227,6 +227,11 @@ public:
         // menu lists each nearest first).
         std::function<QVector<NavEntry>()>     backEntries;
         std::function<QVector<NavEntry>()>     forwardEntries;
+        // The label the controller would record for the place the user is
+        // at now (NavEntry::label's shape, "Trail.path  @ 0x…"): the
+        // history menu's checked, disabled "you are here" row between the
+        // Back rows and the Forward rows — Explorer's list.
+        std::function<QString()>               currentLabel;
     };
 
     // What the chevron menus and the path edit read from the tree, pulled
@@ -244,6 +249,26 @@ public:
         return (e.classLabel.isEmpty() || e.classLabel == e.field)
             ? e.field
             : e.field + QStringLiteral("  ") + QChar(0x2192) + QStringLiteral("  ") + e.classLabel;
+    }
+    // Where the field leads, as the sibling menu says it: "@ 0x…", or
+    // "@ (unreadable)" when the controller could not place it (no source,
+    // a null or unreadable pointer, an unknown frame). The crumb tooltip's
+    // words, so a row and the crumb it would become agree.
+    static QString siblingAddressText(const SiblingEntry& e) {
+        return e.address != 0 ? QStringLiteral("@ ") + address_bar_detail::hex(e.address)
+                              : QStringLiteral("@ (unreadable)");
+    }
+    // A chevron-menu row: the text above plus, after a tab, the address
+    // when it is known. QMenu lays the part after a tab out in its
+    // shortcut column — right-aligned, clear of the labels — for free (the
+    // places menu's "Go to address…\tCtrl+G" already relies on it). It is
+    // NOT one tone down: the style paints that column in the item's own
+    // pen, and dimming it would take a QStyle of the bar's own, which is
+    // not worth a suffix. An unknown address is left to the tooltip, so
+    // a column of "(unreadable)" never crowds a menu under a dead source.
+    static QString siblingActionRowText(const SiblingEntry& e) {
+        return e.address != 0 ? siblingActionText(e) + QLatin1Char('\t') + siblingAddressText(e)
+                              : siblingActionText(e);
     }
     // A root.chev row: "struct Player".
     static QString rootActionText(const RootEntry& r) {
@@ -350,17 +375,47 @@ public:
     void beginBaseEdit() {
         if (m_editVisible && m_editScope == EditScope::Base) { m_edit->setFocus(); m_edit->selectAll(); return; }
         if (m_editVisible) endEdit();
+        QRect r;
+        int coveredLeft = 0;
+        if (!editGeometryFor(EditScope::Base, &r, &coveredLeft)) return;
+        openEdit(EditScope::Base, r, coveredLeft, baseFullText());
+    }
+
+    // The overlay's rect for `scope` at the CURRENT layout, and the left
+    // edge of what it covers. One rule for opening an edit and for
+    // following a pane resize while one is up (resizeEvent), so the
+    // field sits where a fresh open would put it at the new width. False
+    // when the base is not laid out (an empty bar).
+    bool editGeometryFor(EditScope scope, QRect* r, int* coveredLeft) const {
         const QRect base = itemRect(QStringLiteral("base"));
-        if (base.isNull()) return;
-        // The base cell grown rightward to the minimum, stopping short of
-        // the recent cell. The crumbs under it are simply covered — the
-        // layout is frozen while the overlay is up, so nothing shifts.
+        if (base.isNull()) return false;
         const int limit = editLimit();
-        QRect r = base;
-        r.setWidth(qMax(base.width(), kEditMinW));
-        if (r.right() >= limit) r.setRight(limit - 1);
-        if (r.width() < kBaseMinW) r.setWidth(kBaseMinW);   // a narrow strip: cover `recent` rather than shrink to nothing
-        openEdit(EditScope::Base, r, r.left(), baseFullText());
+        if (scope == EditScope::Base) {
+            // The base cell grown rightward to the minimum, stopping short
+            // of the recent cell. The crumbs under it are simply covered —
+            // the layout is frozen while the overlay is up, so nothing
+            // shifts.
+            QRect g = base;
+            g.setWidth(qMax(base.width(), kEditMinW));
+            if (g.right() >= limit) g.setRight(limit - 1);
+            if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);   // a narrow strip: cover `recent` rather than shrink to nothing
+            *r = g;
+            *coveredLeft = g.left();
+            return true;
+        }
+        const int covered = base.right() + 1;
+        // The line edit's own left padding is 2 px (panelFieldInteriorQss);
+        // the crumb label sat kCrumbPad in — start the field kCrumbPad - 2
+        // later so the text does not jump when the overlay opens.
+        QRect g(covered + kCrumbPad - 2, kCellTop, 0, kCellH);
+        g.setRight(limit - 1);
+        // A narrow strip: keep the field usable — grow back over the base,
+        // then past the recent cell, before shrinking below the minimum.
+        if (g.width() < kEditMinW) g.setLeft(qMax(base.left(), limit - kEditMinW));
+        if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);
+        *r = g;
+        *coveredLeft = qMin(covered, g.left());
+        return true;
     }
 
     // PATH: the overlay from the base's right edge to the recent cell on
@@ -373,20 +428,10 @@ public:
     void beginPathEdit() {
         if (m_editVisible && m_editScope == EditScope::Path) { m_edit->setFocus(); m_edit->selectAll(); return; }
         if (m_editVisible) endEdit();
-        const QRect base = itemRect(QStringLiteral("base"));
-        if (base.isNull()) return;
-        const int limit = editLimit();
-        const int coveredLeft = base.right() + 1;
-        // The line edit's own left padding is 2 px (panelFieldInteriorQss);
-        // the crumb label sat kCrumbPad in — start the field kCrumbPad - 2
-        // later so the text does not jump when the overlay opens.
-        QRect r(coveredLeft + kCrumbPad - 2, kCellTop, 0, kCellH);
-        r.setRight(limit - 1);
-        // A narrow strip: keep the field usable — grow back over the base,
-        // then past the recent cell, before shrinking below the minimum.
-        if (r.width() < kEditMinW) r.setLeft(qMax(base.left(), limit - kEditMinW));
-        if (r.width() < kBaseMinW) r.setWidth(kBaseMinW);
-        openEdit(EditScope::Path, r, qMin(coveredLeft, r.left()), m_state.trailPath);
+        QRect r;
+        int coveredLeft = 0;
+        if (!editGeometryFor(EditScope::Path, &r, &coveredLeft)) return;
+        openEdit(EditScope::Path, r, coveredLeft, m_state.trailPath);
     }
 
     bool isEditing() const { return m_editVisible; }
@@ -746,6 +791,14 @@ protected:
     void resizeEvent(QResizeEvent* e) override {
         QWidget::resizeEvent(e);
         markLayoutDirty();
+        // A pane resize while an edit is up: the cells re-lay out at the
+        // new width (ensureLayout keys on it), so the overlay follows them
+        // — the field rect a fresh open would take now, for the scope
+        // that is open. The text, the caret and the selection are the
+        // user's and stay untouched; only geometry moves. Without this
+        // the overlay kept its opening rect while the base cell and the
+        // recent cell went elsewhere.
+        if (m_editVisible) followEditGeometry();
     }
 
     void changeEvent(QEvent* e) override {
@@ -1661,16 +1714,22 @@ private:
         showHistoryMenu(QStringLiteral("back"));
     }
 
-    // Back entries nearest first, a separator, then Forward entries nearest
-    // first — each row's data is the step count its pick asks for. The
-    // stacks arrive oldest first (NavHistory's order), so both are walked
-    // from the end. Hung under `cellId`: `hist`, or `back` for the
-    // right-click / hold fallback.
+    // Explorer's list: Back entries nearest first, then the place the user
+    // is at now — checked and disabled, "you are here" — then Forward
+    // entries nearest first. Each row's data is the step count its pick
+    // asks for (0 on the current row, which never triggers). The checked
+    // row is the divider, so there is no separator: with one, "back |
+    // current" read as a boundary between the past and a lone item
+    // rather than as a list you are somewhere in. The stacks arrive
+    // oldest first (NavHistory's order), so both are walked from the
+    // end. Hung under `cellId`: `hist`, or `back` for the right-click /
+    // hold fallback.
     void showHistoryMenu(const QString& cellId) {
         const QRect r = itemRect(cellId);
         if (r.isNull()) return;
         const QVector<NavEntry> back = m_cb.backEntries ? m_cb.backEntries() : QVector<NavEntry>();
         const QVector<NavEntry> fwd  = m_cb.forwardEntries ? m_cb.forwardEntries() : QVector<NavEntry>();
+        const QString here = m_cb.currentLabel ? m_cb.currentLabel() : QString();
         auto* menu = new QMenu(this);
         menu->setObjectName(QStringLiteral("rcxAddressBarHistoryMenu"));
         auto addRow = [&](const NavEntry& e, int delta) {
@@ -1681,7 +1740,13 @@ private:
             });
         };
         for (int i = back.size() - 1; i >= 0; --i) addRow(back[i], -(back.size() - i));
-        if (!back.isEmpty() && !fwd.isEmpty()) menu->addSeparator();
+        if (!here.isEmpty() && (!back.isEmpty() || !fwd.isEmpty())) {
+            QAction* cur = menu->addAction(here);
+            cur->setCheckable(true);
+            cur->setChecked(true);
+            cur->setEnabled(false);
+            cur->setData(0);
+        }
         for (int i = fwd.size() - 1; i >= 0; --i) addRow(fwd[i], fwd.size() - i);
         if (menu->actions().isEmpty()) {
             QAction* none = menu->addAction(QStringLiteral("No history"));
@@ -1732,7 +1797,12 @@ private:
     // listed — expanded or not — because a pick is a switch (collapse the
     // current hop, open the chosen one) and not a jump between things
     // already open. The chevron after the deepest crumb lists that class's
-    // fields with nothing checked: drill further.
+    // fields with nothing checked: drill further. Each row says where its
+    // field leads: the address the controller placed it at (see
+    // siblingsForCrumb — compose data for an open hop, one read for a
+    // closed pointer, at this open only) in the row's tab column when it
+    // is known, and always in the row's tooltip, "(unreadable)" included
+    // — the GlobalTooltipBridge resolves a QMenu's action tips itself.
     void showSiblingMenu(int level) {
         const QString cellId = QStringLiteral("chev:%1").arg(level);
         const QRect r = itemRect(cellId);
@@ -1746,7 +1816,8 @@ private:
             none->setEnabled(false);
         }
         for (const SiblingEntry& e : sibs) {
-            QAction* a = menu->addAction(siblingActionText(e));
+            QAction* a = menu->addAction(siblingActionRowText(e));
+            a->setToolTip(siblingActionText(e) + QStringLiteral("  ") + siblingAddressText(e));
             a->setCheckable(true);
             a->setChecked(e.current);
             a->setData(QVariant::fromValue<qulonglong>(e.id));
@@ -1912,21 +1983,41 @@ private:
         return recent.isNull() ? width() - kRightMargin : recent.left() - kChevW;
     }
 
-    // Show the overlay in `scope` at `r` on `text`, all selected. What it
-    // covers runs from `coveredLeft` to the recent cell: the overlay plus
-    // the paper painted beside it, where hover goes quiet.
-    void openEdit(EditScope scope, const QRect& r, int coveredLeft, const QString& text) {
-        leaveKeyboardMode(false);   // one focus owner: the overlay takes over
+    // The overlay's geometry: the field at `r`, and what it covers — from
+    // `coveredLeft` to the recent cell: the overlay plus the paper painted
+    // beside it, where hover goes quiet. Shared by opening and by following
+    // a resize, so the covered rect is derived the same way both times.
+    void placeEdit(const QRect& r, int coveredLeft) {
         const QRect recent = itemRect(QStringLiteral("recent"));
         const int stop = recent.isNull() ? width() - kRightMargin : recent.left();
+        m_editRect = r;
+        m_coveredRect = QRect(coveredLeft, kCellTop, qMax(r.width(), stop - coveredLeft), kCellH);
+        m_edit->setGeometry(r);
+    }
+
+    // resizeEvent while an edit is up: re-place the overlay for its scope
+    // at the new layout. Geometry only — the overlay child keeps its
+    // text, caret and selection through setGeometry. A strip that can no
+    // longer lay the base out (nothing to anchor on) leaves the overlay
+    // where it is rather than closing an edit the user is typing in.
+    void followEditGeometry() {
+        if (!m_editVisible) return;
+        QRect r;
+        int coveredLeft = 0;
+        if (!editGeometryFor(m_editScope, &r, &coveredLeft)) return;
+        placeEdit(r, coveredLeft);
+        update();
+    }
+
+    // Show the overlay in `scope` at `r` on `text`, all selected.
+    void openEdit(EditScope scope, const QRect& r, int coveredLeft, const QString& text) {
+        leaveKeyboardMode(false);   // one focus owner: the overlay takes over
         m_editScope = scope;
         m_editVisible = true;
         m_relayoutDeferred = false;
         m_commitError.clear();
-        m_editRect = r;
-        m_coveredRect = QRect(coveredLeft, kCellTop, qMax(r.width(), stop - coveredLeft), kCellH);
+        placeEdit(r, coveredLeft);
         m_edit->setFont(font());
-        m_edit->setGeometry(r);
         m_edit->setText(text);
         m_edit->selectAll();
         setFocusPolicy(Qt::StrongFocus);
