@@ -270,10 +270,12 @@ signals:
     // time; each is unconnected until its phase (P3 source/base/recent, P4
     // sideways navigation + path edit, P5 history).
     void siblingPickRequested(int level, uint64_t fieldId);   // chev:<level> menu pick
-    void rootPickRequested(uint64_t rootId);                  // root.chev menu pick
     void baseCommitRequested(const QString& expr);            // Enter in the base edit
     void pathCommitRequested(const QString& path);            // Enter in the path edit
     void recentPickRequested(const QString& formula);         // recent-places menu pick
+    // The deepest crumb renamed in place: the class node id and the new name.
+    // Same commit the line-0 class-name inline edit performs, from the bar.
+    void classRenameRequested(uint64_t classId, const QString& newName);
     void navBackRequested();
     void navForwardRequested();
     void navUpRequested();

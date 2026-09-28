@@ -874,7 +874,7 @@ private slots:
         // overlaps, on one 22-px row.
         const QStringList order = {
             QStringLiteral("back"), QStringLiteral("fwd"), QStringLiteral("hist"), QStringLiteral("up"),
-            QStringLiteral("src"), QStringLiteral("src.chev"), QStringLiteral("root.chev"),
+            QStringLiteral("src"), QStringLiteral("src.chev"),
             QStringLiteral("base"), QStringLiteral("crumb:0"), QStringLiteral("chev:0"),
             QStringLiteral("crumb:1"), QStringLiteral("chev:1"), QStringLiteral("space"),
             QStringLiteral("recent") };
@@ -928,10 +928,11 @@ private slots:
         AddressBar* bar = m_editor->addressBar();
         const Theme& t = bar->theme();
         QSignalSpy spy(m_editor, &RcxEditor::crumbClicked);
-        // The deepest crumb is "you are here": its click scrolls that
-        // class's header to the top inside the editor and nothing else —
-        // no crumbClicked, no collapse, no undo entry, the trail as it
-        // was. Visually it stays inert: no hover fill, arrow cursor.
+        // The deepest crumb is "you are here", and its label is that class's
+        // NAME: a click opens a rename over it — no crumbClicked, no collapse,
+        // no undo entry until something is committed, the trail as it was. It
+        // reads as a field the way the base segment does: no hover fill, an
+        // I-beam.
         const QRect deep = bar->itemRect(QStringLiteral("crumb:2"));
         QVERIFY(!deep.isNull());
         const int undoBefore = m_doc->undoStack.count();
@@ -939,9 +940,13 @@ private slots:
         hoverAt(*bar, deep.center());
         QImage img = grabOf(*bar);
         QVERIFY2(countColour(img, devRect(img, deep), t.hover) < 16, "deepest crumb took a hover fill");
-        QVERIFY(bar->cursor().shape() == Qt::ArrowCursor);
+        QCOMPARE(bar->cursor().shape(), Qt::IBeamCursor);
         QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, deep.center());
         QApplication::processEvents();
+        QVERIFY2(bar->isClassNameEditing(), "the deepest crumb did not open its rename");
+        QCOMPARE(bar->editText(), QStringLiteral("QWidget"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
         QCOMPARE(spy.count(), 0);
         QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
         QCOMPARE(m_doc->undoStack.count(), undoBefore);
@@ -1107,7 +1112,7 @@ private slots:
     // to show the deepest crumb and `recent` laid out PAST the right edge —
     // the widget's own rule says the deepest crumb is never dropped, and a
     // crumb off the strip is dropped in every way that matters. Now the
-    // chip goes icon-only, root.chev goes, the base shows its bare literal,
+    // chip goes icon-only, the base shows its bare literal,
     // Forward goes and, last, Back and the divider go; the deepest crumb
     // and `recent` end inside the strip down to kNarrowFloorW.
     void testNarrowPanesKeepTheDeepestCrumbAndRecent() {
@@ -1151,7 +1156,6 @@ private slots:
         // ("REEC….exe": with three crumbs and a formula base step 2 turns
         // at 480), but 7a has not: the name is on the chip, not in the tip.
         QVERIFY2(bar.sourceDisplayText().startsWith(QStringLiteral("REEC")), qPrintable(bar.sourceDisplayText()));
-        QVERIFY(!rect("root.chev").isNull());
         QVERIFY(!rect("back").isNull());
         QVERIFY(!rect("fwd").isNull());
         QVERIFY2(bar.baseDisplayText() != QStringLiteral("0x7FF6DEAD1234"), qPrintable(bar.baseDisplayText()));
@@ -1185,7 +1189,7 @@ private slots:
         bar.resize(240, AddressBar::kAddressBarHeight);
         QApplication::processEvents();
         QVERIFY2(holdsAt(240).isEmpty(), holdsAt(240).constData());
-        for (const char* id : {"fwd", "hist", "up", "root.chev", "chev:2"})
+        for (const char* id : {"fwd", "hist", "up", "chev:2"})
             QVERIFY2(rect(id).isNull(), qPrintable(QStringLiteral("%1 laid out at 240 px").arg(QString::fromLatin1(id))));
         if (rect("back").isNull()) {
             QCOMPARE(bar.sourceIconRect().left(), kGutter);               // 7e: the icon takes the gutter
@@ -1218,7 +1222,7 @@ private slots:
         bar.resize(AddressBar::kNarrowFloorW, AddressBar::kAddressBarHeight);
         QApplication::processEvents();
         QVERIFY2(holdsAt(AddressBar::kNarrowFloorW).isEmpty(), holdsAt(AddressBar::kNarrowFloorW).constData());
-        for (const char* id : {"back", "fwd", "hist", "up", "root.chev", "chev:2"})
+        for (const char* id : {"back", "fwd", "hist", "up", "chev:2"})
             QVERIFY2(rect(id).isNull(), qPrintable(QStringLiteral("%1 laid out at the floor").arg(QString::fromLatin1(id))));
         QCOMPARE(bar.sourceIconRect().left(), kGutter);
         QCOMPARE(bar.traversalIds().first(), QStringLiteral("src"));
@@ -1250,7 +1254,6 @@ private slots:
         bar.resize(800, AddressBar::kAddressBarHeight);
         QApplication::processEvents();
         QCOMPARE(bar.sourceDisplayText(), QStringLiteral("REECLASS.exe"));
-        QVERIFY(!rect("root.chev").isNull());
         QVERIFY(!rect("back").isNull());
         QVERIFY(!rect("up").isNull());
         QVERIFY(rect("overflow").isNull());
@@ -2237,37 +2240,223 @@ private slots:
         QVERIFY(!collapsed(m_id.vptr));
     }
 
-    void testRootChevronMenuSwitchesRoot() {
-        drillOneLevel();
+    // ── Renaming the class from the bar ──
+    //
+    // The deepest crumb names the class you are looking at, and until now it
+    // was the one thing on the bar you could see but not touch: a click
+    // scrolled the pane a little and nothing said the name was live. It is a
+    // field now, committing the same undoable command line 0's class-name
+    // edit pushes — on the class the CRUMB names, which is why a drilled
+    // crumb renames the drilled class and not the view root.
+    void testDeepestCrumbRenamesTheClassItNames() {
+        drillTwoLevels();                       // RcxEditor.vptr › QWidgetPrivate.parent › QWidget
+        QApplication::processEvents();
         AddressBar* bar = m_editor->addressBar();
-        QSignalSpy pick(m_editor, &RcxEditor::rootPickRequested);
-        QMenu* menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
-        QVERIFY(menu);
-        QStringList expected;
-        for (const RootEntry& r : rootClassEntries(m_doc->tree)) expected << AddressBar::rootActionText(r);
-        QCOMPARE(actionTexts(menu), expected);
-        QCOMPARE(expected, (QStringList{ QStringLiteral("struct RcxEditor"),
-                                         QStringLiteral("struct QWidgetPrivate"),
-                                         QStringLiteral("struct QWidget") }));
-        QVERIFY(menu->actions()[0]->isChecked());               // the root in view
-        QVERIFY(!menu->actions()[1]->isChecked());
-        QVERIFY(!menu->actions()[2]->isChecked());
-        menu->actions()[2]->trigger();
-        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
-        QCOMPARE(pick.count(), 1);
-        QCOMPARE(pick.at(0).at(0).toULongLong(), (qulonglong)m_id.widget);
-        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
-        QVERIFY(m_ctrl->focusPath().isEmpty());                 // a jump: fresh trail
-        QCOMPARE(segments(), QStringList{ QStringLiteral("QWidget") });
-        QCOMPARE(bar->state().trailPath, QStringLiteral("QWidget"));
-        // The new root is the checked one now.
-        menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
-        QVERIFY(menu);
-        QVERIFY(!menu->actions()[0]->isChecked());
-        QVERIFY(menu->actions()[2]->isChecked());
-        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
+        QCOMPARE(segments().last(), QStringLiteral("QWidget"));
+        const int undoBefore = m_doc->undoStack.count();
+        const uint64_t rootBefore = m_ctrl->viewRootId();
+
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier,
+                          bar->itemRect(QStringLiteral("crumb:2")).center());
+        QVERIFY(bar->isClassNameEditing());
+        QCOMPARE(bar->editText(), QStringLiteral("QWidget"));
+        QCOMPARE(bar->editWidget()->selectedText(), QStringLiteral("QWidget"));
+
+        bar->editWidget()->setText(QStringLiteral("Renamed"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QVERIFY2(!bar->isEditing(), "a good rename left the overlay open");
+
+        // The drilled class, not the view root, and one undo entry.
+        const int idx = m_doc->tree.indexOfId(m_id.widget);
+        QVERIFY(idx >= 0);
+        QCOMPARE(m_doc->tree.nodes[idx].structTypeName, QStringLiteral("Renamed"));
+        QCOMPARE(m_ctrl->viewRootId(), rootBefore);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(segments().last(), QStringLiteral("Renamed"));
+
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(m_id.widget)].structTypeName,
+                 QStringLiteral("QWidget"));
+        QCOMPARE(segments().last(), QStringLiteral("QWidget"));
     }
 
+    // The root case — the one in build/issue.png: nothing drilled, so the
+    // deepest crumb IS the root class, and line 0 (which renames the same
+    // node) must agree afterwards.
+    void testRootCrumbRenameAgreesWithLineZero() {
+        AddressBar* bar = m_editor->addressBar();
+        QCOMPARE(segments(), QStringList{ QStringLiteral("RcxEditor") });
+        QVERIFY(lineZeroText().contains(QStringLiteral("RcxEditor")));
+
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier,
+                          bar->itemRect(QStringLiteral("crumb:0")).center());
+        QVERIFY(bar->isClassNameEditing());
+        bar->editWidget()->setText(QStringLiteral("PlayerBase"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(segments(), QStringList{ QStringLiteral("PlayerBase") });
+        QVERIFY2(lineZeroText().contains(QStringLiteral("PlayerBase")), qPrintable(lineZeroText()));
+        QCOMPARE(m_doc->tree.nodes[m_doc->tree.indexOfId(m_id.editor)].structTypeName,
+                 QStringLiteral("PlayerBase"));
+    }
+
+    // A class needs a name — the one rule, the same one line 0 enforces. A
+    // refusal keeps the overlay open with its reason where the preview goes,
+    // exactly as a refused base formula does.
+    void testRenameRefusesAnEmptyNameAndKeepsTheOverlay() {
+        AddressBar* bar = m_editor->addressBar();
+        const int undoBefore = m_doc->undoStack.count();
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier,
+                          bar->itemRect(QStringLiteral("crumb:0")).center());
+        QVERIFY(bar->isClassNameEditing());
+
+        bar->editWidget()->setText(QString());
+        QApplication::processEvents();
+        QVERIFY2(!bar->editTextValid(), "an empty class name reads as valid");
+        QCOMPARE(bar->editPreviewText(), QStringLiteral("a class needs a name"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QVERIFY2(bar->isClassNameEditing(), "a refused rename closed the overlay");
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+
+        // Typing answers the refusal, and re-committing the name it already
+        // has is a no-op, not a refusal: the overlay closes, nothing is
+        // pushed.
+        bar->editWidget()->setText(QStringLiteral("RcxEditor"));
+        QApplication::processEvents();
+        QVERIFY(bar->editTextValid());
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QCOMPARE(segments(), QStringList{ QStringLiteral("RcxEditor") });
+    }
+
+    // The rename field is sized like every other overlay on the bar: fitted
+    // to what it holds, growing only.
+    void testRenameFieldFitsTheClassName() {
+        AddressBar* bar = m_editor->addressBar();
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier,
+                          bar->itemRect(QStringLiteral("crumb:0")).center());
+        QVERIFY(bar->isClassNameEditing());
+        const QRect crumb = bar->itemRect(QStringLiteral("crumb:0"));
+        QCOMPARE(bar->editRect().left(), crumb.left());
+        QCOMPARE(bar->editRect().width(),
+                 qMax(AddressBar::kEditMinW,
+                      AddressBar::kEditChromeW
+                          + QFontMetrics(bar->font()).horizontalAdvance(bar->editText())
+                          + AddressBar::kEditCaretSlack));
+        const int opened = bar->editRect().width();
+        bar->editWidget()->setText(QStringLiteral("AVeryLongClassNameIndeedYesReally"));
+        QApplication::processEvents();
+        QVERIFY(bar->editRect().width() > opened);
+        bar->editWidget()->setText(QStringLiteral("Ab"));
+        QApplication::processEvents();
+        QVERIFY2(bar->editRect().width() > opened, "the rename field shrank under the caret");
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+    }
+
+    // The crumb's context menu carries what the click no longer does, plus
+    // the class chooser the bar's own flat dropdown used to be a worse copy
+    // of — this is the route to it when line 0 has scrolled away.
+    void testDeepestCrumbMenuOffersRenameAndTheRealChooser() {
+        drillOneLevel();
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QSignalSpy chooser(m_editor, &RcxEditor::typeSelectorRequested);
+        const QRect deep = bar->itemRect(QStringLiteral("crumb:1"));
+        QVERIFY(!deep.isNull());
+        QContextMenuEvent ctx(QContextMenuEvent::Mouse, deep.center(),
+                              bar->mapToGlobal(deep.center()));
+        QApplication::sendEvent(bar, &ctx);
+        QMenu* menu = visibleMenu(bar, QStringLiteral("rcxAddressBarCellMenu"));
+        QVERIFY(menu);
+        const QStringList texts = actionTexts(menu);
+        for (const QString& want : {QStringLiteral("Rename class\tF2"),
+                                    QStringLiteral("Scroll to top"),
+                                    QStringLiteral("Other classes…")})
+            QVERIFY2(texts.contains(want), qPrintable(want + QStringLiteral(" | ") + texts.join(QLatin1Char('/'))));
+        QAction* other = nullptr;
+        for (QAction* a : menu->actions())
+            if (a->text() == QStringLiteral("Other classes…")) other = a;
+        QVERIFY(other);
+        other->trigger();
+        menu->hide();
+        QTest::qWait(10);
+        QCOMPARE(chooser.count(), 1);           // the filtered chooser, not a flat menu
+
+        // An ANCESTOR crumb keeps the plain copy menu: its label is a path
+        // segment, and there is no name there to rename.
+        const QRect anc = bar->itemRect(QStringLiteral("crumb:0"));
+        QContextMenuEvent ctx2(QContextMenuEvent::Mouse, anc.center(),
+                               bar->mapToGlobal(anc.center()));
+        QApplication::sendEvent(bar, &ctx2);
+        QMenu* m2 = visibleMenu(bar, QStringLiteral("rcxAddressBarCellMenu"));
+        QVERIFY(m2);
+        QVERIFY(!actionTexts(m2).contains(QStringLiteral("Rename class\tF2")));
+        m2->hide();
+        QTest::qWait(10);
+    }
+
+    // ── The bar has no class dropdown ──
+    //
+    // `root.chev` used to sit between the source chip and the address: a
+    // chevron whose menu was a flat, unsorted, uncapped, filter-less QMenu of
+    // every root class. On a project with thousands of classes that is not a
+    // chooser, it is a wall — and it was a second, worse copy of the type
+    // chooser the line-0 chevron already opens (TypePopupMode::Root, with a
+    // filter box). Its position made it worse: a chevron in the run of
+    // separators, opening something that was neither the source before it nor
+    // the address after it.
+    //
+    // So it is gone, and this pins that it stays gone AND that nothing went
+    // with it: the chooser is still one click from line 0, and switching the
+    // root still leaves exactly one history entry.
+    void testTheBarHasNoClassDropdown() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QVERIFY2(bar->itemRect(QStringLiteral("root.chev")).isNull(),
+                 "root.chev is laid out again");
+        QVERIFY(!bar->traversalIds().contains(QStringLiteral("root.chev")));
+        // No chevron cell survives between the chip and the address at any
+        // width — the chip's own chevron is the last thing before the base.
+        for (int w : {1200, 900, 600, 420, 300, AddressBar::kNarrowFloorW}) {
+            bar->resize(w, AddressBar::kAddressBarHeight);
+            QApplication::processEvents();
+            const QRect chip = bar->itemRect(QStringLiteral("src.chev"));
+            const QRect base = bar->itemRect(QStringLiteral("base"));
+            if (chip.isNull() || base.isNull()) continue;
+            for (const QString& id : bar->traversalIds()) {
+                const QRect r = bar->itemRect(id);
+                QVERIFY2(!(r.left() >= chip.right() && r.right() <= base.left()),
+                         qPrintable(QStringLiteral("%1 sits between the chip and the base at %2")
+                                        .arg(id).arg(w)));
+            }
+        }
+
+        // Line 0 still opens the real chooser: the chevron span is there, and
+        // it is what asks for it.
+        QSignalSpy chooser(m_editor, &RcxEditor::typeSelectorRequested);
+        const QString line = lineZeroText();
+        QVERIFY2(commandRowChevronSpan(line).valid, qPrintable(line));
+
+        // And the gesture that menu performed still records one history entry.
+        const int before = m_ctrl->backEntries().size();
+        m_ctrl->pickViewRoot(m_id.widget, m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
+        QCOMPARE(m_ctrl->backEntries().size(), before + 1);
+        QVERIFY(m_ctrl->focusPath().isEmpty());                 // a jump: fresh trail
+        QCOMPARE(segments(), QStringList{ QStringLiteral("QWidget") });
+        // Re-picking the root you are already on is not a gesture.
+        m_ctrl->pickViewRoot(m_id.widget, m_editor);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->backEntries().size(), before + 1);
+    }
     void testSpaceClickOpensPathEditOnTheTrail() {
         drillOneLevel();
         AddressBar* bar = m_editor->addressBar();
@@ -2486,7 +2675,7 @@ private slots:
         QVERIFY(!bar->isEditing());
     }
 
-    void testDeepestCrumbClickScrollsWithoutMutating() {
+    void testDeepestCrumbScrollToTopMutatesNothing() {
         // A short pane, so the document is taller than the viewport and a
         // scroll can land the deepest hop's row at the top.
         m_splitter->resize(800, 120);
@@ -2502,7 +2691,21 @@ private slots:
         QCOMPARE((int)sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), 0);
         const QRect deep = bar->itemRect(QStringLiteral("crumb:2"));
         QVERIFY(!deep.isNull());
-        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, deep.center());
+        // The scroll is the crumb menu's "Scroll to top" now — a click opens
+        // the rename instead, and a non-mutating convenience is what a
+        // context menu is for.
+        QContextMenuEvent ctx(QContextMenuEvent::Mouse, deep.center(),
+                              bar->mapToGlobal(deep.center()));
+        QApplication::sendEvent(bar, &ctx);
+        QMenu* menu = visibleMenu(bar, QStringLiteral("rcxAddressBarCellMenu"));
+        QVERIFY2(menu, "the deepest crumb has no context menu");
+        QAction* scroll = nullptr;
+        for (QAction* a : menu->actions())
+            if (a->text() == QStringLiteral("Scroll to top")) scroll = a;
+        QVERIFY2(scroll, qPrintable(actionTexts(menu).join(QStringLiteral(" | "))));
+        scroll->trigger();
+        menu->hide();
+        QTest::qWait(10);
         QApplication::processEvents();
         QCOMPARE(crumb.count(), 0);
         QCOMPARE(pick.count(), 0);
@@ -2734,30 +2937,22 @@ private slots:
         QCOMPARE(m_doc->undoStack.count(), n + 1);
     }
 
-    void testRootChevronMenuChecksNothingInShowAll() {
-        // Phase-4 follow-up: a show-all view (root 0) renders every root;
-        // its root crumb borrows the first root's name, but no root is
-        // "current", so no row is checked. A pick still views that root.
+    // A show-all view (root 0) renders every root and borrows the first
+    // root's name for its root crumb, so nothing is "current". The bar's
+    // class menu used to be where that showed (no row checked); the state
+    // is what carries it now, and picking a root out of a show-all view
+    // still lands on that root.
+    void testShowAllViewNamesNoCurrentRoot() {
         m_ctrl->setViewRootId(0);
         QApplication::processEvents();
         AddressBar* bar = m_editor->addressBar();
         QCOMPARE(bar->state().viewRootId, 0ULL);
-        QMenu* menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
-        QVERIFY(menu);
-        QCOMPARE(menu->actions().size(), 3);
-        for (QAction* a : menu->actions())
-            QVERIFY2(!a->isChecked(), qPrintable(a->text() + " is checked in a show-all view"));
-        menu->actions()[0]->trigger();
-        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
+        QCOMPARE(segments(), QStringList{ QStringLiteral("RcxEditor") });   // borrowed, not current
+        m_ctrl->pickViewRoot(m_id.editor, m_editor);
+        QApplication::processEvents();
         QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
         QCOMPARE(bar->state().viewRootId, m_id.editor);
-        menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
-        QVERIFY(menu);
-        QVERIFY(menu->actions()[0]->isChecked());
-        QVERIFY(!menu->actions()[1]->isChecked());
-        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
     }
-
     void testFallbackThemeCarriesFocusGlow() {
         // Phase-3 follow-up: without it Theme::fromJson defaulted focusGlow
         // to borderFocused, and the stale dot wore the focus ring's colour.
@@ -3142,7 +3337,7 @@ private slots:
         // a stale Forward with nothing behind it does nothing at all.
         jumpToDefinitionOf(m_id.vptr);                          // editor → priv   (A: editor)
         QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
-        emit m_editor->rootPickRequested(m_id.widget);          // priv → widget   (B: priv)
+        m_ctrl->pickViewRoot(m_id.widget, m_editor);            // priv → widget   (B: priv)
         QApplication::processEvents();
         QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
         QCOMPARE(m_ctrl->backEntries().size(), 2);
@@ -3180,7 +3375,7 @@ private slots:
         // (a pick beyond the stale row landed one place further).
         AddressBar* bar = m_editor->addressBar();
         jumpToDefinitionOf(m_id.vptr);                          // A: RcxEditor @ 0x0       (now: priv)
-        emit m_editor->rootPickRequested(m_id.widget);          // B: QWidgetPrivate @ 0x0  (now: widget)
+        m_ctrl->pickViewRoot(m_id.widget, m_editor);            // B: QWidgetPrivate @ 0x0  (now: widget)
         QApplication::processEvents();
         QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x40")));      // C: QWidget @ 0x0         (now: widget @ 0x40)
         QApplication::processEvents();
@@ -3430,7 +3625,7 @@ private slots:
         // The walk: enabled cells only, no stretch, one stop for the chip.
         const QStringList ids = bar.traversalIds();
         QCOMPARE(ids, (QStringList{ QStringLiteral("back"), QStringLiteral("hist"), QStringLiteral("src"),
-                                    QStringLiteral("root.chev"), QStringLiteral("base"),
+                                    QStringLiteral("base"),
                                     QStringLiteral("crumb:0"), QStringLiteral("chev:0"),
                                     QStringLiteral("crumb:1"), QStringLiteral("chev:1"),
                                     QStringLiteral("recent") }));
@@ -3485,10 +3680,19 @@ private slots:
         QCOMPARE(bar.focusId(), QStringLiteral("crumb:1"));
         QTest::keyClick(&bar, Qt::Key_Down);
         QVERIFY(!visibleMenu(&bar, QStringLiteral("rcxAddressBarSiblingMenu")));
-        // F2 on a crumb: the path edit; keyboard mode yields to the overlay.
+        // F2 on the DEEPEST crumb: its rename, since that crumb's label is a
+        // bare class name. Keyboard mode yields to the overlay either way.
         QTest::keyClick(&bar, Qt::Key_F2);
-        QVERIFY(bar.isPathEditing());
+        QVERIFY2(bar.isClassNameEditing(), "F2 on the deepest crumb did not open the rename");
         QVERIFY(!bar.inKeyboardMode());
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        // F2 on an ANCESTOR: the path edit — "Class.field" is a path segment,
+        // not a name.
+        bar.enterKeyboardMode();
+        while (bar.focusId() != QStringLiteral("crumb:0")) QTest::keyClick(&bar, Qt::Key_Left);
+        QTest::keyClick(&bar, Qt::Key_F2);
+        QVERIFY2(bar.isPathEditing(), "F2 on an ancestor crumb did not open the path edit");
         QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
         QVERIFY(!bar.isEditing());
         // F2 on the base: the base edit.
@@ -3506,10 +3710,12 @@ private slots:
         QVERIFY(bar.focusId().isEmpty());
         QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
         QCOMPARE(focusReturns, returnsBefore + 1);
-        // A real mouse press anywhere ends the mode too.
+        // A real mouse press anywhere ends the mode too. On an ANCESTOR
+        // crumb: the deepest one is a field now, and a field takes the focus
+        // the mode was holding rather than handing it back.
         bar.enterKeyboardMode();
         QVERIFY(bar.inKeyboardMode());
-        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("crumb:1")).center());
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("crumb:0")).center());
         QVERIFY(!bar.inKeyboardMode());
         QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
         // Outside the mode the keys are nobody's: no walk, no activation.
@@ -4263,7 +4469,9 @@ private slots:
         QVERIFY2(rn.valid, qPrintable(line));
         QCOMPARE(line.mid(rn.start, rn.end - rn.start), QStringLiteral("RcxEditor"));
         QCOMPARE(crumbs()[0].keyword, QStringLiteral("union"));
-        QCOMPARE(AddressBar::rootActionText(rootClassEntries(m_doc->tree)[0]), QStringLiteral("union RcxEditor"));
+        const RootEntry& r0 = rootClassEntries(m_doc->tree)[0];
+        QCOMPARE(r0.keyword, QStringLiteral("union"));
+        QCOMPARE(r0.label, QStringLiteral("RcxEditor"));
         QVERIFY(m_editor->beginInlineEdit(EditTarget::RootClassName, 0));
         QVERIFY(m_editor->isEditing());
         m_editor->cancelInlineEdit();

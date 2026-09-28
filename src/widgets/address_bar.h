@@ -21,7 +21,7 @@
 // ensureLayout(); resize, font and state changes mark it dirty), and every
 // cell is addressed by a string id — the surface the tests and the render
 // harness drive:
-//     back  fwd  hist  up | src  src.chev  root.chev  base
+//     back  fwd  hist  up | src  src.chev  base
 //     [overflow]  crumb:<i>  chev:<i> ...  space  recent
 //
 // Overflow, applied in this order until the strip fits: shrink the base
@@ -32,7 +32,7 @@
 // needs — a 30-px squeeze costs the base three characters, not half of it.
 // Below the ~395 px those six reach with a process source and a formula
 // base, the narrow-pane steps keep only what names the place: the chip
-// goes icon-only (the name moves to its tooltip), root.chev goes, the base
+// goes icon-only (the name moves to its tooltip), the base
 // shows its bare literal elided to 60 px, Forward goes, and last Back and
 // the divider go too. The deepest crumb and `recent` are never laid out past
 // the right edge down to kNarrowFloorW (~230 px); the deepest crumb is
@@ -199,10 +199,18 @@ public:
         std::function<void()>              onCurrentCrumb;   // the deepest crumb: scroll its header up (non-mutating)
         std::function<void(QPoint)>        onSourceClick;    // chip click — global anchor: the bar's bottom edge under the chip
         std::function<void(int, uint64_t)> onSiblingPick;    // chev:<level> menu pick → switch the hop at that level
-        std::function<void(uint64_t)>      onRootPick;       // root.chev menu pick → view that root
         std::function<void(QString)>       onBaseCommit;     // Enter in the base edit
         std::function<void(QString)>       onPathCommit;     // Enter in the path edit
         std::function<void(QString)>       onRecentPick;     // recent-places menu pick
+        // The deepest crumb renamed in place: the class NODE id (Crumb::classId,
+        // so a drilled crumb renames the class it names, not the view root) and
+        // the new name. The controller answers through classRenameFinished.
+        std::function<void(uint64_t, QString)> onClassRename;
+        // The real class chooser — the filtered type popup line 0's chevron
+        // opens. The bar used to carry a second, flat, unfiltered copy of it
+        // on a chevron of its own; this is the crumb context menu's route to
+        // the good one.
+        std::function<void()>              onClassChooser;
         std::function<void()>              onBack;           // Back cell (also Alt+Left, XButton1)
         std::function<void()>              onForward;        // Forward cell
         std::function<void()>              onUp;             // Up cell — the parent crumb
@@ -271,11 +279,6 @@ public:
         return e.address != 0 ? siblingActionText(e) + QLatin1Char('\t') + siblingAddressText(e)
                               : siblingActionText(e);
     }
-    // A root.chev row: "struct Player".
-    static QString rootActionText(const RootEntry& r) {
-        return r.keyword.isEmpty() ? r.label : r.keyword + QLatin1Char(' ') + r.label;
-    }
-
     explicit AddressBar(QWidget* parent = nullptr) : QWidget(parent) {
         setObjectName(QStringLiteral("rcxAddressBar"));
         // NoFocus at rest: a click on the bar must not steal focus from the
@@ -371,7 +374,13 @@ public:
     static constexpr int kHoldDelayMs = 500;
 
     // ── Edits (two scopes, one overlay) ──
-    enum class EditScope { None, Base, Path };
+    // Base   — the address formula.
+    // Path   — the whole trail as one dotted string.
+    // Class  — the name of the class the deepest crumb names, renamed in
+    //          place. The bar names the class you are looking at, so that
+    //          is where its name is edited; before this the segment was the
+    //          one thing on the bar you could see but not touch.
+    enum class EditScope { None, Base, Path, Class };
 
     // BASE: open the overlay over the base segment, grown to at least
     // kEditMinW, on the FULL formula (or "0x…") with everything selected.
@@ -388,6 +397,28 @@ public:
         if (!editGeometryFor(EditScope::Base, text, &r, &coveredLeft)) return;
         openEdit(EditScope::Base, r, coveredLeft, text);
         showEditHelp();
+    }
+
+    // CLASS: the deepest crumb turned into a field on its own name, all
+    // selected. It is the deepest crumb and no other because that is the only
+    // crumb whose label is a bare class name — ancestors read "Class.field"
+    // (src/controller.cpp addressBarState), which is not a thing you can
+    // rename — and because the deepest crumb is never folded away, so the
+    // target cannot vanish at a narrow width the way crumb:0 can. The click
+    // that used to scroll the class header to the top of the pane now opens
+    // this; the scroll is on the crumb's context menu.
+    void beginClassNameEdit() {
+        if (m_editVisible && m_editScope == EditScope::Class) { m_edit->setFocus(); m_edit->selectAll(); return; }
+        if (m_state.crumbs.isEmpty()) return;
+        if (m_editVisible) endEdit();
+        const Crumb& c = m_state.crumbs.last();
+        if (c.classId == 0) return;         // a crumb whose class did not resolve
+        const QString text = address_bar_detail::classHalf(c.label);
+        QRect r;
+        int coveredLeft = 0;
+        if (!editGeometryFor(EditScope::Class, text, &r, &coveredLeft)) return;
+        m_classEditId = c.classId;          // pinned: the state may be pushed under the overlay
+        openEdit(EditScope::Class, r, coveredLeft, text);
     }
 
     // The overlay's rect for `scope` at the CURRENT layout, and the left
@@ -423,9 +454,23 @@ public:
 
     bool editGeometryFor(EditScope scope, const QString& text,
                          QRect* r, int* coveredLeft) const {
+        const int limit = editLimit();
+        if (scope == EditScope::Class) {
+            // Over the crumb itself, fitted to the name. Anchored on the
+            // crumb and not on the base, so this arm is the one that works
+            // on a bar with no address laid out at all.
+            const QRect cell = itemRect(deepestCrumbId());
+            if (cell.isNull()) return false;
+            QRect g = cell;
+            g.setWidth(editWidthFor(text, g.left(), limit));
+            if (g.right() >= limit) g.setRight(limit - 1);
+            if (g.width() < kBaseMinW) g.setWidth(kBaseMinW);
+            *r = g;
+            *coveredLeft = g.left();
+            return true;
+        }
         const QRect base = itemRect(QStringLiteral("base"));
         if (base.isNull()) return false;
-        const int limit = editLimit();
         if (scope == EditScope::Base) {
             // The base cell resized to its value, stopping short of the
             // recent cell. The crumbs under it are simply covered — the
@@ -474,8 +519,16 @@ public:
         openEdit(EditScope::Path, r, coveredLeft, m_state.trailPath);
     }
 
+    // The cell the class-name edit opens over. Empty on a bar with no
+    // crumbs; never a folded one (the deepest is never folded).
+    QString deepestCrumbId() const {
+        const int n = m_state.crumbs.size();
+        return n > 0 ? QStringLiteral("crumb:%1").arg(n - 1) : QString();
+    }
+
     bool isEditing() const { return m_editVisible; }
     bool isPathEditing() const { return m_editVisible && m_editScope == EditScope::Path; }
+    bool isClassNameEditing() const { return m_editVisible && m_editScope == EditScope::Class; }
     bool isBaseEditing() const { return m_editVisible && m_editScope == EditScope::Base; }
     EditScope editScope() const { return m_editVisible ? m_editScope : EditScope::None; }
     QString editText() const { return m_edit->text(); }
@@ -500,6 +553,7 @@ public:
     // room), until the text changes.
     void baseCommitFinished(bool ok, const QString& err = QString()) { commitFinished(ok, err); }
     void pathCommitFinished(bool ok, const QString& err = QString()) { commitFinished(ok, err); }
+    void classRenameFinished(bool ok, const QString& err = QString()) { commitFinished(ok, err); }
     void commitFinished(bool ok, const QString& err) {
         if (!m_editVisible) return;
         if (ok) {
@@ -761,8 +815,9 @@ protected:
                 case Qt::Key_Down:
                     // The scope's list: places for the base, the fields of
                     // the class the typed path reaches for the path.
-                    if (m_editScope == EditScope::Path) showPathCompletionMenu();
-                    else                                showPlacesMenu(true);
+                    if (m_editScope == EditScope::Path)      showPathCompletionMenu();
+                    else if (m_editScope == EditScope::Base) showPlacesMenu(true);
+                    // Class: no list. A rename is a name, not a pick.
                     return true;
                 default:
                     break;
@@ -848,8 +903,9 @@ protected:
             break;
         case Qt::Key_F2: {
             const LaidItem* li = itemById(m_kbFocusId);
-            if (li && li->kind == Cell::Base)       beginBaseEdit();
-            else if (li && li->kind == Cell::Crumb) beginPathEdit();
+            if (li && li->kind == Cell::Base)            beginBaseEdit();
+            else if (li && li->kind == Cell::Crumb)      isDeepest(*li) ? beginClassNameEdit()
+                                                                        : beginPathEdit();
             break;
         }
         case Qt::Key_Escape:
@@ -923,7 +979,9 @@ protected:
             const bool wasCovered = m_swallowRect.contains(e->pos());
             m_swallowRect = QRect();
             const LaidItem* li = itemById(id);
-            if (wasCovered && (!li || (li->kind != Cell::Base && li->kind != Cell::Space))) {
+            const bool editable = li && (li->kind == Cell::Base || li->kind == Cell::Space
+                                         || (li->kind == Cell::Crumb && isDeepest(*li)));
+            if (wasCovered && !editable) {
                 e->accept();
                 return;
             }
@@ -945,12 +1003,6 @@ protected:
         if (id == QLatin1String("hist")) {
             m_pressedId.clear();
             if (const LaidItem* li = itemById(id); li && li->enabled) showHistoryMenu(id);
-            e->accept();
-            return;
-        }
-        if (id == QLatin1String("root.chev")) {
-            m_pressedId.clear();
-            showRootMenu();
             e->accept();
             return;
         }
@@ -1020,62 +1072,80 @@ protected:
             return;
         }
         auto copy = [](const QString& s) { QGuiApplication::clipboard()->setText(s); };
-        QMenu menu(this);
+        // A popup, not exec(): every other menu on the bar is one (the
+        // history list, the sibling lists, the places list), it keeps a
+        // blocking event loop out of an event handler, and it is the only
+        // shape a test can drive.
+        auto* menu = new QMenu(this);
+        menu->setObjectName(QStringLiteral("rcxAddressBarCellMenu"));
         switch (li->kind) {
         case Cell::Crumb: {
             // The layout is frozen while the overlay is up, so a cell may
             // outlive its crumb: index through the CURRENT state only.
             const int i = li->index;
-            if (i < 0 || i >= m_state.crumbs.size()) { e->ignore(); return; }
+            if (i < 0 || i >= m_state.crumbs.size()) { delete menu; e->ignore(); return; }
             const Crumb& c = m_state.crumbs[i];
-            menu.addAction(QStringLiteral("Copy path"), this,
+            menu->addAction(QStringLiteral("Copy path"), this,
                            [this, i, copy] { copy(crumbPathText(i)); });
-            QAction* addr = menu.addAction(QStringLiteral("Copy address"), this,
+            QAction* addr = menu->addAction(QStringLiteral("Copy address"), this,
                                            [c, copy] { copy(hex(c.address)); });
             addr->setEnabled(c.address != 0 || i == 0);   // the root is base, never "unknown"
-            menu.addAction(QStringLiteral("Copy class name"), this,
+            menu->addAction(QStringLiteral("Copy class name"), this,
                            [c, copy] { copy(classHalf(c.label)); });
+            if (isDeepest(*li)) {
+                menu->addSeparator();
+                QAction* ren = menu->addAction(QStringLiteral("Rename class\tF2"), this,
+                                              [this] { beginClassNameEdit(); });
+                ren->setEnabled(c.classId != 0);
+                // The scroll a click used to do, kept where it does not cost
+                // the segment its edit gesture.
+                menu->addAction(QStringLiteral("Scroll to top"), this,
+                               [this] { if (m_cb.onCurrentCrumb) m_cb.onCurrentCrumb(); });
+                // The bar has no class dropdown of its own any more — this
+                // opens the real chooser (the filtered type popup), not the
+                // flat menu the old root chevron carried.
+                QAction* other = menu->addAction(QStringLiteral("Other classes\u2026"), this,
+                                                [this] { if (m_cb.onClassChooser) m_cb.onClassChooser(); });
+                other->setEnabled(bool(m_cb.onClassChooser));
+            }
             break;
         }
         case Cell::Base: {
-            menu.addAction(QStringLiteral("Copy address"), this,
+            menu->addAction(QStringLiteral("Copy address"), this,
                            [this, copy] { copy(hex(m_state.resolvedBase ? m_state.resolvedBase
                                                                         : m_state.baseAddress)); });
-            QAction* formula = menu.addAction(QStringLiteral("Copy formula"), this,
+            QAction* formula = menu->addAction(QStringLiteral("Copy formula"), this,
                                               [this, copy] { copy(m_state.baseFormula); });
             formula->setEnabled(!m_state.baseFormula.isEmpty());
-            menu.addSeparator();
-            menu.addAction(QStringLiteral("Edit address"), this, [this] { beginBaseEdit(); });
-            menu.addAction(QStringLiteral("Go to address\u2026\tCtrl+G"), this,
+            menu->addSeparator();
+            menu->addAction(QStringLiteral("Edit address"), this, [this] { beginBaseEdit(); });
+            menu->addAction(QStringLiteral("Go to address\u2026\tCtrl+G"), this,
                            [this] { if (m_cb.onGotoDialog) m_cb.onGotoDialog(); });
             break;
         }
         case Cell::Src:
         case Cell::SrcChev: {
-            QAction* name = menu.addAction(QStringLiteral("Copy source name"), this,
+            QAction* name = menu->addAction(QStringLiteral("Copy source name"), this,
                                            [this, copy] { copy(m_state.sourceName); });
             name->setEnabled(!m_state.sourceName.isEmpty());
-            menu.addAction(QStringLiteral("Change source\u2026"), this,
+            menu->addAction(QStringLiteral("Change source\u2026"), this,
                            [this] { activate(QStringLiteral("src")); });
-            menu.addAction(QStringLiteral("Refresh\tF5"), this,
+            menu->addAction(QStringLiteral("Refresh\tF5"), this,
                            [this] { if (m_cb.onRefresh) m_cb.onRefresh(); });
             break;
         }
         default:
+            delete menu;
             e->ignore();
             return;
         }
         dismissRcxTooltip();
-        m_menuOpenId = id;
-        update();
-        menu.exec(e->globalPos());
-        m_menuOpenId.clear();
-        update();
+        popupMenuFor(menu, id, e->globalPos());
         e->accept();
     }
 
 private:
-    enum class Cell { Back, Fwd, Hist, Up, Src, SrcChev, RootChev, Base,
+    enum class Cell { Back, Fwd, Hist, Up, Src, SrcChev, Base,
                       Crumb, Chev, Overflow, Space, Recent };
 
     struct LaidItem {
@@ -1105,7 +1175,6 @@ private:
         bool dropTrailChev = false;
         // The narrow-pane steps (7a–7e), for a strip under ~395 px.
         bool srcIconOnly   = false;  // the chip keeps icon, dot and chevron; the name is the tooltip's
-        bool dropRootChev  = false;  // line 0's chevron still opens the class chooser
         bool bareBase      = false;  // the literal the base resolves to, elided to kBaseBareMinW
         bool dropFwd       = false;  // Forward alone: Back stays, the history list's last on-bar route
         bool dropNav       = false;  // Back and the divider too; the chip's icon takes the gutter
@@ -1216,8 +1285,6 @@ private:
         add(QStringLiteral("src.chev"), Cell::SrcChev, -1, kChevW, true);
         x += kChipPad;
 
-        if (!b.dropRootChev) add(QStringLiteral("root.chev"), Cell::RootChev, -1, kChevW, true);
-
         // Base: the formula if one is set, else the literal, then the
         // address the formula resolves to. Elided for DISPLAY only — the
         // state carries the full string and the edit (P3) opens on that,
@@ -1326,18 +1393,15 @@ private:
         // 7a. the chip goes icon-only (the name is the tooltip's);
         b.srcIconOnly = true;
         L = computeLayout(b); if (fits()) { m_layout = L; return; }
-        // 7b. root.chev goes (line 0's chevron still opens the chooser);
-        b.dropRootChev = true;
-        L = computeLayout(b); if (fits()) { m_layout = L; return; }
-        // 7c. the base shows its bare literal, elided to 60 px — the state
+        // 7b. the base shows its bare literal, elided to 60 px — the state
         //     and the edit keep the full formula;
         b.bareBase = true;
         L = computeLayout(b); if (fits()) { m_layout = L; return; }
-        // 7d. Forward goes (24 px) — Back stays, so the history list keeps
+        // 7c. Forward goes (24 px) — Back stays, so the history list keeps
         //     its on-bar route (right-click / hold) one step longer;
         b.dropFwd = true;
         L = computeLayout(b); if (fits()) { m_layout = L; return; }
-        // 7e. last resort: Back and the divider go.
+        // 7d. last resort: Back and the divider go.
         b.dropNav = true;
         L = computeLayout(b);
         m_layout = L;   // narrower than kNarrowFloorW — best effort
@@ -1522,7 +1586,6 @@ private:
         case Cell::SrcChev:
             drawIcon(p, r, ":/vsicons/chevron-down.svg", kChevIconPx, hovered ? t.textDim : t.textFaint);
             break;
-        case Cell::RootChev:
         case Cell::Chev:
             // Explorer's › → ˅ flip: the chevron turns down under the pointer
             // to say "this opens a list", and steps up one tone to be read.
@@ -1655,7 +1718,9 @@ private:
             switch (li->kind) {
             case Cell::Base:
             case Cell::Space:    shape = Qt::IBeamCursor; break;          // click-to-type
-            case Cell::Crumb:    shape = isDeepest(*li) ? Qt::ArrowCursor
+            // The deepest crumb is click-to-type (its own name); the
+            // ancestors above it are links.
+            case Cell::Crumb:    shape = isDeepest(*li) ? Qt::IBeamCursor
                                                         : Qt::PointingHandCursor; break;
             case Cell::Back: case Cell::Fwd: case Cell::Hist: case Cell::Up:
                 shape = li->enabled ? Qt::PointingHandCursor : Qt::ArrowCursor; break;
@@ -1690,10 +1755,11 @@ private:
 
     QString tooltipFor(const QString& id) const {
         using namespace address_bar_detail;
-        // While an edit is open the grammar help owns the tooltip layer: any
-        // other RcxTooltip shown now would dismiss it (showAt → dismissOthers)
-        // and the user would lose the examples mid-formula.
-        if (m_editVisible) return QString();
+        // While the BASE edit is open the grammar help owns the tooltip
+        // layer: any other RcxTooltip shown now would dismiss it (showAt →
+        // dismissOthers) and the user would lose the examples mid-formula.
+        // The other scopes show no help, so they keep their tooltips.
+        if (m_editVisible && m_editScope == EditScope::Base) return QString();
         const LaidItem* li = itemById(id);
         if (!li) return QString();
         switch (li->kind) {
@@ -1703,7 +1769,6 @@ private:
         case Cell::Up:       return QStringLiteral("Up one level  Alt+Up");
         case Cell::Src:
         case Cell::SrcChev:  return sourceTooltip();
-        case Cell::RootChev: return QStringLiteral("Other classes");
         case Cell::Base: {
             // The full formula lives here when the segment had to elide it.
             const QString addr = baseLiteralText();
@@ -1719,9 +1784,14 @@ private:
             // overlay is up, so the cell may outlive its crumb: check.
             if (li->index < 0 || li->index >= m_state.crumbs.size()) return QString();
             const Crumb& c = m_state.crumbs[li->index];
-            return (c.address != 0 || li->index == 0)
+            const QString where = (c.address != 0 || li->index == 0)
                 ? QStringLiteral("%1  @ %2").arg(c.label, hex(c.address))
                 : QStringLiteral("%1  @ (unreadable)").arg(c.label);
+            // The deepest crumb is the class you are looking at, and its
+            // label is a bare class name: that is what a click edits.
+            return isDeepest(*li) && c.classId != 0
+                ? where + QStringLiteral("\nclick to rename \u00b7 right-click for more")
+                : where;
         }
         case Cell::Chev:
             if (li->index < 0 || li->index >= m_state.crumbs.size()) return QString();
@@ -1742,7 +1812,12 @@ private:
         switch (li->kind) {
         case Cell::Crumb:
             if (li->index < 0 || li->index >= m_state.crumbs.size()) break;   // stale cell
-            if (isDeepest(*li)) { if (m_cb.onCurrentCrumb) m_cb.onCurrentCrumb(); }
+            // The deepest crumb used to answer a click by scrolling its
+            // header to the top of the pane — a move so quiet the user could
+            // not tell the segment was live at all. It renames now, the way
+            // the base segment beside it edits; the scroll is on its context
+            // menu, where a non-mutating convenience belongs.
+            if (isDeepest(*li)) beginClassNameEdit();
             else if (m_cb.onCrumb) m_cb.onCrumb(li->index);
             break;
         case Cell::Base:   beginBaseEdit(); break;
@@ -1762,7 +1837,7 @@ private:
             break;
         }
         // Click-to-type on the empty stretch (Explorer): the trail turns
-        // into its dotted path. root.chev / chev:<i> / hist open on PRESS.
+        // into its dotted path. chev:<i> and hist open on PRESS.
         case Cell::Space:  beginPathEdit(); break;
         default: break;
         }
@@ -1824,7 +1899,6 @@ private:
         switch (li->kind) {
         case Cell::Hist:     showHistoryMenu(id); break;
         case Cell::Recent:   showPlacesMenu(false); break;
-        case Cell::RootChev: showRootMenu(); break;
         case Cell::Chev:     showSiblingMenu(li->index); break;
         case Cell::Overflow: showOverflowMenu(); break;
         case Cell::Src:
@@ -1913,7 +1987,9 @@ private:
     // A menu hung under a cell: the cell stays t.hover (m_menuOpenId) until
     // the menu hides, and the menu frees itself then — every dropdown the
     // bar owns is built per open, since what it lists changes underneath.
-    void popupUnderCell(QMenu* menu, const QString& cellId, const QRect& cell) {
+    // Hang `menu` off `cellId`: the cell holds the menu-open highlight for
+    // the life of the popup, and the menu deletes itself when it closes.
+    void popupMenuFor(QMenu* menu, const QString& cellId, const QPoint& globalAt) {
         m_menuOpenId = cellId;
         connect(menu, &QMenu::aboutToHide, this, [this, menu, cellId] {
             if (m_menuOpenId == cellId) m_menuOpenId.clear();
@@ -1921,7 +1997,11 @@ private:
             menu->deleteLater();
         });
         update();
-        menu->popup(mapToGlobal(QPoint(cell.left(), cell.bottom() + 1)));
+        menu->popup(globalAt);
+    }
+
+    void popupUnderCell(QMenu* menu, const QString& cellId, const QRect& cell) {
+        popupMenuFor(menu, cellId, mapToGlobal(QPoint(cell.left(), cell.bottom() + 1)));
     }
 
     // chev:<level>: the drillable fields of the class at crumb `level`,
@@ -1955,36 +2035,6 @@ private:
             a->setData(QVariant::fromValue<qulonglong>(e.id));
             connect(a, &QAction::triggered, this, [this, level, id = e.id] {
                 if (m_cb.onSiblingPick) m_cb.onSiblingPick(level, id);
-            });
-        }
-        dismissRcxTooltip();
-        popupUnderCell(menu, cellId, r);
-    }
-
-    // root.chev: the other root classes (rootClassEntries), the one in view
-    // checked. A pick views that root — the F12 jump, trail cleared. The
-    // check follows the VIEW root, not crumbs[0]: a show-all view labels
-    // its root crumb with the first root struct while showing every root,
-    // so nothing there is "current" and no row is checked.
-    void showRootMenu() {
-        const QString cellId = QStringLiteral("root.chev");
-        const QRect r = itemRect(cellId);
-        if (r.isNull()) return;
-        const QVector<RootEntry> roots = m_treeQ.roots ? m_treeQ.roots() : QVector<RootEntry>();
-        const uint64_t current = m_state.viewRootId;
-        auto* menu = new QMenu(this);
-        menu->setObjectName(QStringLiteral("rcxAddressBarRootMenu"));
-        if (roots.isEmpty()) {
-            QAction* none = menu->addAction(QStringLiteral("No classes"));
-            none->setEnabled(false);
-        }
-        for (const RootEntry& e : roots) {
-            QAction* a = menu->addAction(rootActionText(e));
-            a->setCheckable(true);
-            a->setChecked(e.id == current);
-            a->setData(QVariant::fromValue<qulonglong>(e.id));
-            connect(a, &QAction::triggered, this, [this, id = e.id] {
-                if (m_cb.onRootPick) m_cb.onRootPick(id);
             });
         }
         dismissRcxTooltip();
@@ -2195,6 +2245,16 @@ private:
         m_commitError.clear();
         growEditToText();
         const QString text = m_edit->text().trimmed();
+        if (m_editScope == EditScope::Class) {
+            // The one rule line 0's rename also enforces: a class needs a
+            // name. Nothing stricter — a bar that refused what the editor
+            // accepts would be the odd one out, and the generator, not this
+            // field, is where a name's shape is anyone's business.
+            m_editValid = !text.isEmpty();
+            m_editPreview = m_editValid ? QString() : QStringLiteral("a class needs a name");
+            update();
+            return;
+        }
         if (m_editScope == EditScope::Path) {
             const QString why = m_treeQ.validatePath ? m_treeQ.validatePath(text) : QString();
             m_editValid = why.isEmpty();
@@ -2220,8 +2280,9 @@ private:
     void commitEdit() {
         const QString text = m_edit->text().trimmed();
         if (text.isEmpty()) {
-            m_commitError = m_editScope == EditScope::Path ? QStringLiteral("empty path")
-                                                           : QStringLiteral("empty formula");
+            m_commitError = m_editScope == EditScope::Path  ? QStringLiteral("empty path")
+                          : m_editScope == EditScope::Class ? QStringLiteral("a class needs a name")
+                                                            : QStringLiteral("empty formula");
             m_editPreview = m_commitError;
             update();
             return;
@@ -2231,6 +2292,9 @@ private:
         // With no one listening the overlay simply stays: there is nobody
         // to accept the edit.
         if (m_editScope == EditScope::Path) { if (m_cb.onPathCommit) m_cb.onPathCommit(text); }
+        else if (m_editScope == EditScope::Class) {
+            if (m_cb.onClassRename) m_cb.onClassRename(m_classEditId, text);
+        }
         else                                { if (m_cb.onBaseCommit) m_cb.onBaseCommit(text); }
     }
 
@@ -2245,6 +2309,7 @@ private:
         m_commitError.clear();
         m_editPreview.clear();
         m_editGrownW = 0;           // the next open measures its own value
+        m_classEditId = 0;
         dismissEditHelp();
         m_edit->hide();
         setFocusPolicy(Qt::NoFocus);
@@ -2291,6 +2356,7 @@ private:
     bool       m_relayoutDeferred = false;
     bool       m_editValid = true;
     int        m_editGrownW = 0;   // widest the open overlay has been: a one-way floor
+    uint64_t   m_classEditId = 0;  // Class scope: the node the open rename will rename
     // The grammar help: a PRIVATE tooltip (the shared one dies on KeyPress)
     // plus the timer that keeps its own expiry from ending it mid-formula.
     RcxTooltip* m_helpTip = nullptr;

@@ -1815,7 +1815,7 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     // (crumbClicked → collapseToFocus, sourcePopupRequested →
     // showSourcePopup, baseCommitRequested / recentPickRequested → rebaseTo,
     // pathCommitRequested → navigateToDrillPath, siblingPickRequested →
-    // switchSibling, rootPickRequested → setViewRootId, navBack / Forward /
+    // switchSibling, navBack / Forward /
     // Up / historyJumpRequested → the NavHistory walk, refreshRequested →
     // refresh). gotoDialogRequested is the main window's (the Goto dialog
     // lives there).
@@ -1849,10 +1849,14 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
         cb.forwardEntries = [this] { return m_navForwardProvider ? m_navForwardProvider() : QVector<NavEntry>(); };
         cb.currentLabel   = [this] { return m_navCurrentProvider ? m_navCurrentProvider() : QString(); };
         cb.onSiblingPick = [this](int level, uint64_t id) { emit siblingPickRequested(level, id); };
-        cb.onRootPick    = [this](uint64_t id) { emit rootPickRequested(id); };
         cb.onBaseCommit  = [this](QString s) { emit baseCommitRequested(s); };
         cb.onPathCommit  = [this](QString s) { emit pathCommitRequested(s); };
         cb.onRecentPick  = [this](QString s) { emit recentPickRequested(s); };
+        cb.onClassRename = [this](uint64_t id, QString s) { emit classRenameRequested(id, s); };
+        // The crumb menu's "Other classes…" is line 0's chevron by another
+        // route — the same filtered chooser, reachable when line 0 has
+        // scrolled away.
+        cb.onClassChooser = [this] { emit typeSelectorRequested(); };
         cb.onBack        = [this] { emit navBackRequested(); };
         cb.onForward     = [this] { emit navForwardRequested(); };
         cb.onUp          = [this] { emit navUpRequested(); };

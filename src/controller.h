@@ -477,6 +477,13 @@ public:
     void addByteSubmenu(QMenu& menu, RcxEditor* editor);
 
     void setViewRootId(uint64_t id);
+    // Switching the view root AS A GESTURE: records the place being left,
+    // then switches. setViewRootId alone never records — load, new-tab and
+    // delete-root call it too — so every deliberate pick has to pair the two,
+    // and this is the one place that pairing lives. The type chooser's Root
+    // mode is its only caller in the app; the address bar had a second,
+    // worse copy of the same menu until the chooser took the job outright.
+    void pickViewRoot(uint64_t id, RcxEditor* from = nullptr);
     uint64_t viewRootId() const { return m_viewRootId; }
     void scrollToNodeId(uint64_t nodeId);
 

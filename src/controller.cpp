@@ -1267,14 +1267,29 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // resolves the typed path and answers the bar the way the base edit is
     // answered — a success closes the overlay, a miss keeps it open with the
     // seam in markerError (statusHint has already named the segment).
-    // switchSibling and navigateToDrillPath record history themselves;
-    // the root pick records here, at the gesture — setViewRootId never
-    // does (see the F12 connect above).
+    // switchSibling and navigateToDrillPath record history themselves.
     connect(editor, &RcxEditor::siblingPickRequested, this, &RcxController::switchSibling);
-    connect(editor, &RcxEditor::rootPickRequested, this, [this, editor](uint64_t id) {
-        if (id != m_viewRootId) recordNav(editor);
-        setViewRootId(id);
+    // The deepest crumb renamed in place. Same command line 0's class-name
+    // inline edit pushes (EditTarget::RootClassName above) — one undo entry,
+    // named by the node id the crumb carries, so a drilled crumb renames the
+    // class it names rather than the view root. The bar is answered the way
+    // the base and path edits are: a refusal keeps the overlay open with its
+    // reason where the preview goes.
+    connect(editor, &RcxEditor::classRenameRequested, this,
+            [this, editor](uint64_t classId, const QString& name) {
+        auto answer = [editor](bool ok, const QString& err = QString()) {
+            if (auto* bar = editor->addressBar()) bar->classRenameFinished(ok, err);
+        };
+        const QString wanted = name.trimmed();
+        if (wanted.isEmpty()) { answer(false, QStringLiteral("a class needs a name")); return; }
+        const int idx = m_doc->tree.indexOfId(classId);
+        if (idx < 0) { answer(false, QStringLiteral("that class is gone")); return; }
+        const QString had = m_doc->tree.nodes[idx].structTypeName;
+        if (had != wanted)
+            m_doc->undoStack.push(new RcxCommand(this, cmd::ChangeStructTypeName{classId, had, wanted}));
+        answer(true);   // renaming a class to the name it has is a no-op, not a refusal
     });
+
     connect(editor, &RcxEditor::pathCommitRequested, this, [this, editor](const QString& path) {
         QString err;
         const bool ok = navigateToDrillPath(path, &err);
@@ -1286,7 +1301,6 @@ void RcxController::connectEditor(RcxEditor* editor) {
     {
         AddressBar::TreeQueries q;
         q.siblingsOf   = [this](int level) { return siblingsForCrumb(level); };
-        q.roots        = [this] { return rootClassEntries(m_doc->tree); };
         q.fieldsAtPath = [this](const QString& path) { return drillFieldsAt(path); };
         q.validatePath = [this](const QString& text) {
             QString err;
@@ -1864,6 +1878,16 @@ void RcxController::connectEditor(RcxEditor* editor) {
     });
     connect(editor, &RcxEditor::inlineEditCancelled,
             this, [this]() { refresh(); });
+}
+
+// One gesture, one history entry: record the place being left (only when the
+// pick actually moves — re-picking the root you are on must not leave an
+// entry equal to where you still are), then switch. Kept out of
+// setViewRootId because load, new-tab and delete-root call THAT and must
+// not record.
+void RcxController::pickViewRoot(uint64_t id, RcxEditor* from) {
+    if (id != m_viewRootId) recordNav(from);
+    setViewRootId(id);
 }
 
 void RcxController::setViewRootId(uint64_t id) {
@@ -8040,10 +8064,8 @@ void RcxController::applyTypePopupResult(TypePopupMode mode, int nodeIdx,
         // bar's root.chev: the place left is recorded here, at the gesture
         // (setViewRootId never records — load, new-tab and delete-root
         // call it too), and only when the root actually changes.
-        if (resolved.entryKind == TypeEntry::Composite) {
-            if (resolved.structId != m_viewRootId) recordNav();
-            setViewRootId(resolved.structId);
-        }
+        if (resolved.entryKind == TypeEntry::Composite)
+            pickViewRoot(resolved.structId);
         return;
     }
 

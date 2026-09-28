@@ -2,7 +2,7 @@
 
 // The address bar's model: the value type the controller pushes to the bar
 // once per refresh, and the pure NodeTree queries any widget over the drill
-// path needs — siblings of a crumb, the other roots, the dotted path as text
+// path needs — siblings of a crumb, the dotted path as text
 // and back. Core-only on purpose (core.h, no QWidget/QPainter): the
 // test_address_bar_model target builds it without the controller or the
 // editor, and the bar itself (src/widgets/address_bar.h, P2) consumes it
@@ -138,7 +138,8 @@ inline QVector<SiblingEntry> siblingFieldsOf(const NodeTree& tree, uint64_t clas
     return out;
 }
 
-// One entry of the root chevron's menu.
+// One root class, id and all: the path edit's root completion rows
+// (drillFieldsAt("")) and the type chooser's Root mode are built from these.
 struct RootEntry {
     uint64_t id = 0;
     QString  label;
@@ -175,8 +176,6 @@ struct AddressBarTreeQueries {
     // flagged current; level == crumbs.size()-1 is the deepest class
     // (nothing current — its chevron drills further).
     std::function<QVector<SiblingEntry>(int)>            siblingsOf;
-    // The root classes (rootClassEntries), for root.chev.
-    std::function<QVector<RootEntry>()>                  roots;
     // Drillable fields of the class a dotted path lands in; "" lists the
     // roots in the same shape. Empty when the path does not resolve.
     std::function<QVector<SiblingEntry>(const QString&)> fieldsAtPath;

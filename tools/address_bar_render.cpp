@@ -170,8 +170,9 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
         QVector<QPixmap> rows;
         QStringList reports;
         // rest | base edit on a bare literal (the user's case in
-        // build/issue.png) | base edit on a long formula | path edit.
-        for (int mode = 0; mode < 4; ++mode) {
+        // build/issue.png) | base edit on a long formula | path edit |
+        // the deepest crumb renaming its class.
+        for (int mode = 0; mode < 5; ++mode) {
             AddressBar bar;
             if (haveTheme) bar.applyTheme(theme);
             AddressBarState st = stateWithDepth(3);
@@ -185,6 +186,7 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
             app.processEvents();
             if (mode == 1 || mode == 2) bar.beginBaseEdit();
             if (mode == 3) bar.beginPathEdit();
+            if (mode == 4) bar.beginClassNameEdit();
             app.processEvents();
             app.processEvents();
             rows << bar.grab();
@@ -193,7 +195,8 @@ static int renderEditSheets(QApplication& app, QTextStream& out,
             const QRect e = bar.editRect(), c = bar.editCoveredRect();
             const QRect recent = bar.itemRect(QStringLiteral("recent"));
             rs << "  mode=" << (mode == 0 ? "rest" : mode == 1 ? "base-literal"
-                                                      : mode == 2 ? "base-formula" : "path")
+                                                      : mode == 2 ? "base-formula"
+                                                      : mode == 3 ? "path" : "class-rename")
                << "  text=\"" << bar.editText() << "\"";
             if (!e.isNull()) {
                 const int fit = AddressBar::kEditChromeW

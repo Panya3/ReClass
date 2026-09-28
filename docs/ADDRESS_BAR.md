@@ -9,9 +9,9 @@ controller pushes one `AddressBarState` per refresh and every pane shows the
 same trail (only the pane a gesture came from scrolls).
 
 ```
- ← → ˅ ↑ │ ▣● REECLASS.exe ˅ › <REECLASS.exe>+0x1234  → 0x7FF6DEAD1234  « QWidget.d_ptr › QObjectPrivate.parent › QObjectData ›            ˅
+ ← → ˅ ↑ │ ▣● REECLASS.exe ˅ <REECLASS.exe>+0x1234 = 0x7FF6DEAD1234  « QWidget.d_ptr › QObjectPrivate.parent › QObjectData ›            ˅
  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  back fwd hist up   src        src.chev root.chev base                        overflow crumb:2  chev:2 crumb:3  chev:3  crumb:4  chev:4  space recent
+  back fwd hist up   src        src.chev base                          overflow crumb:2  chev:2 crumb:3  chev:3  crumb:4  chev:4  space recent
 ```
 
 Paper, not chrome: the band is `editorPaperColor` (it sits inside the
@@ -26,7 +26,7 @@ other strip starts on.
 
 | File | Role |
 |---|---|
-| `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the overflow rule (six fit steps, then the five narrow-pane steps), tooltips, context menus, the two edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
+| `src/widgets/address_bar.h` | `rcx::AddressBar` — ONE custom-painted, header-only widget on the RibbonBar template: lazily recomputed `Layout` of string-addressed cells, hover / pressed / menu-open / disabled / keyboard-focused states, the overflow rule (six fit steps, then the five narrow-pane steps), tooltips, context menus, the three edit scopes over one hidden `QLineEdit`, every dropdown as a transient `QMenu`. No `Q_OBJECT`: outbound events are a `Callbacks` struct of `std::function` that `RcxEditor` bridges to signals. `Qt::NoFocus` at rest. |
 | `src/widgets/address_bar_model.h` | Core-only model: `AddressBarState` (the value type pushed per refresh, `operator==` guards the relayout), `siblingFieldsOf` / `rootClassEntries` / `trailPathText` / `resolveDrillPath` over a `NodeTree`, and `AddressBarTreeQueries` (what the menus and the path edit pull on demand). `SiblingEntry::address` (where a field leads) is left 0 here — the model has no memory; the controller fills it. |
 | `src/nav_history.h` | `NavEntry` (a PLACE: view root, trail, base + formula, saved-source index, scroll anchor, label) and `NavHistory` (push dedupes the head, truncates forward, cap 50, `back()` / `forward()` skip stale entries, `forgetSource` / `forgetAllSources` follow the saved-source list). |
 | `src/address_callbacks.h` | `makeAddressCallbacks(Provider*, ptrSize)` — the one `AddressParserCallbacks` block (module lookup, memory read, kernel paging) every evaluator shares. |
@@ -50,10 +50,9 @@ Every cell is addressed by a string id — the namespace `itemRect(id)`,
 | — | field divider: one device column, `containerBorderColor`, inset 4 px | 6 + 1 + 6 | everything right of it is "the field" |
 | `src` | the source chip: 16-px `iconForProvider` icon (0.40 opacity when disconnected), a 6-px liveness dot at its bottom-right, the provider name (`textDim`, hover `text`); empty provider = `plug.svg` + "Select source". Icon-only in a narrow pane (step 7a): the name lives in the tooltip, `sourceDisplayText()` is empty | 4 + 16 + 4 + text + 2 (icon-only: 4 + 16 + 2) | the source chooser, anchored under the chip; the chip stays `t.hover` while it is up |
 | `src.chev` | `chevron-down` `textFaint` | 14 | same as `src` (one hover group, one keyboard stop) |
-| `root.chev` | `chevron-right`, flips to `chevron-down` on hover; dropped in a narrow pane (step 7b — line 0's chevron still opens the chooser) | 14 | menu of the root classes → `setViewRootId` |
-| `base` | the formula if set else `0x…`, plus a `textMuted` `→ 0x…` suffix (what the formula resolves to; only beside a formula); in a narrow pane (step 7c) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + suffix + 6 | the base edit — always on the FULL formula |
+| `base` | the formula if set else `0x…`, plus a `textMuted` ` = 0x…` suffix (what the formula resolves to; only beside a formula — an equation, evenly spaced, and NOT an arrow: the bar's own Back and Forward are arrows); in a narrow pane (step 7b) the bare `0x…` the base resolves to, elided to 60 px | 6 + text + suffix + 6 | the base edit — always on the FULL formula |
 | `overflow` | `«` in `textDim`, present only when crumbs are folded | 18 | menu of the hidden crumbs, root first → `onCrumb(i)` |
-| `crumb:<i>` | one crumb: `Class.field` for an ancestor, bare `Class` for the deepest | 6 + text + 6 | ancestor → collapse below + scroll (one undo entry, one history entry); the deepest is inert (no fill, no hand) and only scrolls its header up |
+| `crumb:<i>` | one crumb: `Class.field` for an ancestor, bare `Class` for the deepest | 6 + text + 6 | ancestor → collapse below + scroll (one undo entry, one history entry); the deepest is a FIELD on its own class name (no fill, IBeam) — click or F2 renames it in place, and its context menu carries "Scroll to top" (what the click used to do) and "Other classes…" (the line-0 chooser) |
 | `chev:<i>` | after crumb *i*, same › → ˅ flip | 14 | menu of the drillable fields of the class at crumb *i*, the trail's hop checked, each row saying where its field leads (`@ 0x…` in the row's tab column when known, always in its tooltip); the trailing one drills further |
 | `space` | the stretch, IBeam cursor | rest | the path edit |
 | `recent` | `chevron-down` `textFaint`, pinned at `width − 6 − 16` | 16 | the places menu: Recent (`GotoAddressDialog::loadRecent`), Bookmarks, `<module>` names, then "Go to address… Ctrl+G", "Clear recent" → `rebaseTo` |
@@ -93,11 +92,9 @@ three characters, not half of it).
    names the place, in this order:
    - 7a. the chip goes **icon-only**: the icon, its liveness dot and
      `src.chev` stay, the name moves to the tooltip;
-   - 7b. `root.chev` is dropped (line 0's chevron still opens the class
-     chooser);
-   - 7c. the base shows its **bare literal** — the `0x…` the formula
+   - 7b. the base shows its **bare literal** — the `0x…` the formula
      resolves to (or the literal itself), middle-elided to 60 px;
-   - 7d. Forward is dropped (24 px). Back stays: its right-click /
+   - 7c. Forward is dropped (24 px). Back stays: its right-click /
      press-and-hold is the history list's only on-bar route once `hist`
      is gone;
    - 7e. last resort: Back and the divider go; the chip's icon takes the
@@ -121,22 +118,33 @@ ellipsis to the parser and silently no-op).
 
 ## Edits
 
-Two scopes, one hidden `QLineEdit` in `PanelSearchField`'s interior; the bar
+Three scopes, one hidden `QLineEdit` in `PanelSearchField`'s interior; the bar
 paints the focus seam under it. Enter is the only commit; Esc and losing
 focus restore (the Explorer / Goto-dialog rule). While an overlay is up the
 layout is frozen against STATE — a live tick's state push is stored and its
 relayout waits for the edit to end — and the cells it covers stop answering
 to hover. A pane RESIZE is not a state push: the cells re-lay out at the new
 width and the overlay follows them (`resizeEvent` → `followEditGeometry`,
-the same `editGeometryFor` rule a fresh open uses — the base cell grown to
-180 px for the base scope, base's right edge to `recent` for the path
-scope), the "after" paper is recomputed, and the text, caret and selection
-are left exactly as the user had them; Esc still restores.
+the same `editGeometryFor` rule a fresh open uses), the "after" paper is
+recomputed, and the text, caret and selection are left exactly as the user
+had them; Esc still restores.
+
+**Every overlay is the size of its value.** `editFitWidth` measures the FULL
+text in the field's own font and adds `kEditChromeW` (12: the `QLineEdit`
+interior's 2 + 6 padding plus the 2 Qt reserves inside each end) and
+`kEditCaretSlack`; `kEditMinW` (90) is the floor for a short one, and the
+right bound is `editLimit()` less `kEditPreviewMinW` so growth can never
+squeeze out the preview. Within one edit session the width is **monotonic**:
+`placeEdit` records `m_editGrownW` and `editWidthFor` reads it back as a
+second floor, so the field grows as you type and never shrinks back — a box
+that reflowed under the caret, dragging the preview with every character,
+was the reason the old rule was a flat 180-px slab instead.
 
 | Scope | Opened by | Text | Grammar | Commit |
 |---|---|---|---|---|
-| **Base** | click `base`, F2 on `base` in keyboard mode, "Edit address" in its context menu | the FULL formula (never the elided display), selected; the overlay is at least 180 px | anything `AddressParser` takes: `0x1000`, `<mod.exe>+0x40`, `[<mod.exe>+0x10]*2`. Live: `fmt::validateBaseAddress` + the controller's evaluator drive the seam colour and a `→ 0x…` preview; Down / `▾` opens a fuzzy-filtered menu of recents, bookmarks and `Provider::modulesCached()` as `<mod.exe>` | `onBaseCommit` → `rebaseTo`: strip backticks / CRLF → evaluate → bare-literal rule → `cmd::ChangeBase` only on change → `GotoAddressDialog::pushRecent`. Invalid input is REFUSED: the overlay stays, the seam goes `markerError`, the status bar says `Base: <error>`. |
-| **Path** | click `space`, Alt+D, Ctrl+L, F2 on a crumb in keyboard mode | the dotted trail (`trailPathText`): `RcxEditor.vptr.parent`, from the base's right edge to `recent` | `Root.field.field…` — the first segment names a top-level struct by type name or name, every later one a drillable field of the class the segments before it reach (a pointer's `refId` class or an embedded struct). Whitespace, a trailing dot and doubled dots are tolerated. Down completes the last segment from that class's drillable fields. | `onPathCommit` → `navigateToDrillPath`: one macro "Navigate to path" (expand every collapsed hop), `focusPath` = the resolved hops, one history entry. An unknown segment is refused with the seam in `markerError` and a hint naming it (`No field 'nope' in RcxEditor`). |
+| **Base** | click `base`, F2 on `base` in keyboard mode, "Edit address" in its context menu | the FULL formula (never the elided display), selected, in a field fitted to it | while it is open a PRIVATE `RcxTooltip` shows the grammar (`fmt::baseAddressHelpTitle` / `Body`, a monospace table of the five forms plus the operators) — private because `GlobalTooltipBridge` clears the shared one on every `KeyPress`, and re-armed by a 5-s timer against `RcxTooltip`'s own 20-s expiry; anything `AddressParser` takes: `0x1000`, `<mod.exe>+0x40`, `[<mod.exe>+0x10]*2`. Live: `fmt::validateBaseAddress` + the controller's evaluator drive the seam colour and a `→ 0x…` preview; Down / `▾` opens a fuzzy-filtered menu of recents, bookmarks and `Provider::modulesCached()` as `<mod.exe>` | `onBaseCommit` → `rebaseTo`: strip backticks / CRLF → evaluate → bare-literal rule → `cmd::ChangeBase` only on change → `GotoAddressDialog::pushRecent`. Invalid input is REFUSED: the overlay stays, the seam goes `markerError`, the status bar says `Base: <error>`. |
+| **Path** | click `space`, Alt+D, Ctrl+L, F2 on an ANCESTOR crumb in keyboard mode | the dotted trail (`trailPathText`): `RcxEditor.vptr.parent`, from the base's right edge to `recent` | `Root.field.field…` — the first segment names a top-level struct by type name or name, every later one a drillable field of the class the segments before it reach (a pointer's `refId` class or an embedded struct). Whitespace, a trailing dot and doubled dots are tolerated. Down completes the last segment from that class's drillable fields. | `onPathCommit` → `navigateToDrillPath`: one macro "Navigate to path" (expand every collapsed hop), `focusPath` = the resolved hops, one history entry. An unknown segment is refused with the seam in `markerError` and a hint naming it (`No field 'nope' in RcxEditor`). |
+| **Class** | click the DEEPEST crumb, F2 on it in keyboard mode, "Rename class" in its context menu | that crumb's label, which is a bare class name (ancestors read `Class.field`, which is a path segment and not a name) — selected, in a field over the crumb itself | a name. The one rule is that it is not empty, the same rule line 0's class-name edit enforces; nothing stricter, because a bar that refused what the editor accepts would be the odd one out | `onClassRename(Crumb::classId, name)` → `cmd::ChangeStructTypeName` — the class the CRUMB names, not the view root, so a drilled crumb renames the drilled class. One undo entry; renaming a class to the name it already has closes the overlay and pushes nothing. |
 
 ## The command row under it
 
@@ -180,9 +188,19 @@ in ONE undoable macro ("Switch to <field>"), sets `focusPath = prefix + id`,
 records one history entry and scrolls the new class header up. Picking the hop
 already there is a no-op (no undo entry, no history entry). The chevron after
 the deepest crumb lists that class's fields with nothing checked: drill
-further. `root.chev` lists the other roots (`rootClassEntries`, the same order
-as `rootClassNames`): a pick is a root jump — new view root, empty trail, one
-history entry.
+further.
+
+The bar has **no class dropdown of its own**. It carried one until 2026-09-08
+— `root.chev`, a chevron between the chip and the address whose menu was a
+flat, unsorted, uncapped, filter-less `QMenu` of every root class. On a
+project with thousands of classes that is a wall, not a chooser, and it was a
+second and worse copy of the one line 0's `[▸]` chevron opens
+(`TypePopupMode::Root`, with a filter box). Its position made it worse still:
+a chevron in the run of separators, opening something that was neither the
+source before it nor the address after it. The chooser is reached from line 0
+and, when line 0 has scrolled away, from the deepest crumb's context menu
+("Other classes…"); `RcxController::pickViewRoot` is the one place the
+record-then-switch pair for that gesture lives.
 
 Every row also says **where its field leads** (`SiblingEntry::address`,
 filled by `RcxController::siblingsForCrumb` when the menu opens, never per
@@ -210,8 +228,8 @@ row text.
 Back / Forward are Explorer's, not the undo stack's. An entry is a **place**
 (view root, trail, base + formula, saved-source index) plus a scroll anchor
 and a label; it is recorded at the gesture that leaves it — F12, `rebaseTo`,
-a source switch, a sibling or root pick (the bar's `root.chev` and the line-0
-class chooser alike), a path edit, a crumb click, Up — never inside
+a source switch, a sibling or root pick (`pickViewRoot`, which the line-0
+class chooser calls), a path edit, a crumb click, Up — never inside
 `setViewRootId` (load, new tab and delete-root call that too), never during a
 document load or a restore.
 
@@ -300,11 +318,14 @@ a popup, ends keyboard mode.
 - `state()`, `stateApplyCount()` — the equal-state early return.
 - `isEditing()` / `isBaseEditing()` / `isPathEditing()`, `editText()`,
   `editRect()`, `editCoveredRect()`, `editTextValid()`, `editPreviewText()`;
-  `baseCommitFinished` / `pathCommitFinished` are the controller's verdicts.
+  `baseCommitFinished` / `pathCommitFinished` / `classRenameFinished` are
+  the controller's verdicts; `isClassNameEditing()` and `editHelpVisible()`
+  are the class-rename and grammar-help hooks.
 - `enterKeyboardMode()`, `inKeyboardMode()`, `focusId()`, `traversalIds()`;
   `setHoldDelayMs()`, `historyMenuOpenCount()` for the press-and-hold.
 - Menus are `QMenu` children named `rcxAddressBarHistoryMenu`,
-  `rcxAddressBarSiblingMenu`, …; on the hidden desktop a popup is closed at
+  `rcxAddressBarSiblingMenu`, `rcxAddressBarCellMenu` (the context menu — a
+  `popup()` like the rest, never `exec()`), …; on the hidden desktop a popup is closed at
   the first event pump, so a test opens it with `QTest::mousePress`, reads
   and triggers it synchronously, then releases.
 - Pixels: `grab()` at real width, `countColour` over `devRect`; the seam is
