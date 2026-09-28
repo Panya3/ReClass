@@ -222,8 +222,14 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
                     "plug", GF::Plain, SZ::Large),
             codicon("home.source.refresh", "Refresh", "Refresh the memory view (F5)",
                     "refresh", GF::Plain, SZ::Small, true),
-            codicon("home.source.goto", "Set as Base Address",
-                    "Set the base address this class is read from (Ctrl+G)", "symbol-numeric"),
+            // "Goto Address", not "Set as Base Address": the long form pushed
+            // the whole Source panel over for no gain, and nobody thinks of it
+            // as setting a property. arrow-right is the icon the scanner
+            // already uses for the same rebase (scannerpanel.cpp:985); the old
+            // symbol-numeric "#" said "number", not "go".
+            codicon("home.source.goto", "Goto Address",
+                    "Go to an address — rebases the class to read from there (Ctrl+G)",
+                    "arrow-right"),
         };
         src.items[0].menu = true;    // Source ▾
         tab.panels.append(src);

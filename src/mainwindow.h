@@ -353,6 +353,9 @@ private:
     void addRecentFile(const QString& path);
     void updateRecentFilesMenu();
     QIcon makeIcon(const QString& svgPath);
+    // Re-ink the menu-bar icons after a live theme switch (see makeIcon).
+    void retintMenuIcons(const rcx::Theme& theme);
+    QHash<qint64, QString> m_iconPaths;   // QIcon::cacheKey -> :/vsicons path
 
     RcxController* activeController() const;
     TabState* activeTab();

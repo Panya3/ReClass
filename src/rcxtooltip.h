@@ -36,7 +36,7 @@ public:
     static constexpr int kMaxW   = 550;
 
     explicit RcxTooltip(QWidget* parent = nullptr)
-        : QWidget(parent, Qt::ToolTip | Qt::FramelessWindowHint)
+        : QWidget(parent, Qt::ToolTip | Qt::FramelessWindowHint | Qt::WindowTransparentForInput)
     {
         // ── Key fix: prevent DwmSetWindowAttribute on this window ──
         // DarkApp::notify checks this property and skips DWM calls.
@@ -48,15 +48,24 @@ public:
         setAttribute(Qt::WA_ShowWithoutActivating);
         setAttribute(Qt::WA_DeleteOnClose, false);
         // Pass every mouse event through to the window under the tooltip.
-        // Without this the tooltip sits on top of the cursor's actual
-        // target, the original widget receives a Leave event, the
-        // hover-state-driven owner re-evaluates and (in the editor's
-        // case) decides to dismiss the chip-tooltip — which then makes
-        // the cursor re-enter the widget, MouseMove fires, tooltip is
-        // shown again. Non-stop flicker. WA_TransparentForMouseEvents
-        // cuts the loop at the OS level: the cursor never "enters" this
-        // window for hit-test purposes, so the underlying widget keeps
-        // its hover state.
+        // Without this the tooltip sits on top of the cursor's actual target,
+        // the original widget gets a Leave, its owner dismisses the tip, the
+        // cursor is then over the widget again, and the tip re-shows. Strobe.
+        //
+        // BOTH of these are required, and the attribute ALONE is not enough:
+        // WA_TransparentForMouseEvents is a QWidget-level attribute that Qt
+        // does NOT translate into WS_EX_TRANSPARENT for a top-level native
+        // window — only the Qt::WindowTransparentForInput FLAG (above) does.
+        // Measured on the live tooltip HWND: with the attribute alone the
+        // EXSTYLE was 0x00080088 (LAYERED=1, TRANSPARENT=0) and
+        // WindowFromPoint at the anchor returned the TOOLTIP; with the flag it
+        // is 0x000800A8 and WindowFromPoint returns the app window.
+        //
+        // The bridge anchors AT THE CURSOR, so its window contains the pointer
+        // and this bit is what stops Windows retargeting the mouse to it. The
+        // editor's own tooltip anchors at the bottom edge of the hovered LINE,
+        // never under the cursor — which is exactly why the editor's tooltips
+        // always behaved and every other surface flickered.
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setMouseTracking(true);
 
@@ -138,6 +147,13 @@ public:
         m_expiry.start(expiryMs());
         update();
     }
+
+    // Still hovering the same thing: push the expiry out, the way Qt's own
+    // QToolTip::showText restarts QTipLabel's expire timer on every repeat
+    // tick. Without this the timer is only ever armed by showAt, which the
+    // bridge calls only when the TEXT changes — so parking on one button hid
+    // the tip after exactly 5 s and the next tick re-showed it.
+    void keepAlive() { if (isVisible()) m_expiry.start(expiryMs()); }
 
     void dismiss() { m_expiry.stop(); if (isVisible()) hide(); }
 

@@ -3,6 +3,8 @@
 #include <QMenu>
 #include <QIcon>
 #include <QHash>
+#include "svgicon.h"
+#include "themes/thememanager.h"
 
 ProviderRegistry& ProviderRegistry::instance() {
     static ProviderRegistry s_instance;
@@ -70,8 +72,21 @@ void ProviderRegistry::populateSourceMenu(QMenu* menu,
         {QStringLiteral("REECLASS.netcompatlayer"), QStringLiteral(":/vsicons/plug.svg")},
     };
 
+    // The :/vsicons Codicons bake a light-grey #C5C5C5 ink, chosen for dark
+    // chrome. A plain QIcon(path) renders that ink verbatim, so on the light
+    // theme these glyphs were near-invisible on a near-white menu while the
+    // item TEXT (which comes from the palette) was correctly black. Tint them
+    // to the live menu-text colour. populateSourceMenu re-runs on every
+    // aboutToShow, so this follows a theme switch with no extra wiring, and
+    // themedVsIcon caches on (path, tint, size, dpr) so the rebuild is free.
+    const QColor ink = rcx::ThemeManager::instance().current().text;
+    const qreal  dpr = menu ? menu->devicePixelRatioF() : qreal(1);
+    auto themed = [&ink, dpr](const QString& path) {
+        return rcx::themedVsIcon(path, ink, 16, dpr);
+    };
+
     // File source
-    auto* fileAct = menu->addAction(QIcon(QStringLiteral(":/vsicons/file-binary.svg")),
+    auto* fileAct = menu->addAction(themed(QStringLiteral(":/vsicons/file-binary.svg")),
                                     QStringLiteral("File"));
     fileAct->setIconVisibleInMenu(true);
     fileAct->setData(QStringLiteral("File"));
@@ -80,8 +95,8 @@ void ProviderRegistry::populateSourceMenu(QMenu* menu,
     const auto& providers = instance().providers();
     for (const auto& prov : providers) {
         auto it = s_providerIcons.constFind(prov.identifier);
-        QIcon icon(it != s_providerIcons.constEnd() ? *it
-                   : QStringLiteral(":/vsicons/extensions.svg"));
+        const QIcon icon = themed(it != s_providerIcons.constEnd() ? *it
+                                  : QStringLiteral(":/vsicons/extensions.svg"));
 
         QString label = prov.dllFileName.isEmpty()
             ? prov.name
@@ -107,7 +122,7 @@ void ProviderRegistry::populateSourceMenu(QMenu* menu,
         }
         menu->addSeparator();
         auto* clearAct = menu->addAction(
-            QIcon(QStringLiteral(":/vsicons/clear-all.svg")),
+            themed(QStringLiteral(":/vsicons/clear-all.svg")),
             QStringLiteral("Clear All"));
         clearAct->setIconVisibleInMenu(true);
         clearAct->setData(QStringLiteral("#clear"));

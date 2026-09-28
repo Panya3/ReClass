@@ -150,9 +150,22 @@ protected:
             // still in the middle of a button.
             const QPoint g = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
             const QPoint local = m_target->mapFromGlobal(g);
+            // Leaving the WIDGET is the only thing that hides on a move.
             if (!m_target->rect().contains(local)) { clear(); return false; }
+            tip->keepAlive();   // still on the control — do not let it expire
             const Resolved r = resolve(m_target, local);
-            if (!r.ok()) { clear(); return false; }
+            if (!r.ok()) {
+                // Still inside the widget, but over dead space: the 2-px gap
+                // between two ribbon glyphs, a panel caption, the strip
+                // margin. KEEP SHOWING. Hiding here is what made the tooltip
+                // "flicker as I jiggle the mouse around the button", and it is
+                // why Modify felt broken while Home felt fine — Home's buttons
+                // are wide words, Modify's are 22-px glyphs separated by 2 px,
+                // so on Modify almost every small movement crossed dead space.
+                // The user's mental model is the right one: while the pointer
+                // is on the control, the tip stays put.
+                return false;
+            }
             if (r.text != m_lastText) {
                 // Moved to a different virtual item of the same widget (a
                 // ribbon button, a tab, a list row). Re-anchor and repaint;

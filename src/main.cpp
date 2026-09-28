@@ -79,6 +79,7 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include "themes/thememanager.h"
+#include "svgicon.h"
 #include "themes/themeeditor.h"
 #include "optionsdialog.h"
 #include "widgets/themed_messagebox.h"
@@ -1348,15 +1349,40 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 QIcon MainWindow::makeIcon(const QString& svgPath) {
-    // Render SVG to pixmap explicitly — avoids dependency on qsvgicon plugin
-    // which may not be deployed on Linux.
-    QSvgRenderer renderer(svgPath);
-    if (!renderer.isValid()) return QIcon(svgPath);
-    QPixmap pm(32, 32);
-    pm.fill(Qt::transparent);
-    QPainter p(&pm);
-    renderer.render(&p);
-    return QIcon(pm);
+    // Tinted to the live text colour. The :/vsicons Codicons bake a light-grey
+    // #C5C5C5 ink chosen for dark chrome; rendering it verbatim (which this
+    // used to do via a hand-rolled QSvgRenderer pass) left every menu-bar icon
+    // near-invisible on the light theme, while the item text — which comes
+    // from the palette — was correctly black.
+    //
+    // themedVsIcon caches on (path, tint, size, dpr) and falls back to a plain
+    // QIcon when the file cannot be read, which also covers the "qsvgicon
+    // plugin may not be deployed" case the hand-rolled path existed for.
+    // Menu actions are built ONCE, so remember which path produced which icon
+    // and re-tint them on a live theme switch (retintMenuIcons).
+    const QColor ink = ThemeManager::instance().current().text;
+    const QIcon ic = rcx::themedVsIcon(svgPath, ink, 16, devicePixelRatioF());
+    m_iconPaths.insert(ic.cacheKey(), svgPath);
+    return ic;
+}
+
+// Re-ink every makeIcon() icon after a live theme switch. Without this the
+// menus keep the ink of whatever theme was active when the menu bar was built,
+// which on a dark -> light switch is the invisible case above.
+void MainWindow::retintMenuIcons(const rcx::Theme& theme) {
+    if (m_iconPaths.isEmpty()) return;
+    const qreal dpr = devicePixelRatioF();
+    QHash<qint64, QString> rebuilt;
+    for (QAction* a : findChildren<QAction*>()) {
+        const auto it = m_iconPaths.constFind(a->icon().cacheKey());
+        if (it == m_iconPaths.constEnd()) continue;
+        const QIcon ic = rcx::themedVsIcon(*it, theme.text, 16, dpr);
+        a->setIcon(ic);
+        rebuilt.insert(ic.cacheKey(), *it);
+    }
+    // Keep the map keyed on what the actions now hold, so a second switch works.
+    for (auto it = rebuilt.constBegin(); it != rebuilt.constEnd(); ++it)
+        m_iconPaths.insert(it.key(), it.value());
 }
 
 template < typename...Args >
@@ -1515,6 +1541,10 @@ void MainWindow::createMenus() {
         };
         retint(ThemeManager::instance().current());
         connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this, retint);
+        // Same problem, every other menu icon: makeIcon() tints at build time,
+        // so a live switch needs a re-ink pass over all of them.
+        connect(&ThemeManager::instance(), &ThemeManager::themeChanged, this,
+                [this](const rcx::Theme& t) { retintMenuIcons(t); });
     }
     edit->addSeparator();
     Qt5Qt6AddAction(edit, "&Find Field...", QKeySequence::Find,
@@ -1909,7 +1939,7 @@ void MainWindow::createMenus() {
         });
     }
     {
-        auto* actGoTo = view->addAction("Set as &Base Address...");
+        auto* actGoTo = view->addAction("&Goto Address...");
         m_actGoto = actGoTo;
         actGoTo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
         connect(actGoTo, &QAction::triggered, this, &MainWindow::showGotoAddressDialog);

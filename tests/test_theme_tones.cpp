@@ -117,23 +117,29 @@ private slots:
             const QColor muted = tokenOf(t.second, "textMuted");
             const QColor dim   = tokenOf(t.second, "textDim");
             const QColor text  = tokenOf(t.second, "text");
-            const bool dark = luminance(tokenOf(t.second, "background")) < 0.2;
-            // tw.json (the light theme) paints all four text tones pure black
-            // on purpose — a 3-D-chrome theme carries hierarchy in its bevels,
-            // not in ink weight. Assert non-strict there so the ladder can
-            // never INVERT, without demanding steps the theme doesn't use.
-            const auto le = [](const QColor& a, const QColor& b) {
-                return luminance(a) <= luminance(b);
+            const QColor bg = tokenOf(t.second, "background");
+            // The ladder is about CONTRAST AGAINST THE PAPER, not absolute
+            // luminance — on a dark theme each step is lighter, on a light one
+            // each step is darker, and comparing raw luminance only works for
+            // one polarity. Distance from the background works for both.
+            //
+            // This matters: tw.json used to paint all four tones pure black,
+            // which satisfied a non-strict luminance check trivially. But the
+            // three dim tiers are used as CHROME FILLS (the scrollbar handle,
+            // the zoom slider handle), so "black" drew a solid black bar down
+            // the editor in light mode. The ladder is now real in both
+            // polarities and this test pins it strictly for every theme.
+            const auto contrast = [&bg](const QColor& c) {
+                return qAbs(luminance(c) - luminance(bg));
             };
-            const auto lt = [](const QColor& a, const QColor& b) {
-                return luminance(a) < luminance(b);
+            const auto lt = [&contrast](const QColor& a, const QColor& b) {
+                return contrast(a) < contrast(b);
             };
-            const auto cmp = dark ? +lt : +le;
-            QVERIFY2(cmp(faint, muted),
+            QVERIFY2(lt(faint, muted),
                      qPrintable(describe(t.first, "textFaint", faint, "textMuted", muted)));
-            QVERIFY2(cmp(muted, dim),
+            QVERIFY2(lt(muted, dim),
                      qPrintable(describe(t.first, "textMuted", muted, "textDim", dim)));
-            QVERIFY2(cmp(dim, text),
+            QVERIFY2(lt(dim, text),
                      qPrintable(describe(t.first, "textDim", dim, "text", text)));
         }
     }
