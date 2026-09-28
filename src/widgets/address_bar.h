@@ -409,7 +409,7 @@ public:
 
     // The width an overlay holding `text` should have. Three rules, in order:
     //   fit the text, never below the floor, and never past the point where
-    //   the "→ 0x…" preview beside it would stop fitting.
+    //   the "= 0x…" preview beside it would stop fitting.
     // While an edit is open m_editGrownW is a second floor, so the field can
     // GROW as you type but never shrink back: a field that resized on every
     // keystroke in both directions would jiggle under the caret and drag the
@@ -490,7 +490,7 @@ public:
     // the text parses / resolves and no commit was refused, markerError
     // otherwise.
     bool editTextValid() const { return m_editValid && m_commitError.isEmpty(); }
-    // What is painted after the overlay: "→ 0x…" or the parser's words.
+    // What is painted after the overlay: "= 0x…" or the parser's words.
     QString editPreviewText() const { return m_editPreview; }
 
     // The controller's verdict on the last onBaseCommit / onPathCommit. A
@@ -626,6 +626,16 @@ public:
     // width budgets — as opposed to the full strings in state(). The bug
     // these pin: the command row used to elide a long formula for display
     // and then edit (and evaluate) the elided form, ellipsis and all.
+
+    // The one glyph that says "this formula evaluates to". It is `=`, and
+    // deliberately not an arrow: this same bar carries ← and → as its Back and
+    // Forward buttons, so a third arrow mid-strip read as one more direction
+    // rather than as arithmetic. Its padding was asymmetric too (two spaces
+    // before, one after), which left the formula looking like it had trailing
+    // space. `=` is what a formula IS — an expression with a value — and it
+    // cannot be misread as the › that separates crumbs.
+    static QString baseSepText() { return QStringLiteral(" = "); }
+
     QString sourceDisplayText() const {
         const LaidItem* li = itemById(QStringLiteral("src"));
         return li ? li->text : QString();
@@ -633,6 +643,13 @@ public:
     QString baseDisplayText() const {
         const LaidItem* li = itemById(QStringLiteral("base"));
         return li ? li->text : QString();
+    }
+    // The " = 0xADDR" painted after the formula, or empty beside a bare
+    // literal (there it would only repeat the number). Separate from
+    // baseDisplayText because the two are drawn in different tones.
+    QString baseSuffixShown() const {
+        const LaidItem* li = itemById(QStringLiteral("base"));
+        return li ? li->text2 : QString();
     }
     // The chip's icon square and its liveness dot, logical px. The dot rect
     // is null when nothing is painted there (static file, no source).
@@ -1068,7 +1085,7 @@ private:
         QRect   rect;
         bool    enabled = true;
         QString text;             // display text (possibly elided) for text cells
-        QString text2;            // base only: the "  → 0x…" resolved-address suffix
+        QString text2;            // base only: the " = 0x…" resolved-address suffix
     };
     struct Layout {
         QVector<LaidItem> items;
@@ -1127,7 +1144,7 @@ private:
     QString baseSuffixText() const {
         return m_state.baseFormula.isEmpty()
             ? QString()
-            : QStringLiteral("  \u2192 ") + address_bar_detail::hex(m_state.resolvedBase);
+            : baseSepText() + address_bar_detail::hex(m_state.resolvedBase);
     }
 
     Layout computeLayout(const Budget& b) const {
@@ -1692,7 +1709,7 @@ private:
             const QString addr = baseLiteralText();
             const QString head = m_state.baseFormula.isEmpty()
                 ? QStringLiteral("Base address  %1").arg(addr)
-                : QStringLiteral("Base address  %1  \u2192  %2").arg(m_state.baseFormula, addr);
+                : QStringLiteral("Base address  %1 = %2").arg(m_state.baseFormula, addr);
             return head + QStringLiteral("\nclick to edit · Down for recent · Ctrl+G go to");
         }
         case Cell::Crumb: {
@@ -2189,7 +2206,11 @@ private:
         m_editValid = why.isEmpty();
         if (m_editValid) {
             const QString r = m_cb.evaluate ? m_cb.evaluate(text) : QString();
-            m_editPreview = r.isEmpty() ? QString() : QString(QChar(0x2192)) + QLatin1Char(' ') + r;
+            // Same grammar as the resting display: what you are typing, then
+            // `=`, then what it comes to. baseSepText's own leading space would
+            // land inside the gap the preview already keeps from the field.
+            m_editPreview = r.isEmpty() ? QString()
+                                        : baseSepText().trimmed() + QLatin1Char(' ') + r;
         } else {
             m_editPreview = why;
         }
@@ -2274,7 +2295,7 @@ private:
     // plus the timer that keeps its own expiry from ending it mid-formula.
     RcxTooltip* m_helpTip = nullptr;
     QTimer      m_helpKeepAlive;
-    QString    m_editPreview;      // "→ 0x…", or the parser's / controller's words
+    QString    m_editPreview;      // "= 0x…", or the parser's / controller's words
     QString    m_commitError;      // set by a refused commit, cleared by the next keystroke
     // backInkInsetDev's cache: the SVG's ink inset at the last dpr seen.
     mutable qreal m_inkInsetDpr = -1.0;

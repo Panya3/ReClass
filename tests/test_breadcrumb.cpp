@@ -1471,7 +1471,7 @@ private slots:
         QVERIFY(QFontMetrics(bar.font()).horizontalAdvance(shown) <= AddressBar::kBaseMaxW);
         img = grabOf(bar);
         const QRect base = devRect(img, bar.itemRect(QStringLiteral("base")));
-        QVERIFY(countColour(img, base, t.textMuted) > 8);      // the "→ 0x…" suffix
+        QVERIFY(countColour(img, base, t.textMuted) > 8);      // the " = 0x…" suffix
         QCOMPARE(countColour(img, base, t.indHoverSpan), 0);
         // The tooltip carries what the segment could not.
         hoverAt(bar, bar.itemRect(QStringLiteral("base")).center());
@@ -1639,7 +1639,7 @@ private slots:
         QCOMPARE(bar->editText(), QStringLiteral("0x1000"));
         // A literal parses: the live preview is the controller's evaluator.
         QVERIFY(bar->editTextValid());
-        QCOMPARE(bar->editPreviewText(), QStringLiteral("\u2192 0x1000"));
+        QCOMPARE(bar->editPreviewText(), QStringLiteral("= 0x1000"));
         QTest::keyClick(bar->editWidget(), Qt::Key_Return);
         QApplication::processEvents();
         QCOMPARE(commit.count(), 1);
@@ -1712,7 +1712,7 @@ private slots:
         QVERIFY(bar.isEditing());
         QTest::keyClicks(bar.editWidget(), QStringLiteral("0x10"));
         QVERIFY(bar.editTextValid());
-        QCOMPARE(bar.editPreviewText(), QStringLiteral("\u2192 0x10"));
+        QCOMPARE(bar.editPreviewText(), QStringLiteral("= 0x10"));
         img = grabOf(bar);
         seam = seamRowUnder(img, bar.editRect());
         QVERIFY(countColour(img, seam, t.borderFocused) > seam.width() / 2);
@@ -1728,7 +1728,7 @@ private slots:
         QCOMPARE(bar.editText(), QStringLiteral("[0x100"));
         QVERIFY(!bar.editTextValid());
         QVERIFY(!bar.editPreviewText().isEmpty());
-        QVERIFY(!bar.editPreviewText().startsWith(QStringLiteral("\u2192")));
+        QVERIFY(!bar.editPreviewText().startsWith(AddressBar::baseSepText().trimmed()));
         img = grabOf(bar);
         QVERIFY(countColour(img, seam, t.markerError) > seam.width() / 2);
         QCOMPARE(countColour(img, seam, t.borderFocused), 0);
@@ -4046,11 +4046,50 @@ private slots:
         QVERIFY(!bar.isEditing());
     }
 
+    // ── The formula and what it comes to ──
+    //
+    // The base used to read "formula  →  value" with TWO spaces before the
+    // arrow and one after, which made the formula look like it carried
+    // trailing space, and the arrow itself repeated the glyph this same bar
+    // uses for Back and Forward — so it read as one more direction rather
+    // than as arithmetic. It is an equation now, spaced evenly.
+    void testBaseSeparatorIsAnEvenlySpacedEquals() {
+        QCOMPARE(AddressBar::baseSepText(), QStringLiteral(" = "));
+        const QString sep = AddressBar::baseSepText();
+        QCOMPARE(sep.trimmed(), QStringLiteral("="));
+        QCOMPARE(sep.length() - sep.trimmed().length(), 2);              // one space...
+        QVERIFY2(sep.startsWith(QLatin1Char(' ')) && sep.endsWith(QLatin1Char(' ')),
+                 "the separator's padding is not symmetric");            // ...on each side
+
+        AddressBar bar;
+        AddressBarState s = stateWith(twoLevel());
+        s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234");
+        s.resolvedBase = 0x7FF6DEAD1234ULL;
+        bar.setState(s);
+        showBar(bar, 900);
+
+        // What the cell actually holds: formula, separator, value — and no
+        // arrow of any kind, in either direction.
+        const QString shown = bar.baseDisplayText() + bar.baseSuffixShown();
+        QCOMPARE(shown, QStringLiteral("<REECLASS.exe>+0x1234 = 0x7FF6DEAD1234"));
+        for (QChar arrow : {QChar(0x2192), QChar(0x2190), QChar(0x203a)})
+            QVERIFY2(!shown.contains(arrow), qPrintable(QStringLiteral("arrow %1 back in the base")
+                                                            .arg(arrow.unicode(), 4, 16, QLatin1Char('0'))));
+
+        // A bare literal is not an equation: no separator, nothing after it.
+        AddressBarState lit = stateWith(twoLevel());
+        lit.baseAddress = lit.resolvedBase = 0x279B3D07010ULL;
+        bar.setState(lit);
+        QApplication::processEvents();
+        QVERIFY2(bar.baseSuffixShown().isEmpty(), qPrintable(bar.baseSuffixShown()));
+        QCOMPARE(bar.baseDisplayText(), QStringLiteral("0x279B3D07010"));
+    }
+
     // ── The field is the size of its value ──
     //
     // It used to open at a flat kEditMinW = 180 whatever it held, so a
     // 13-character address left ~78 px of empty field between the value and
-    // the "→ 0x…" preview painted after it (build/issue.png). The floor is now
+    // the "= 0x…" preview painted after it (build/issue.png). The floor is now
     // the floor for SHORT values only; anything longer measures itself.
     void testBaseEditFieldFitsItsValue() {
         AddressBar bar;

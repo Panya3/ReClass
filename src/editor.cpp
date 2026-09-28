@@ -8535,7 +8535,7 @@ void RcxEditor::validateEditLive() {
 
 void RcxEditor::updateExprResultPopup() {
     if (!m_editState.active || !m_exprEvaluator) return;
-    // Value edits only: the address bar's base edit draws its own "→ 0x…"
+    // Value edits only: the address bar's base edit draws its own "= 0x…"
     // preview through the same evaluator.
     const bool isVal = (m_editState.target == EditTarget::Value && !m_editState.hexOverwrite);
     if (!isVal) return;

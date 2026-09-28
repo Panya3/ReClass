@@ -1600,7 +1600,7 @@ void RcxController::connectEditor(RcxEditor* editor) {
     });
 
     // Live expression evaluation: the address bar's base edit reads it
-    // through Callbacks::evaluate for its "→ 0x…" preview, and the editor's
+    // through Callbacks::evaluate for its "= 0x…" preview, and the editor's
     // value edits show the same result when the text carries an operator.
     editor->setExprEvaluator([this](const QString& text) -> QString {
         QString s = text.trimmed();
