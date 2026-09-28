@@ -51,8 +51,11 @@ constexpr int kPanelGap     = 13;  // between panels ...
 constexpr int kDividerInset = 7;   // ... with the 1-device-px divider at A.right() + 7
 constexpr int kColGap       = 3;   // `|`
 constexpr int kSepGap       = 7;   // `||` (hairline in the middle)
-constexpr int kTabPad       = kGutter;
-constexpr int kTabGap       = 4;
+// The tab titles get noticeably more air than the strip gutter: they are the
+// ribbon's own navigation, read as words rather than buttons, and at kGutter
+// they sat cramped against each other and against the window edge.
+constexpr int kTabPad       = 16;
+constexpr int kTabGap       = 8;
 constexpr int kOverflowW    = 22;  // the ... item: middle row, right of a divider
 constexpr int kOverflowH    = 18;
 constexpr int kOverflowInset = 5;  // overflow x = dividerX + 5
@@ -267,11 +270,11 @@ void RibbonBar::setMinimized(bool minimized) {
 RibbonBar::Metrics RibbonBar::metrics() const {
     Metrics m;
     const QFontMetrics fm(font());
-    m.tabRowH  = fm.height() + 3;              // 20 at 10 pt
+    m.tabRowH  = fm.height() + 8;              // 25 at 10 pt (4 px of air above/below)
     m.rowH     = qMax(18, fm.height() + 1);    // 18
     m.captionH = 12;                           // 9 pt caption; glyphs overhang the rect
     m.padTop   = 2;
-    // padTop + 3 rows + caption + body bottom hairline -> 69; 89 with the tab row
+    // padTop + 3 rows + caption + body bottom hairline -> 69; 94 with the tab row
     m.bodyH = m.padTop + 3 * m.rowH + m.captionH + 1;
     const qreal dpr = devicePixelRatioF() > 0 ? devicePixelRatioF() : 1.0;
     m.smallIcon    = 16;
@@ -877,9 +880,17 @@ void RibbonBar::paintTabs(QPainter& p, const Metrics& m) {
     p.setFont(font());
 
     // One full-width hairline on the strip's last device row (minimized: the
-    // extra row under the strip is the only line). The active tab replaces
-    // it with kUnderlineRows device rows of the accent -- bottom-underline
-    // model, painted in ONE fill (two 1-row fills skip a row at 125 %).
+    // extra row under the strip is the only line). The active tab replaces it
+    // with kUnderlineRows device rows -- bottom-underline model, painted in ONE
+    // fill (two 1-row fills skip a row at 125 %).
+    //
+    // NEUTRAL, not the accent (user, 2026-09-06: "this whole underline thing is
+    // a little over used with purple"). Three stacked tab rows all underlined in
+    // indHoverSpan made the accent meaningless. These tabs switch which TOOLBAR
+    // you see -- navigation, not selection -- so the word carries the state
+    // (text vs textDim) and the rule only anchors it. The accent budget now
+    // spends purple on the document tabs, the pane view tabs and real
+    // selection.
     const QRectF strip(0, 0, width(), m_minimized ? m.tabRowH + 1 : m.tabRowH);
     fillBottomDeviceRowOfRect(p, strip, t.border);
 
@@ -892,7 +903,7 @@ void RibbonBar::paintTabs(QPainter& p, const Metrics& m) {
         const bool hovered = (m_hoverId == QStringLiteral("tab:") + tab.id);
         if (active)
             fillBottomDeviceRowsOfRect(p, QRectF(r.left(), 0, r.width(), strip.height()),
-                                       kUnderlineRows, t.indHoverSpan);
+                                       kUnderlineRows, t.textDim);
         // Text ladder (same as the doc tabs and the pane view tabs):
         // inactive textDim, hover text, active text. No fill, no box.
         p.setPen((active || hovered) ? t.text : inactive);

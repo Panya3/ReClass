@@ -171,8 +171,8 @@ void TestRibbonLayout::basics() {
     QCOMPARE(bar.action(QStringLiteral("type.int32"))->text(), QStringLiteral("Int 32"));
     QVERIFY(!bar.action(QStringLiteral("type.int32"))->icon().isNull());
     QVERIFY(!bar.action(QStringLiteral("sel.delete"))->toolTip().isEmpty());
-    // 89 px at 10 pt: tab row 20 + body 69 (padTop 2 + 3×18 + caption 12 + hairline)
-    QVERIFY2(bar.preferredHeight() >= 86 && bar.preferredHeight() <= 92,
+    // 94 px at 10 pt: tab row 25 + body 69 (padTop 2 + 3×18 + caption 12 + hairline)
+    QVERIFY2(bar.preferredHeight() >= 91 && bar.preferredHeight() <= 97,
              qPrintable(QStringLiteral("height %1").arg(bar.preferredHeight())));
     QCOMPARE(bar.sizeHint().height(), bar.preferredHeight());
     QVERIFY(bar.minimumSizeHint().width() < 200);
@@ -768,13 +768,13 @@ void TestRibbonLayout::flatMetrics() {
     bar.applyTheme(m_dark);
     bar.resize(1920, bar.preferredHeight());
     const QFontMetrics fm(bar.font());
-    QCOMPARE(bar.tabRowHeight(), fm.height() + 3);
+    QCOMPARE(bar.tabRowHeight(), fm.height() + 8);
     QCOMPARE(bar.bodyHeight(), 2 + 3 * qMax(18, fm.height() + 1) + 12 + 1);
     QCOMPARE(bar.preferredHeight(), bar.tabRowHeight() + bar.bodyHeight());
-    // Tabs: Home first, 4 px apart, starting on the shared kGutter.
+    // Tabs: Home first, kTabGap (8) apart, starting on the shared kGutter.
     const QRect modify = bar.tabRect(QStringLiteral("modify")), home = bar.tabRect(QStringLiteral("home"));
     QCOMPARE(home.left(), rcx::kGutter);
-    QCOMPARE(modify.left(), home.right() + 1 + 4);
+    QCOMPARE(modify.left(), home.right() + 1 + 8);
     // Panels: 13 px gap; first row starts 2 px under the tab row.
     bar.setCurrentTab(QStringLiteral("modify"));
     const QRect add = bar.panelRect(QStringLiteral("add")), ins = bar.panelRect(QStringLiteral("insert"));
@@ -1059,9 +1059,13 @@ void TestRibbonLayout::activeTabUnderline() {
     const QRect ad = devRect(img, active), od = devRect(img, other);
     const int hairRow = qFloor(bar.tabRowHeight() * dpr - 0.5);
     // Two contiguous accent rows under the active tab, the last on the hairline row.
-    const QVector<int> rows = rowsWith(img, QRect(ad.left() + ad.width() / 2, 0, 1, hairRow + 3), m_dark.indHoverSpan);
+    // NEUTRAL underline: these tabs are navigation, not selection, so the rule
+    // is textDim and the accent is reserved for the doc/pane tabs and selection.
+    const QVector<int> rows = rowsWith(img, QRect(ad.left() + ad.width() / 2, 0, 1, hairRow + 3), m_dark.textDim);
     QCOMPARE(rows, QVector<int>({hairRow - 1, hairRow}));
-    QVERIFY(countColour(img, QRect(ad.left(), hairRow - 1, ad.width(), 2), m_dark.indHoverSpan) >= ad.width() * 2 - 4);
+    QVERIFY(countColour(img, QRect(ad.left(), hairRow - 1, ad.width(), 2), m_dark.textDim) >= ad.width() * 2 - 4);
+    // ... and no purple anywhere in the tab row.
+    QCOMPARE(countColour(img, QRect(0, 0, img.width(), hairRow + 1), m_dark.indHoverSpan), 0);
     // The hairline elsewhere is `border`, and there is exactly one such row.
     const QVector<int> hair = rowsWith(img, QRect(od.left() + od.width() / 2, 0, 1, hairRow + 3), m_dark.border);
     QCOMPARE(hair, QVector<int>({hairRow}));
@@ -1089,7 +1093,7 @@ void TestRibbonLayout::activeTabUnderline() {
     QApplication::processEvents();
     const QImage mini = bar.grab().toImage().convertToFormat(QImage::Format_ARGB32);
     const int miniHair = qFloor((bar.tabRowHeight() + 1) * dpr - 0.5);
-    QCOMPARE(rowsWith(mini, QRect(ad.left() + ad.width() / 2, 0, 1, miniHair + 2), m_dark.indHoverSpan),
+    QCOMPARE(rowsWith(mini, QRect(ad.left() + ad.width() / 2, 0, 1, miniHair + 2), m_dark.textDim),
              QVector<int>({miniHair - 1, miniHair}));
 }
 
