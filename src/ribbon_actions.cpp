@@ -250,7 +250,7 @@ void RibbonActions::buildActions() {
         // rttiRequested() with its Tools ▸ RTTI Browser action. It lives here
         // so the id has one enabled predicate (it used to be permanently
         // enabled on Home) AND goes through wire()'s inline-edit guard.
-        wire(add(QStringLiteral("sel.rtti")), [this]() { emit rttiRequested(); });
+        wire(add(QStringLiteral("home.panels.rtti")), [this]() { emit rttiRequested(); });
     }
 
     // ── Title-strip quick access (no ribbon button) ──
@@ -466,9 +466,10 @@ void RibbonActions::refreshEnabled() {
               || id == QLatin1String("sel.ff")
               || id == QLatin1String("sel.random"))     en = fillOk;
         else if (id == QLatin1String("sel.swap"))      en = live && s.anyScalar;
-        // RTTI walks the vtable behind ONE selected pointer-sized field —
-        // it was permanently enabled while it lived on the Home tab.
-        else if (id == QLatin1String("sel.rtti"))      en = live && s.plainCount == 1 && s.anyPtrConvertible;
+        // RTTI walks the vtable behind ONE selected pointer-sized field. It
+        // lives on Home ▸ Panels (it opens a window) but keeps its predicate
+        // here, because a browser with nothing to browse is a dead button.
+        else if (id == QLatin1String("home.panels.rtti"))      en = live && s.plainCount == 1 && s.anyPtrConvertible;
         else if (id == QLatin1String("edit.undo"))     en = live && s.canUndo;
         else if (id == QLatin1String("edit.redo"))     en = live && s.canRedo;
         a->setEnabled(en);

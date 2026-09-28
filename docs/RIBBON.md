@@ -9,10 +9,11 @@ first-run tab; a persisted `ribbonTab` still wins.
 ```
  Home   Modify                                                                                        ⌃
  ────── ━━━━━━──────────────────────────────────────────────────────────────────────────────────────────
-  +4  +1024 │ ⤵4  ⤵1024 │ ✕ Delete    000  ⟲ Big endian │ H64 I64 U64 H8 │ D  V2 M4 │ PTR STR ⌸ Custom… │ ≡ Break Class
-  +8  +2048 │ ⤵8  ⤵2048 │ ⧉ Duplicate FFF  ⌗ RTTI       │ H32 I32 U32 I8 │ F  V3    │ FN* WSTR          │ ⌸ Ptr → Class
-  +64       │ ⤵64       │ ≡ Comment   ???               │ H16 I16 U16 U8 │ B  V4    │                   │ [] Array
-     Add    │   Insert  │        Selection              │ Hex: Int: UInt: Byte: Float: Ptr: Str:        │  Structure
+  +4  +1024 │ ⤵4  ⤵1024 │   ≡    ✕ Delete    000 ⟲ Big endian │ H64 I64 U64 H8 │ D  V2 M4 │ PTR STR ⌸ Custom…
+  +8  +2048 │ ⤵8  ⤵2048 │        ⧉ Duplicate FFF ⌸ Ptr → Class │ H32 I32 U32 I8 │ F  V3    │ FN* WSTR
+  +64       │ ⤵64       │ Extract ≡ Comment   ??? [] Array     │ H16 I16 U16 U8 │ B  V4    │
+            │           │  Class                              │                │          │
+     Add    │   Insert  │              Selection              │ Hex: Int: UInt: Byte: Float: Ptr: Str:
  ──────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
@@ -51,15 +52,14 @@ body.
 The three "creates a type" buttons carry the editor's class colour; every other
 Home icon is `GF::Plain`. Size is the hierarchy, hue appears once.
 
-**Modify** (natural ≈ 1049 px; hide order Selection → Insert → Add → Structure,
+**Modify** (natural ≈ 1053 px; hide order Selection → Insert → Add,
 Type `neverHide`):
 
 | Panel | Contents |
 |---|---|
 | **Add** / **Insert** | 4 · 8 · 64 ‖ 1024 · 2048. The strip shows the count alone (`shortLabel`); the `QAction` keeps "Add 4". |
-| **Selection** (id `selected`) | Delete (red) · Duplicate · Comment ‖ `000` `FFF` `???` (icon-only) ‖ **Big endian** (checkable) · **RTTI** |
+| **Selection** (id `selected`) | **Extract Class** (LARGE, teal — the panel's entry point) ‖ Delete (red) · Duplicate · Comment ‖ `000` `FFF` `???` (icon-only) ‖ **Big endian** (checkable) · Ptr → Class · Array. One panel, ordered by what the button does: entry point · edit in place · fill · reshape. The separate **Structure** panel was merged in on 2026-09-06 — it split one question ("I selected some bytes, now what?") across two captions. **RTTI moved OUT** to Home ▸ Panels: it opens a browser window rather than changing the selection. |
 | **Type** (`glyphLabels`) | `Hex:` H64 H32 H16 ‖ `Int:` I64 I32 I16 ‖ `UInt:` U64 U32 U16 ‖ `Byte:` H8 I8 U8 ‖ `Float:` D F B · V2 V3 V4 · M4 ‖ `Ptr:` PTR FN* ‖ `Str:` STR WSTR ‖ **Custom…** (`keepLabel`) |
-| **Structure** | Extract Class (teal) · Ptr → Class (teal) · Array — all three `keepLabel`: words in **every** label mode and at every width (a bare `list-selection` glyph does not say "Extract Class"). The command had THREE names before 2026-09-06 (node menu "Break Class", Edit menu "Break into Class", ribbon "Break Class"); it is one name now, and it matches what the code has always called it (`extractByteSelectionToNewClass`). |
 
 ## Action ids
 
@@ -70,8 +70,8 @@ Every button is addressable by id (`RibbonBar::action(id)`, `RibbonActions::acti
 - `sel.delete sel.duplicate sel.comment` — `deleteSelection` / `duplicateSelection` / `commentSelection`
 - `sel.zero sel.ff sel.random` — `fillSelectionBytes(Zero|FF|Random)`
 - `sel.swap` — **Big endian**, checkable: `toggleBigEndianSelection`, checked when every swappable leaf in the selection is already big-endian (`SelectionSummary::allBigEndian`)
-- `sel.rtti` — no op of its own; `createRibbon()` forwards `triggered` to Tools ▸ RTTI Browser. Enabled = live && exactly one selected pointer-sized field
-- `type.hex64 … type.hex8`, `type.int64 … type.int8`, `type.uint64 … type.uint8`, `type.double type.float type.bool`, `type.vec2 type.vec3 type.vec4 type.mat4x4`, `type.pointer type.funcptr` (64/32-bit from `tree.pointerSize`), `type.utf8 type.utf16` — `retypeSelection(kind)`; `type.ptrclass` — `convertSelectionToTypedPointers`; `type.class` — **Break Class**; `type.array` — `makeArrayFromSelection`; `type.custom` — the inline type editor
+- `home.panels.rtti` — no op of its own; `createRibbon()` forwards `triggered` to Tools ▸ RTTI Browser. Lives on **Home ▸ Panels** (it opens a window) but RibbonActions keeps the id so it keeps its predicate: enabled = live && exactly one selected pointer-sized field
+- `type.hex64 … type.hex8`, `type.int64 … type.int8`, `type.uint64 … type.uint8`, `type.double type.float type.bool`, `type.vec2 type.vec3 type.vec4 type.mat4x4`, `type.pointer type.funcptr` (64/32-bit from `tree.pointerSize`), `type.utf8 type.utf16` — `retypeSelection(kind)`; `type.ptrclass` — `convertSelectionToTypedPointers`; `type.class` — **Extract Class** (Large); `type.array` — `makeArrayFromSelection`; `type.custom` — the inline type editor
 - Menu-backed (the same `QAction` objects as the menus): `home.file.open/save/close`, `home.class.newclass/newstruct/newenum`, `home.source.refresh/goto`, `home.panels.scanner/symbols/bookmarks/console/split`
 - Ribbon-only: `home.source.attach` pops the Data Source menu under the button; `home.file.code` pops a two-item scope menu
   (**This Class** / **All Classes**) and switches the ACTIVE pane to its Code view — it does not write a file, File ▸ Export still does
@@ -97,7 +97,7 @@ All logical px at 10 pt JetBrains Mono (`fm.height()` 17); "device" = physical p
 | States | paint order: opacity → fill → icon + label → underline. **Rest: `text`** for Plain icons and labels — the ribbon is the actionable surface, and dimming it at rest put the toolbar below the document in the hierarchy. Hover: `hover` fill only (the ink does not change). Pressed: `button` fill (`selected` when `button == background`). Checked: `indHoverSpan` + 2 device rows underline. Disabled: `setOpacity(0.40)` of the *same* ink before anything (never `textDim × 0.4`, which lands under 2 : 1). `RibbonItemSpec::destructive` (Delete): the icon is `markerPtr` in every state, the label turns red only under the pointer. |
 | Tones | `ribbonToneColour` is a **ladder**: the asked-for tone → `textDim` → `text`, first at ≥ 3 : 1 wins. (The old cliff jumped straight to `text`, and vs.json's `textMuted` misses the guard by 0.02 — captions rendered at full label brightness.) Purple appears only on the checked state — the active *tab* is neutral `textDim`, so the ribbon spends the accent budget once, not twice; red only on Delete. |
 | Families | Hex = `text`; **Signed and Unsigned both `syntaxNumber`** (the I / U letter carries the sign, which frees `markerPtr` to mean only "destructive"); Float = `syntaxKeyword`; Text = `syntaxString`; Pointer = `syntaxType`; Bits = `syntaxNumber`; Plain = `text`/the state tone. Pixel-text rasterisers demand **4.5 : 1** (`kRibbonPixelInkContrast`); Codicons keep 3.0. |
-| Compaction | stage 1 (Auto only) drops labels by `labelDrop`, higher first, equal values together: Modify Add 20 · Insert 20 · Structure 10 · Selection 0; Home Panels 30 · Source 10 · File 0 · Class 0. A `glyphLabels` panel is glyph-only in **every** mode, so "All labels" is an honest promise; `keepLabel` items (Custom…, and all three Structure commands) keep their word regardless — so at 760 px Modify gives up the Selection **and** Insert panels to the `…` menu rather than three mute glyphs; at the 1080-px window nothing hides. Stage 2 hides by `hideOrder` (lower first, `neverHide` respected): Modify Selection 0 · Insert 10 · Add 20 · Structure 30 (Type never); Home Panels 0 · Source 20 (File, Class never). Hidden panels sit behind a single middle-row 22×18 `…` item. |
+| Compaction | stage 1 (Auto only) drops labels by `labelDrop`, higher first, equal values together: Modify Add 20 · Insert 20 · Selection 10; Home Panels 30 · Source 10 · File 0 · Class 0. A `glyphLabels` panel is glyph-only in **every** mode, so "All labels" is an honest promise; `keepLabel` items (Custom…, and the three reshape commands) keep their word regardless — so at 760 px Modify gives up the Selection panel to the `…` menu rather than showing mute glyphs; at the 1080-px window nothing hides. Stage 2 hides by `hideOrder` (lower first, `neverHide` respected): Modify Selection 0 · Insert 10 · Add 20 (Type never); Home Panels 0 · Source 20 (File, Class never). Hidden panels sit behind a single middle-row 22×18 `…` item. |
 
 ## `RibbonItemSpec` fields
 

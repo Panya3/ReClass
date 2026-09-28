@@ -24,7 +24,7 @@
 //   add.4 add.8 add.64 add.1024 add.2048
 //   insert.4 insert.8 insert.64 insert.1024 insert.2048
 //   sel.delete sel.duplicate sel.comment sel.zero sel.ff sel.random
-//   sel.swap (Big endian — checkable) sel.rtti (no op here; MainWindow
+//   sel.swap (Big endian — checkable) home.panels.rtti (no op here; MainWindow
 //     forwards it to Tools ▸ RTTI Browser)
 //   edit.undo edit.redo — the title-strip quick-access pair; they have no
 //     ribbon button, so their label + tooltip are passed in rather than read
@@ -121,7 +121,7 @@ signals:
     // Short user-facing message for the status bar (a trigger that found
     // nothing usable selected, etc.). MainWindow routes it to setAppStatus.
     void statusHint(const QString& text);
-    // sel.rtti has no controller op of its own; MainWindow owns the browser.
+    // home.panels.rtti has no controller op of its own; MainWindow owns the browser.
     // Routing it through a signal (rather than connecting to the QAction
     // directly) keeps it behind wire()'s inline-edit guard like every other
     // ribbon command.

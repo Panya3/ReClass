@@ -11854,13 +11854,20 @@ int main(int argc, char* argv[]) {
             const QString ribbonMode = (ssIdx + 2 < args.size()) ? args[ssIdx + 2] : QString();
             const bool ribbonShot = (ribbonMode == "home" || ribbonMode == "modify"
                                      || ribbonMode == "collapsed");
-            QVariant savedTab, savedState;
-            if (ribbonShot) {
+            QVariant savedTab, savedState, savedScope;
+            {
                 QSettings rs("REECLASS", "REECLASS");
-                savedTab = rs.value("ribbonTab");
-                savedState = rs.value("ribbonState");
+                if (ribbonShot) {
+                    savedTab = rs.value("ribbonTab");
+                    savedState = rs.value("ribbonState");
+                }
+                // previewCodeView drives the REAL command, which persists the
+                // scope like a user click would — so a capture run would
+                // silently rewrite the user's setting. Save it here, restore
+                // below, same as the ribbon keys.
+                if (showCode) savedScope = rs.value("codeScope");
             }
-            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, ribbonMode, ribbonShot, savedTab, savedState]() {
+            QMetaObject::invokeMethod(&window, [&window, ssPath, showScanner, showWorkspace, showBoth, closeTest, showCode, showSplash, showSymbols, ribbonMode, ribbonShot, savedTab, savedState, savedScope]() {
                 if (showSplash) {
                     // Capture the start page itself — skip project_new so it
                     // shows the no-tabs landing.
@@ -11886,7 +11893,7 @@ int main(int argc, char* argv[]) {
                 }
                 // Defer the grab so the dock layout settles + the panel
                 // paints its initial state before we capture.
-                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, ribbonShot, savedTab, savedState]() {
+                QTimer::singleShot(1500, &window, [&window, ssPath, showSplash, ribbonShot, savedTab, savedState, showCode, savedScope]() {
                     QPixmap px;
                     if (showSplash) {
                         if (auto* sp = window.findChild<rcx::StartPageWidget*>())
@@ -11916,12 +11923,18 @@ int main(int argc, char* argv[]) {
                     }
                     // Put the user's ribbon preferences back: a capture run
                     // must not leave the app on the tab it photographed.
-                    if (ribbonShot) {
+                    if (ribbonShot || showCode) {
                         QSettings rs("REECLASS", "REECLASS");
-                        if (savedTab.isValid()) rs.setValue("ribbonTab", savedTab);
-                        else rs.remove("ribbonTab");
-                        if (savedState.isValid()) rs.setValue("ribbonState", savedState);
-                        else rs.remove("ribbonState");
+                        if (ribbonShot) {
+                            if (savedTab.isValid()) rs.setValue("ribbonTab", savedTab);
+                            else rs.remove("ribbonTab");
+                            if (savedState.isValid()) rs.setValue("ribbonState", savedState);
+                            else rs.remove("ribbonState");
+                        }
+                        if (showCode) {
+                            if (savedScope.isValid()) rs.setValue("codeScope", savedScope);
+                            else rs.remove("codeScope");
+                        }
                     }
                     // `--profile --screenshot`: emit the init-path timings we
                     // recorded (no-op if profiling wasn't enabled).

@@ -199,10 +199,10 @@ private slots:
     // ── Every id exists, carries data where promised ──
     void testIdsAndData() {
         const QStringList ids = m_ra->ids();
-        QCOMPARE(ids.size(), 47);   // + sel.rtti (moved off the Home tab)
+        QCOMPARE(ids.size(), 47);   // + home.panels.rtti (moved off the Home tab)
         for (const char* id : {"type.hex64", "type.int32", "type.pointer", "type.custom",
                                "add.4", "add.2048", "insert.64", "sel.delete", "sel.swap",
-                               "sel.rtti", "edit.undo", "edit.redo"})
+                               "home.panels.rtti", "edit.undo", "edit.redo"})
             QVERIFY2(m_ra->action(QString::fromLatin1(id)), id);
         QCOMPARE(act("type.int32")->data().toInt(), int(NodeKind::Int32));
         QCOMPARE(act("type.utf16")->data().toInt(), int(NodeKind::UTF16));
@@ -669,13 +669,13 @@ private slots:
     // anything for exactly one selected pointer-sized field.
     void testRttiEnabledOnlyForOnePointerField() {
         m_ra->refreshEnabled();
-        QVERIFY(!act("sel.rtti")->isEnabled());        // nothing selected
+        QVERIFY(!act("home.panels.rtti")->isEnabled());        // nothing selected
         m_a.click(m_a.h[0]);
         m_ra->refreshEnabled();
-        QVERIFY(act("sel.rtti")->isEnabled());         // one 8-byte leaf
+        QVERIFY(act("home.panels.rtti")->isEnabled());         // one 8-byte leaf
         m_a.click(m_a.h[1], Qt::ControlModifier);
         m_ra->refreshEnabled();
-        QVERIFY2(!act("sel.rtti")->isEnabled(), "two fields have no single vtable");
+        QVERIFY2(!act("home.panels.rtti")->isEnabled(), "two fields have no single vtable");
     }
 
     // Ptr→Class: two 8-byte leaves become typed pointers to two NEW classes, one step.

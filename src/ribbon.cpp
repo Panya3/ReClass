@@ -78,7 +78,11 @@ constexpr int kCollapseW    = 22;  // the collapse chevron, right end of the tab
 constexpr int kMenuChevronW = 10;  // width a `menu` item adds for its ▾
 constexpr int kMenuChevron  = 8;   // ... the glyph cell inside it
 constexpr int kLargeMinW    = 48;
-constexpr int kLargeMaxW    = 80;
+// 112, not 80: the cap exists so one Large button cannot dominate a panel,
+// but at 80 the widest shipped Large label ("Extract Class") elided to
+// "Extract …" — a cap that renames a command is the wrong cap. 112 fits
+// every current Large label with room to spare and still bounds the cell.
+constexpr int kLargeMaxW    = 112;
 constexpr int kLargeIconOnlyW = 40;
 constexpr double kDisabledOpacity = 0.40;
 
@@ -330,8 +334,8 @@ int RibbonBar::smallItemWidth(const RibbonItemSpec& it, bool label, const QFontM
     return 3 + cellW + 4 + fm.horizontalAdvance(ribbonStripLabel(it)) + 6 + chev;
 }
 
-// clamp(label + 8, 48, 80) (+10 for a `menu` ▾); the label is elided (never
-// for shipped labels).
+// clamp(label + 8, 48, 112) (+10 for a `menu` ▾); the label is elided (never
+// for shipped labels — pinned by largeLabelsAreNeverElided).
 int RibbonBar::largeItemWidth(const RibbonItemSpec& it, bool label, const QFontMetrics& fm) const {
     const int chev = it.menu ? kMenuChevronW : 0;
     if (!label) return kLargeIconOnlyW + chev;

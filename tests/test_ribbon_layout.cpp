@@ -180,7 +180,7 @@ void TestRibbonLayout::basics() {
     bar.resize(1920, bar.preferredHeight());
     QVERIFY(!bar.panelRect(QStringLiteral("type")).isNull());
     QVERIFY(!bar.panelRect(QStringLiteral("add")).isNull());
-    QVERIFY(!bar.panelRect(QStringLiteral("structure")).isNull());
+    QVERIFY(!bar.panelRect(QStringLiteral("selected")).isNull());
     QCOMPARE(bar.panelRect(QStringLiteral("add")).left(), rcx::kGutter);
     // The ribbon never owns a static toolTip — the hovered item's text is
     // published on demand (see tooltipFollowsHover).
@@ -249,10 +249,10 @@ void TestRibbonLayout::overflowByWidth() {
     QVERIFY(!bar.panelRect(QStringLiteral("type")).isNull());
     QVERIFY(!bar.overflowButtonRect().isNull());
     for (const QString& p : hidden) QVERIFY(bar.panelRect(p).isNull());
-    // hideOrder: Selection (0) goes first, then Insert (10), then Add (20),
-    // then Structure (30). Type glyph-only (416) + Add + Insert + Structure
-    // (All keeps their labels) fits once the first two are gone.
-    QCOMPARE(hidden, QStringList({QStringLiteral("selected"), QStringLiteral("insert")}));
+    // hideOrder: Selection (0) goes first, then Insert (10), then Add (20).
+    // Structure was merged INTO Selection (2026-09-06), so there are four
+    // panels, not five, and dropping the widest one is enough on its own.
+    QCOMPARE(hidden, QStringList({QStringLiteral("selected")}));
     // Hidden panels' items have no rect.
     QVERIFY(bar.itemRect(QStringLiteral("sel.delete")).isNull());
     // Growing back restores everything.
@@ -379,10 +379,12 @@ void TestRibbonLayout::labelModes() {
     QCOMPARE(spy.count(), 2);
     QCOMPARE(spy.last().at(0).toInt(), 2);
     QVERIFY(!bar.itemLabelShown(QStringLiteral("add.1024")));
-    // DELIBERATE CHANGE (was < allW / 2): Type is glyph-only in All mode too
-    // now, so All is no longer twice the icons-only width — Modify's biggest
-    // panel costs the same in both modes.
-    QVERIFY2(bar.naturalWidth() < allW * 4 / 5,
+    // DELIBERATE CHANGE (was < allW / 2, then < allW * 4 / 5): Type is
+    // glyph-only in All mode too, AND four commands are keepLabel (Extract
+    // Class, Ptr → Class, Array, Custom…) — they keep their words in
+    // IconsOnly by design. Icons-only can therefore only save the labels that
+    // are actually droppable, which is a modest share of the strip.
+    QVERIFY2(bar.naturalWidth() < allW * 9 / 10,
              qPrintable(QStringLiteral("icons %1 vs all %2").arg(bar.naturalWidth()).arg(allW)));
     bar.setLabelMode(RibbonBar::LabelMode::Auto);
     QCOMPARE(spy.count(), 3);
@@ -398,16 +400,18 @@ void TestRibbonLayout::labelModes() {
     // Structure commands are `keepLabel` — "words in every mode" — so they are
     // deliberately NOT part of the wordless sweep. A bare list-selection glyph
     // does not say "Extract Class".
-    QVERIFY(bar.itemLabelShown(QStringLiteral("type.array")));
+    if (!bar.overflowedPanelIds().contains(QStringLiteral("selected")))
+        QVERIFY(bar.itemLabelShown(QStringLiteral("type.array")));
     // DELIBERATE CHANGE (was `<= 1`): keeping the Structure words costs ~48 px
-    // that used to be spent on its labels, so at 760 the second panel in the
-    // hide order goes to the » menu. That is what hideOrder Selection 0 →
-    // Insert 10 → Add 20 → Structure 30 is FOR: at the user's 1080 window
-    // nothing hides at all (bothTabsFitTheUserWindow), and when a 760-px strip
-    // has to give something up, a panel behind » beats three mute glyphs.
+    // that used to be spent on its labels. hideOrder Selection 0 → Insert 10
+    // → Add 20 is what absorbs it: at the user's 1080 window nothing hides at
+    // all (bothTabsFitTheUserWindow), and when a 760-px strip has to give
+    // something up, a panel behind » beats a row of mute glyphs. Selection is
+    // now the widest panel (it absorbed Structure), so dropping it alone is
+    // enough where two panels used to have to go.
     const QStringList hidden760 = bar.overflowedPanelIds();
     QVERIFY2(hidden760.size() <= 2, qPrintable(hidden760.join(',')));
-    QCOMPARE(hidden760, QStringList({QStringLiteral("selected"), QStringLiteral("insert")}));
+    QCOMPARE(hidden760, QStringList({QStringLiteral("selected")}));
     bar.setLabelMode(RibbonBar::LabelMode::Auto);   // no-op → no signal
     QCOMPARE(spy.count(), 3);
 }
@@ -793,12 +797,16 @@ void TestRibbonLayout::flatMetrics() {
     // DELIBERATE CHANGE (was 16 + 6, the icon-only cell): Structure is
     // keepLabel, so even in IconsOnly its three items carry words and the
     // column takes the widest of them.
-    // The Structure column takes its widest keepLabel item, which is now
-    // "Extract Class" (was "Ptr → Class" when the command was "Break Class").
+    // Extract Class is the panel's LARGE cell now, so the small reshape column
+    // takes its widest remaining keepLabel item, "Ptr → Class".
     QCOMPARE(bar.itemRect(QStringLiteral("type.array")).width(),
-             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Extract Class")) + 6);
+             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Ptr → Class")) + 6);
+    // type.class is the Large entry point, so it is sized by the Large rule
+    // (clamp(label + 8, 48, 112)), NOT by the small reshape column beside it.
     QCOMPARE(bar.itemRect(QStringLiteral("type.class")).width(),
-             bar.itemRect(QStringLiteral("type.array")).width());
+             qBound(48, fm.horizontalAdvance(QStringLiteral("Extract Class")) + 8, 112));
+    QVERIFY(bar.itemRect(QStringLiteral("type.class")).height()
+            > bar.itemRect(QStringLiteral("type.array")).height());
     QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).height(), qMax(18, fm.height() + 1));
     // DELIBERATE CHANGE: Type is glyph-only in All mode too, so the width does
     // not grow by a "Hex 64" label any more.
@@ -818,11 +826,16 @@ void TestRibbonLayout::flatMetrics() {
              qBound(48, fm.horizontalAdvance(QStringLiteral("Source")) + 8, 80) + 10);
     QCOMPARE(bar.itemRect(QStringLiteral("home.file.code")).width(),
              3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Code")) + 6 + 10);
-    // Panels rhythm: Scanner + Symbols large, Bookmarks / Console / Split one small column.
+    // Panels rhythm: Scanner + Symbols large, then Bookmarks / Console / RTTI
+    // as one small column — the four window-openers together. Split Below is a
+    // fourth small item, so it wraps into a column of its own, which suits it:
+    // it is the only button here that opens no window.
     QCOMPARE(bar.itemRect(QStringLiteral("home.panels.symbols")).height(), 3 * qMax(18, fm.height() + 1));
     QCOMPARE(bar.itemRect(QStringLiteral("home.panels.console")).height(), qMax(18, fm.height() + 1));
     QCOMPARE(bar.itemColumn(QStringLiteral("home.panels.bookmarks")),
-             bar.itemColumn(QStringLiteral("home.panels.split")));
+             bar.itemColumn(QStringLiteral("home.panels.rtti")));
+    QVERIFY(bar.itemColumn(QStringLiteral("home.panels.split"))
+            > bar.itemColumn(QStringLiteral("home.panels.rtti")));
 }
 
 // Defects D / E: no panel boxes, no caption bands, no fills or outlines at
@@ -1116,8 +1129,7 @@ void TestRibbonLayout::overflowIsMiddleRowItem() {
     // Right of the last visible panel: divider at right+7, item at divider+5.
     int lastRight = -1;
     for (const QString& id : {QStringLiteral("add"), QStringLiteral("insert"),
-                              QStringLiteral("selected"), QStringLiteral("type"),
-                              QStringLiteral("structure")})
+                              QStringLiteral("selected"), QStringLiteral("type")})
         if (const QRect r = bar.panelRect(id); !r.isNull()) lastRight = qMax(lastRight, r.right());
     QCOMPARE(ov.left(), lastRight + 5 + 5);
     QVERIFY(ov.right() + 6 <= 760);
@@ -1195,9 +1207,10 @@ void TestRibbonLayout::largeCellsShareAWidthAndSitOnRowThree() {
                   qBound(48, fm.horizontalAdvance(QStringLiteral("Symbols")) + 8, 80)));
 
     // Row-3 line: the Large label's row is the third small row of the
-    // neighbouring column (Bookmarks / Console / Split Below).
+    // neighbouring column (Bookmarks / Console / RTTI — Split Below wraps to a
+    // column of its own, being the one item here that opens no window).
     const int rowH = qMax(18, fm.height() + 1);
-    const QRect third = bar.itemRect(QStringLiteral("home.panels.split"));
+    const QRect third = bar.itemRect(QStringLiteral("home.panels.rtti"));
     QCOMPARE(third.height(), rowH);
     QCOMPARE(third.top(), scanner.top() + 2 * rowH);
 
@@ -1332,8 +1345,9 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
     }
     // The Byte column really is one column of three.
     QCOMPARE(bar.itemColumn(QStringLiteral("type.hex8")), bar.itemColumn(QStringLiteral("type.uint8")));
-    // And Structure is a panel of its own with a normal caption.
-    QVERIFY(!bar.panelRect(QStringLiteral("structure")).isNull());
+    // The reshape commands live in Selection now, not a panel of their own.
+    QVERIFY(!bar.panelRect(QStringLiteral("selected")).isNull());
+    QVERIFY(bar.panelRect(QStringLiteral("structure")).isNull());
 }
 
 // P1 #18: "gives the three restructuring commands words in every mode".
@@ -1350,7 +1364,7 @@ void TestRibbonLayout::structureKeepsItsWordsEverywhere() {
         bar.setLabelMode(mode);
         for (int w : {700, 760, 1080, 1920}) {
             bar.resize(w, bar.preferredHeight());
-            if (bar.overflowedPanelIds().contains(QStringLiteral("structure"))) continue;
+            if (bar.overflowedPanelIds().contains(QStringLiteral("selected"))) continue;
             for (const char* id : ids)
                 QVERIFY2(bar.itemLabelShown(QLatin1String(id)),
                          qPrintable(QStringLiteral("%1 wordless at %2 in mode %3")
@@ -1381,13 +1395,13 @@ void TestRibbonLayout::bothTabsFitTheUserWindow() {
                            "home.class.newclass", "home.class.newstruct", "home.class.newenum",
                            "home.source.attach", "home.source.refresh", "home.source.goto",
                            "home.panels.scanner", "home.panels.symbols", "home.panels.bookmarks",
-                           "home.panels.console", "home.panels.split"})
+                           "home.panels.console", "home.panels.rtti", "home.panels.split"})
         QVERIFY2(bar.itemLabelShown(QLatin1String(id)), id);
     // Modify: every worded label present; the Type glyphs stay glyphs.
     bar.setCurrentTab(QStringLiteral("modify"));
     bar.resize(1080, bar.preferredHeight());
     for (const char* id : {"add.4", "add.2048", "insert.4", "insert.2048",
-                           "sel.delete", "sel.duplicate", "sel.comment", "sel.swap", "sel.rtti",
+                           "sel.delete", "sel.duplicate", "sel.comment", "sel.swap",
                            "type.custom", "type.class", "type.ptrclass", "type.array"})
         QVERIFY2(bar.itemLabelShown(QLatin1String(id)), id);
     QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));

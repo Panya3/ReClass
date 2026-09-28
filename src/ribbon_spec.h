@@ -247,6 +247,16 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
             codicon("home.panels.bookmarks", "Bookmarks", "Open the bookmarks (Ctrl+Shift+K)",
                     "bookmark", GF::Plain, SZ::Small, true),
             codicon("home.panels.console", "Console", "Show the console", "console"),
+            // RTTI opens a browser WINDOW (class hierarchy + vtable behind the
+            // selected pointer), which is what every other button in this panel
+            // does. It sat in Modify ▸ Selection until 2026-09-06, where it was
+            // the only item that opened something rather than changing the
+            // selection — "wtf is the RTTI field for even?". RibbonActions keeps
+            // owning the id so it keeps its enabled predicate (one pointer-sized
+            // field selected); MainWindow triggers the Tools action.
+            codicon("home.panels.rtti", "RTTI",
+                    "RTTI Browser: class hierarchy behind the selected pointer (Ctrl+Shift+R)",
+                    "symbol-interface"),
             codicon("home.panels.split", "Split Below", "Split the editor below (Ctrl+\\)", "split-vertical"),
         };
         tab.panels.append(panels);
@@ -255,7 +265,7 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
     }
 
     // ── Modify: what you do to the SELECTION ──
-    // Add · Insert · Selection · Type · Structure.
+    // Add · Insert · Selection · Type.
     {
         RibbonTabSpec tab;
         tab.id = QStringLiteral("modify");
@@ -289,18 +299,36 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         };
         tab.panels.append(ins);
 
+        // Everything you can do TO a selection, in one panel, ordered by what
+        // the button does: entry point, edit in place, fill, reshape.
+        // "Structure" used to be a separate panel next to this one, which
+        // split one question ("I selected some bytes — now what?") across two
+        // captions. RTTI moved OUT to Home ▸ Panels: it opens a browser window
+        // rather than changing the selection, so it belongs with Scanner and
+        // Symbols, not among edit commands.
         RibbonPanelSpec sel;
         sel.id = QStringLiteral("selected");
         sel.caption = QStringLiteral("Selection");
-        sel.labelDrop = 0;
+        sel.labelDrop = 10;   // the reshape words go before Add / Insert counts
         sel.hideOrder = 0;    // first panel to hide
         {
+            // The panel's entry point, and the most consequential thing a
+            // selection can become: a class sized exactly to it. Large, so
+            // size matches how much it matters.
+            RibbonItemSpec brk = codicon("type.class", "Extract Class",
+                                         "Extract the selected bytes / fields into a new embedded class (Ctrl+Shift+B)",
+                                         "selection", GF::Pointer, SZ::Large);
+            brk.data = int(NodeKind::Struct);
+            brk.keepLabel = true;      // words in EVERY label mode
+            sel.items.append(brk);
+
             // Delete is the one red thing on the strip: a Codicon `close`
             // tinted markerPtr (the hand-drawn ✕ bitmap read as a different
             // weight next to its Codicon neighbours).
             RibbonItemSpec del = codicon("sel.delete", "Delete",
                                          "Delete the selected fields (Delete)", "close");
             del.destructive = true;
+            del.columnBreakBefore = true;   // starts the small column beside Extract Class
             sel.items.append(del);
             sel.items.append(codicon("sel.duplicate", "Duplicate",
                                      "Duplicate the selected fields below themselves (Ctrl+D)", "clippy"));
@@ -329,9 +357,26 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
                                           "Show the selected scalars byte-swapped (big-endian)",
                                           "sync", GF::Plain, SZ::Small, true);
             sel.items.append(swap);
-            sel.items.append(codicon("sel.rtti", "RTTI",
-                                     "RTTI Browser: class hierarchy behind the selected pointer (Ctrl+Shift+R)",
-                                     "symbol-interface"));
+
+            // Reshape: the other two things a selection can become. They share
+            // the column with Big endian because all three change what the
+            // selected bytes ARE rather than removing or overwriting them.
+            RibbonItemSpec pc;
+            pc.id = QStringLiteral("type.ptrclass");
+            pc.label = QStringLiteral("Ptr → Class");
+            pc.tooltip = QStringLiteral("Change to a pointer to a new class (each selected 4/8-byte field)");
+            pc.size = RibbonItemSize::Small;
+            pc.icon = {IK::ClassPtr, QString(), GF::Pointer};
+            pc.data = int(NodeKind::Pointer64);
+            pc.keepLabel = true;
+            sel.items.append(pc);
+
+            RibbonItemSpec arr = codicon("type.array", "Array",
+                                         "Turn the selected field (or contiguous same-type fields) into an array",
+                                         "symbol-array");
+            arr.data = int(NodeKind::Array);
+            arr.keepLabel = true;
+            sel.items.append(arr);
         }
         tab.panels.append(sel);
 
@@ -388,38 +433,6 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         }
         tab.panels.append(type);
 
-        // The three restructuring commands, with words in every label mode.
-        RibbonPanelSpec structure;
-        structure.id = QStringLiteral("structure");
-        structure.caption = QStringLiteral("Structure");
-        structure.labelDrop = 10;
-        structure.hideOrder = 30;
-        {
-            RibbonItemSpec brk = codicon("type.class", "Extract Class",
-                                         "Extract the selected bytes / fields into a new embedded class (Ctrl+Shift+B)",
-                                         "selection", GF::Pointer);
-            brk.data = int(NodeKind::Struct);
-            brk.keepLabel = true;      // words in EVERY label mode
-            structure.items.append(brk);
-
-            RibbonItemSpec pc;
-            pc.id = QStringLiteral("type.ptrclass");
-            pc.label = QStringLiteral("Ptr → Class");
-            pc.tooltip = QStringLiteral("Change to a pointer to a new class (each selected 4/8-byte field)");
-            pc.size = RibbonItemSize::Small;
-            pc.icon = {IK::ClassPtr, QString(), GF::Pointer};
-            pc.data = int(NodeKind::Pointer64);
-            pc.keepLabel = true;
-            structure.items.append(pc);
-
-            RibbonItemSpec arr = codicon("type.array", "Array",
-                                         "Turn the selected field (or contiguous same-type fields) into an array",
-                                         "symbol-array");
-            arr.data = int(NodeKind::Array);
-            arr.keepLabel = true;
-            structure.items.append(arr);
-        }
-        tab.panels.append(structure);
 
         tabs.append(tab);
     }
