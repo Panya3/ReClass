@@ -145,7 +145,9 @@ void TestPixelGlyphs::glyphTableHasEveryUsedChar() {
         QCOMPARE(pixelFontSizeDev(dpr) % kPixelFontDesign, 0);
 
     // Widths the layout depends on, at the design size.
-    QCOMPARE(pixelLabelWidthDev(QStringLiteral("H64"), 1.0), 3 * fm.horizontalAdvance(QStringLiteral("H")));
+    const QFontMetrics fmDesign(pixelLabelFontAt(kPixelFontDesign));
+    QCOMPARE(pixelLabelWidthDev(QStringLiteral("H64"), 1.0),
+             3 * fmDesign.horizontalAdvance(QStringLiteral("H")));
     QVERIFY(pixelLabelWidthDev(QStringLiteral("WSTR"), 1.0)
           > pixelLabelWidthDev(QStringLiteral("H64"), 1.0));
 }
@@ -195,17 +197,24 @@ void TestPixelGlyphs::scaleRule() {
     // Departure Mono renders at whole multiples of its 11 px design size, in
     // DEVICE px: 11 up to 150 %, 22 at 200 %. Anything else and the 1-px
     // strokes blur, which is the entire reason for using this font.
+    // As large as the 16-logical icon cell can hold at each DPI, always a
+    // whole multiple of the 11 px design size.
     QCOMPARE(pixelFontSizeDev(1.0), 11);
-    QCOMPARE(pixelFontSizeDev(1.25), 11);
-    QCOMPARE(pixelFontSizeDev(1.5), 11);
-    QCOMPARE(pixelFontSizeDev(2.0), 22);
+    QCOMPARE(pixelFontSizeDev(1.25), 22);
+    QCOMPARE(pixelFontSizeDev(1.5), 22);
+    QCOMPARE(pixelFontSizeDev(2.0), 33);
+    // Whatever the DPI, the cap box fits the cell it is drawn into.
+    for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
+        QVERIFY2(pixelLabelHeightDev(dpr) <= qRound(16.0 * dpr),
+                 qPrintable(QStringLiteral("cap %1 overflows the %2 px cell at dpr %3")
+                            .arg(pixelLabelHeightDev(dpr)).arg(qRound(16.0 * dpr)).arg(dpr)));
     QCOMPARE(pixelLabelFont(1.25).styleStrategy(), QFont::NoAntialias);
 
     // The cell contract: every shipped label fits the cell the ONE rule gives
     // it, at every shipped DPI. Worst case is dpr 1.0, where a device px IS a
     // logical px — which is exactly how pixelLabelCellWidth is derived.
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
-        for (const char* label : {"B", "V2", "H8", "H64", "PTR", "FN*", "WSTR", "1024"}) {
+        for (const char* label : {"B", "H", "I", "U", "P", "*", "W", "1024"}) {
             const QString l = QString::fromLatin1(label);
             const int cellW = qRound(pixelLabelCellWidth(l) * dpr);
             QVERIFY2(pixelLabelWidthDev(l, dpr) <= cellW,
@@ -228,8 +237,8 @@ void TestPixelGlyphs::uniformScaleAcrossLabels() {
     // Departure Mono at 11 device px (22 at 200 %): every label in a panel is
     // the same cap height, which is the property this test exists to pin.
     const int want = pixelLabelHeightDev(dpr);
-    QCOMPARE(pixelFontSizeDev(dpr), dpr == 2.0 ? 22 : 11);
-    for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
+    QCOMPARE(pixelFontSizeDev(dpr), dpr == 1.0 ? 11 : dpr == 2.0 ? 33 : 22);
+    for (const char* label : {"H", "I", "U", "D", "P", "W", "1024", "2048"}) {
         const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);
         // Every label in a panel shares ONE font size, so their ink boxes are
@@ -277,18 +286,22 @@ void TestPixelGlyphs::cellWidthsPerKind() {
     // monospaced, so a cell is a character count times one advance, plus the
     // 6 px the rule adds. Deriving them here keeps the test honest if the
     // design size ever changes.
-    for (const char* label : {"F", "H8", "V2", "H64", "PTR", "FN*", "WSTR", "1024"}) {
+    for (const char* label : {"F", "H", "U", "P", "*", "W", "1024", "2048"}) {
         const QString l = QString::fromLatin1(label);
         QCOMPARE(cell(K::TypeGlyph, label), pixelLabelCellWidth(l));
-        QCOMPARE(pixelLabelCellWidth(l),
-                 qMax(16, pixelLabelWidthDev(l, 1.0) + 6));
+        // The rule takes the WIDEST the label gets in logical terms across
+        // every shipped DPI — the font size follows the DPI now.
+        qreal widest = 0;
+        for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
+            widest = qMax(widest, pixelLabelWidthDev(l, dpr) / dpr);
+        QCOMPARE(pixelLabelCellWidth(l), qMax(16, qCeil(widest) + 6));
     }
     // Monospace: same length, same cell — which is what lets the size-major
     // type matrix line up into columns.
-    QCOMPARE(cell(K::TypeGlyph, "H64"), cell(K::TypeGlyph, "PTR"));
-    QCOMPARE(cell(K::TypeGlyph, "WSTR"), cell(K::TypeGlyph, "1024"));
-    QVERIFY(cell(K::TypeGlyph, "WSTR") > cell(K::TypeGlyph, "H64"));
-    QCOMPARE(cell(K::FillSquares, "000"), cell(K::TypeGlyph, "H64"));
+    QCOMPARE(cell(K::TypeGlyph, "H"), cell(K::TypeGlyph, "P"));
+    QCOMPARE(cell(K::TypeGlyph, "H"), cell(K::TypeGlyph, "U"));
+    QVERIFY(cell(K::TypeGlyph, "1024") > cell(K::TypeGlyph, "H"));
+    QVERIFY(cell(K::FillSquares, "000") > cell(K::TypeGlyph, "H"));
     QCOMPARE(cell(K::Codicon, "symbol-class"), 16);
     QCOMPARE(cell(K::AddBytes, "1024"), 16);
     QCOMPARE(cell(K::InsertBytes, "2048"), 16);
@@ -300,7 +313,12 @@ void TestPixelGlyphs::cellWidthsPerKind() {
              qRound(pixelLabelCellWidth(QStringLiteral("H64")) * dpr));
         QCOMPARE(straight(typeGlyphIcon(QStringLiteral("WSTR"), GlyphFamily::Text, 16, dpr, m_dark)).width(),
              qRound(pixelLabelCellWidth(QStringLiteral("WSTR")) * dpr));
-        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("F"), GlyphFamily::Float, 16, dpr, m_dark)).width(), qRound(16 * dpr));
+        // A single character is no longer guaranteed to sit on the 16 floor:
+        // at 22 px one advance is 13 device, which is 10.4 logical at 125 % —
+        // still under 16 — but the rule adds 6 px of padding on top, so the
+        // cell lands just above it. Assert the rule, not the old constant.
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("F"), GlyphFamily::Float, 16, dpr, m_dark)).width(),
+                 qRound(pixelLabelCellWidth(QStringLiteral("F")) * dpr));
     }
 }
 
@@ -531,7 +549,12 @@ void TestPixelGlyphs::signedDiffersFromUnsigned() {
 void TestPixelGlyphs::compositesFitAndAreCrisp() {
     for (double dpr : {1.0, 1.25, 1.5, 2.0, 2.5}) {
         const int cell = qRound(16 * dpr);
-        const int wideCell = qRound(32 * dpr);
+        // The unlabelled cell is no longer a fixed 32: it is sized from the
+        // count it paints, so "+1K" gets more room than "+4". bytesCellWidth
+        // is the one rule the layout and both painters share.
+        auto wideCellFor = [dpr](int n, bool add) {
+            return qRound(bytesCellWidth(n, add, 16, false) * dpr);
+        };
         const int k = qMax(1, qRound(dpr));
         for (int n : {4, 8, 64, 1024, 2048}) {
             for (int which = 0; which < 2; ++which) {
@@ -541,7 +564,7 @@ void TestPixelGlyphs::compositesFitAndAreCrisp() {
                                                     : insertBytesIcon(n, 16, dpr, m_dark, labelled));
                     const QString tag = QStringLiteral("%1 %2@%3 %4").arg(add ? "add" : "insert")
                         .arg(n).arg(dpr).arg(labelled ? "labelled" : "glyph");
-                    QCOMPARE(img.width(), labelled ? cell : wideCell);
+                    QCOMPARE(img.width(), labelled ? cell : wideCellFor(n, add));
                     QCOMPARE(img.height(), cell);
                     const Bbox b = inkBbox(img);
                     QVERIFY2(b.ink > 0, qPrintable(tag + QStringLiteral(" empty")));

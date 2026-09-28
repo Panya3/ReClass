@@ -109,6 +109,17 @@ inline QString ribbonBytesGlyphLabel(int n, bool withPlus) {
     return withPlus ? QLatin1Char('+') + num : num;
 }
 
+// Width of an unlabelled Add / Insert cell: it paints its own count ("+1K",
+// "↳ 2K") in the pixel font, so it is sized from that text. THE one rule —
+// ribbonIconCellWidth (layout) and both painters call this. They used to each
+// hardcode 2 * logicalSize, which clipped the leading '+' the moment the font
+// grew.
+inline int bytesCellWidth(int n, bool add, int logicalSize, bool labelled) {
+    if (labelled) return logicalSize;
+    return qMax(2 * logicalSize,
+                pixelLabelCellWidth(ribbonBytesGlyphLabel(n, add)) + (add ? 0 : 12));
+}
+
 // Logical width of an icon's 16-tall cell. Pixel labels are MEASURED, not
 // counted: the 5×7 font is variable-width, so `V2` (V is 5 wide) needs more
 // than `H8` even though both are two characters, and `PTR` needs less than
@@ -124,8 +135,8 @@ inline int ribbonIconCellWidth(const RibbonIconSpec& spec, bool labelled = true)
     using K = RibbonIconSpec::Kind;
     if (spec.kind == K::TypeGlyph || spec.kind == K::FillSquares)
         return pixelLabelCellWidth(spec.arg);
-    if (!labelled && (spec.kind == K::AddBytes || spec.kind == K::InsertBytes))
-        return 32;
+    if (spec.kind == K::AddBytes || spec.kind == K::InsertBytes)
+        return bytesCellWidth(spec.arg.toInt(), spec.kind == K::AddBytes, 16, labelled);
     return 16;
 }
 
@@ -252,7 +263,7 @@ inline QPixmap addBytesIcon(int n, int logicalSize, qreal dpr, const Theme& them
     const QColor ink = inkOverride.isValid()
         ? inkOverride
         : ribbonFamilyColour(GlyphFamily::Plain, theme, theme.background, kRibbonPixelInkContrast);
-    const int cellW = labelled ? logicalSize : 2 * logicalSize;
+    const int cellW = bytesCellWidth(n, true, logicalSize, labelled);
     const QString key = detail::ribbonIconKey(QStringLiteral("add"), QString::number(n),
                                               cellW, logicalSize, dpr, ink, theme.background, labelled);
     auto& cache = detail::ribbonIconCache();
@@ -293,7 +304,7 @@ inline QPixmap insertBytesIcon(int n, int logicalSize, qreal dpr, const Theme& t
     const QColor ink = inkOverride.isValid()
         ? inkOverride
         : ribbonFamilyColour(GlyphFamily::Plain, theme, theme.background, kRibbonPixelInkContrast);
-    const int cellW = labelled ? logicalSize : 2 * logicalSize;
+    const int cellW = bytesCellWidth(n, false, logicalSize, labelled);
     const QString key = detail::ribbonIconKey(QStringLiteral("insert"), QString::number(n),
                                               cellW, logicalSize, dpr, ink, theme.background, labelled);
     auto& cache = detail::ribbonIconCache();

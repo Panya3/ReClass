@@ -354,10 +354,11 @@ void TestRibbonLayout::typeLabelsCompactBeforePanelsHide() {
         // beside it said the same thing twice. type.custom is the witness
         // that labels are on at all.
         QVERIFY(!bar.itemLabelShown(QStringLiteral("add.1024")));
-        // The glyph cell is the whole button: 8·len + 6 (a group caption can
-        // widen the group's last column by a px or two — "Hex:" > 30).
+        // The glyph is ONE character now ("H" under a "64:" caption), so the
+        // cell is a single advance plus padding — the caption is usually what
+        // sets the column's width, not the button.
         const int w64 = bar.itemRect(QStringLiteral("type.hex64")).width();
-        QVERIFY2(w64 >= 30 && w64 <= 36, qPrintable(QStringLiteral("H64 width %1").arg(w64)));
+        QVERIFY2(w64 >= 16 && w64 <= 40, qPrintable(QStringLiteral("H64 width %1").arg(w64)));
         bar.resize(1350, bar.preferredHeight());
         QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));
         QVERIFY(bar.itemLabelShown(QStringLiteral("type.custom")));
@@ -792,10 +793,10 @@ void TestRibbonLayout::flatMetrics() {
     // than the H8 (16) column by exactly the cell difference (glyph-only).
     // A group caption can add a px or two to its group's last column.
     bar.setLabelMode(RibbonBar::LabelMode::IconsOnly);
-    QVERIFY(bar.itemRect(QStringLiteral("type.hex64")).width() >= rcx::pixelLabelCellWidth(QStringLiteral("H64")) + 6);
-    QVERIFY(bar.itemRect(QStringLiteral("type.hex8")).width() >= rcx::pixelLabelCellWidth(QStringLiteral("H8")) + 6);
-    QCOMPARE(bar.itemRect(QStringLiteral("type.utf16")).width(),
-             rcx::pixelLabelCellWidth(QStringLiteral("WSTR")) + 6);
+    QVERIFY(bar.itemRect(QStringLiteral("type.hex64")).width() >= rcx::pixelLabelCellWidth(QStringLiteral("H")));
+    QVERIFY(bar.itemRect(QStringLiteral("type.hex8")).width() >= rcx::pixelLabelCellWidth(QStringLiteral("H")));
+    QVERIFY(bar.itemRect(QStringLiteral("type.utf16")).width()
+            >= rcx::pixelLabelCellWidth(QStringLiteral("W")));
     // DELIBERATE CHANGE (was 16 + 6, the icon-only cell): Structure is
     // keepLabel, so even in IconsOnly its three items carry words and the
     // column takes the widest of them.
@@ -1316,10 +1317,12 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
         {"32:",    "type.hex32",  "type.uint32"},
         {"16:",    "type.hex16",  "type.uint16"},
         {"8:",     "type.hex8",   "type.uint8"},
-        {"Float:", "type.double", "type.mat4x4"},
+        {"Flt:",   "type.double", "type.float"},
+        {"Vec:",   "type.vec2",   "type.vec4"},
+        {"Mat:",   "type.mat4x4", "type.mat4x4"},
         {"Ptr:",   "type.pointer", "type.funcptr"},
         {"Str:",   "type.utf8",   "type.utf16"},
-        {"Other:", "type.bool",   "type.custom"},
+        {"Bool:",  "type.bool",   "type.custom"},
     };
     for (const Group& g : groups) {
         const QRect a = bar.itemRect(QLatin1String(g.first));

@@ -102,11 +102,10 @@ inline constexpr int kPixelFontDesign = 11;   // do not render at non-multiples
 // size is chosen in device px and antialiasing is off — the two things a pixel
 // font needs to stay pixel-perfect at fractional DPI (a logical pixelSize at
 // dpr 1.25 would land on 13.75 device px and blur).
-inline int pixelFontSizeDev(qreal dpr) {
-    return kPixelFontDesign * qMax(1, qRound(dpr * 0.75));   // 11 up to 150 %, 22 at 200 %
-}
-
-inline QFont pixelLabelFont(qreal dpr) {
+// The font at an explicit DEVICE size. Antialiasing off and no hinting: both
+// are what a pixel font needs to stay on its grid (the drawing path also hard-
+// thresholds, because these two are only hints an OTF rasteriser may ignore).
+inline QFont pixelLabelFontAt(int sizeDev) {
     static const QString family = []() -> QString {
         const int id = QFontDatabase::addApplicationFont(
             QStringLiteral(":/fonts/DepartureMono.otf"));
@@ -115,11 +114,30 @@ inline QFont pixelLabelFont(qreal dpr) {
         return fams.isEmpty() ? QStringLiteral("Courier New") : fams.first();
     }();
     QFont f(family);
-    f.setPixelSize(pixelFontSizeDev(dpr));
-    f.setStyleStrategy(QFont::NoAntialias);   // pixel font: never smooth it
+    f.setPixelSize(qMax(1, sizeDev));
+    f.setStyleStrategy(QFont::NoAntialias);
     f.setHintingPreference(QFont::PreferNoHinting);
     return f;
 }
+
+// The BIGGEST whole multiple of the 11 px design size whose cap box still fits
+// the icon cell, with a pixel of air top and bottom.
+//
+// DERIVED, not hardcoded, because the ceiling here is geometry rather than
+// taste: the cell is 16 LOGICAL px, so the device budget moves with the DPI.
+// A flat 4x was tried and clipped (44 px wants 32 device px of cap in a 20 px
+// cell), and a flat 2x clipped at 100 %, where that same cell is only 16 device
+// px. This lands on 11 at 100 %, 22 at 125 % and 150 %, 33 at 200 % — as large
+// as the row can actually hold, at every DPI, and always on the pixel grid.
+inline int pixelFontSizeDev(qreal dpr) {
+    static const int capAtDesign =
+        qMax(1, QFontMetrics(pixelLabelFontAt(kPixelFontDesign)).capHeight());
+    const qreal d = dpr > 0 ? dpr : 1.0;
+    const int budget = qMax(1, qRound(16.0 * d) - 2);   // icon cell, less 1 px of air
+    return kPixelFontDesign * qBound(1, budget / capAtDesign, 4);
+}
+
+inline QFont pixelLabelFont(qreal dpr) { return pixelLabelFontAt(pixelFontSizeDev(dpr)); }
 
 // Advance width of `label` in DEVICE px at this dpr.
 inline int pixelLabelWidthDev(QStringView label, qreal dpr) {
@@ -140,8 +158,17 @@ inline int pixelLabelHeightDev(qreal dpr) {
 // terms) is dpr 1.0, where 1 device px IS 1 logical px. So this is exact at
 // 100 % and leaves slack at every higher DPI.
 inline int pixelLabelCellWidth(QStringView label) {
-    return qMax(16, pixelLabelWidthDev(label, 1.0) + 6);
+    // Layout is LOGICAL and must not depend on the DPI, but the font size now
+    // does (pixelFontSizeDev picks the largest that fits the cell at each DPI),
+    // so a single measurement is not enough: 22 px at 125 % is 1.6 logical px
+    // per device px, while 11 px at 100 % is 1.0. Take the widest the label
+    // can be in logical terms across every shipped DPI and size for that.
+    qreal widest = 0;
+    for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
+        widest = qMax(widest, pixelLabelWidthDev(label, dpr) / dpr);
+    return qMax(16, qCeil(widest) + 6);
 }
+
 
 // Scale for the fixed BITMAPS above (the plus, the hook arrow, the rail
 // chevron, the fill squares). Text no longer uses this — it is a real font
@@ -201,8 +228,22 @@ inline void drawPixelLabel(QPainter& p, int xDev, int yDev, QStringView label,
         for (int x = 0; x < w; ++x)
             row[x] = qAlpha(row[x]) >= 128 ? solid : 0u;
     }
-    // Line the cap box up with what the caller asked for.
-    p.drawImage(QPoint(xDev - 1, yDev + 1 - (fm.ascent() - pixelLabelHeightDev(dpr))), mask);
+    // Place the INK, not a metric. Ascent/descent/cap numbers disagree with
+    // where the pixels actually land for a bitmap-styled face, and the caller
+    // has already centred using pixelLabelHeightDev — so find the mask's own
+    // ink box and put its top-left exactly where it asked. Immune to any
+    // per-face metric quirk, and it keeps the 1 px margins the cell needs.
+    int minX = w, minY = h, maxX = -1, maxY = -1;
+    for (int y = 0; y < h; ++y) {
+        const QRgb* row = reinterpret_cast<const QRgb*>(mask.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            if (!qAlpha(row[x])) continue;
+            minX = qMin(minX, x); maxX = qMax(maxX, x);
+            minY = qMin(minY, y); maxY = qMax(maxY, y);
+        }
+    }
+    if (maxX < 0) return;                     // nothing to draw
+    p.drawImage(QPoint(xDev - minX, yDev - minY), mask);
 }
 
 }  // namespace rcx
