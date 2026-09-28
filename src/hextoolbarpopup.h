@@ -5,8 +5,12 @@
 #include "core.h"
 
 class QLineEdit;
+class QPainter;
+class QFontMetrics;
 
 namespace rcx {
+
+struct Theme;
 
 struct HexPopupContext {
     uint64_t nodeId = 0;
@@ -46,6 +50,11 @@ public:
     void popup(const QPoint& globalPos);
     bool isPinned() const { return m_pinned; }
 
+    /// Test hooks: the clickable rects paintEvent built on its last run, in
+    /// popup coordinates, and the one the keyboard ring is on (-1: none).
+    QVector<QRect> hitRectsForTest() const;
+    int focusedHitForTest() const { return m_hoveredBtn; }
+
 signals:
     void sizeSelected(uint64_t nodeId, NodeKind newKind);
     void insertAbove(uint64_t nodeId);
@@ -76,6 +85,11 @@ private:
     QLineEdit* m_offsetEdit = nullptr;
 
     void togglePin();
+    // The rows a pinned popup adds under the info line — suggestions,
+    // insert above / below, join, fill-to-offset — appended to m_hits;
+    // `y` advances past them.
+    void paintPinnedExtras(QPainter& p, const Theme& t, const QFontMetrics& fm,
+                           int& y, int lineH, int pad);
     QSize computeSize() const;
     int maxJoinableBytes() const;
     QString previewForKind(NodeKind target) const;

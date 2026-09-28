@@ -126,9 +126,10 @@ private:
     int    m_anchorTop = -1;
 
     void applyFilter(const QString& text);
-    // Sizes the popup to its rows, capped by the screen; `keepTop` re-fits
-    // in place (the top edge stays, only the bottom moves).
-    void fitToScreen(bool keepTop);
+    // Sizes the popup to its rows, capped by the screen; `inPlace` re-fits
+    // while up, keeping the edge that sits on the bar (the top edge under
+    // it, the bottom edge when flipped above it).
+    void fitToScreen(bool inPlace);
     void acceptCurrent();
     void acceptIndex(int row);
     int  nextSelectableRow(int from, int direction) const;

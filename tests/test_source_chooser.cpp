@@ -19,8 +19,10 @@
 // the list truly cannot fit below the anchor; the section hairlines and the
 // Clear All divider run under the scroll track to the right frame; a
 // disabled Clear All never lights t.hover; setSources() while up re-fits the
-// height in place; a flipped popup ends above the bar, not on its bottom
-// edge.
+// height in place — keeping the bottom edge when the popup is flipped above
+// the bar; a flipped popup ends above the bar, not on its bottom edge; and
+// every seam reaches the frame at every width (the popup paints them under
+// its children, whose 1-logical inset is not device-exact).
 #include <QtTest/QTest>
 #include <QSignalSpy>
 #include <QApplication>
@@ -28,6 +30,7 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QLayout>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListView>
 #include <QAbstractItemModel>
@@ -615,6 +618,112 @@ private slots:
         const QRect lastRow = list->visualRect(list->model()->index(last, 0));
         QCOMPARE(lastRow.bottom() + 1, list->viewport()->height());   // no bare ground under it
         popup.hide();
+    }
+
+    void testSetSourcesWhileFlippedKeepsTheBottomEdge() {
+        // Flipped above the bar, the popup's BOTTOM edge is the one on the
+        // bar. The in-place re-fit after a per-row x delete always kept the
+        // top edge, so a flipped popup shrank upward and left a gap between
+        // its bottom frame and the bar it hung from, the removed rows'
+        // height tall. Now the bottom edge stays. No event pump between
+        // popup() and the probes (the hidden desktop would close the popup;
+        // the re-fit is gated on it being up).
+        const QRect screen = QApplication::primaryScreen()->availableGeometry();
+        SourceChooserPopup popup;
+        popup.applyTheme(loadTheme(QStringLiteral("tw")));
+        popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+        popup.setSources(liveEntries(4));
+        constexpr int kBarH = 28;
+        const QPoint anchor(screen.left() + 40, screen.bottom() - 40);
+        const int barTop = anchor.y() - kBarH;
+        popup.popup(anchor, barTop);
+        QVERIFY(popup.isVisible());
+        QVERIFY2(popup.y() < anchor.y(), "the popup should flip above the anchor");
+        QCOMPARE(popup.y() + popup.height(), barTop);
+        const int tall = popup.height();
+        popup.setSources(liveEntries(1));
+        QVERIFY2(popup.height() < tall, "three rows fewer should shrink the popup");
+        QCOMPARE(popup.height(), popup.layout()->sizeHint().height());
+        QCOMPARE(popup.y() + popup.height(), barTop);
+        popup.hide();
+    }
+
+    void testSeamsReachTheFrameAtEveryWidth() {
+        // At 125 % the layout's 1-logical inset is 1.25 device px, so at the
+        // widths where W * dpr has a .5 or .75 fraction the children ended
+        // one device column short of the right frame — the field's seam,
+        // the section hairlines, the Clear All divider and the footer's
+        // seam all stopped with a notch of ground before it (the default
+        // 432 just happened to snap clean). The popup paints every seam
+        // itself across its whole width now, the frame last. Four
+        // consecutive widths cover every phase; the list scrolls, so the
+        // track is under the probe too.
+        const QRect screen = QApplication::primaryScreen()->availableGeometry();
+        const qreal dpr = 1.25;
+        for (const QString& name : {QStringLiteral("tw"), QStringLiteral("vs")}) {
+            const Theme t = loadTheme(name);
+            QVERIFY(t.background.isValid());
+            const QColor seam = containerBorderColor(t);
+            for (int w = 430; w <= 433; ++w) {
+                SourceChooserPopup popup;
+                popup.applyTheme(t);
+                popup.setFont(QFont(QStringLiteral("Consolas"), 11));
+                popup.setSources(liveEntries(24));
+                open(popup, screen.center());
+                popup.setFixedSize(w, popup.height());
+                QApplication::processEvents();
+                popup.layout()->activate();
+                auto* list = popup.findChild<QListView*>();
+                QVERIFY(list);
+                QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
+                const QString tag = QStringLiteral("%1 w=%2: ").arg(name).arg(w);
+                // The interior of device row `y` is the seam (or `alt`, the
+                // field's focused colour) from frame to frame.
+                auto seamRow = [&](const QImage& img, const Edges& e, int y, const QColor& alt,
+                                   const char* what, QString* why) {
+                    const int inner = e.right - e.left - 1;
+                    const QRect row(e.left + 1, y, inner, 1);
+                    const int n = countColour(img, row, seam);
+                    const int m = alt.isValid() ? countColour(img, row, alt) : 0;
+                    if (n == inner || m == inner) return true;
+                    *why = tag + QStringLiteral("%1: %2 of %3 seam px on device row %4")
+                                     .arg(QLatin1String(what)).arg(qMax(n, m)).arg(inner).arg(y);
+                    return false;
+                };
+                QString why;
+                list->scrollToTop();
+                QApplication::processEvents();
+                QImage img = renderAt(popup, dpr);
+                const Edges e = edgesOf(popup.rect(), dpr);
+                QCOMPARE(e.right, img.width() - 1);
+                QCOMPARE(countColour(img, colAlong(e, e.right), t.border), e.bottom - e.top + 1);
+                // The field's seam (in whichever colour the field is in).
+                auto* field = popup.findChild<QLineEdit*>();
+                QVERIFY(field);
+                const Edges f = edgesOf(QRect(field->mapTo(&popup, QPoint(0, 0)), field->size()), dpr);
+                QVERIFY2(seamRow(img, e, f.bottom, t.borderFocused, "field seam", &why), qPrintable(why));
+                // The Connected header's hairline.
+                const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
+                const Edges h = edgesOf(list->visualRect(list->model()->index(0, 0)).translated(vp), dpr);
+                QVERIFY2(seamRow(img, e, h.bottom, QColor(), "section hairline", &why), qPrintable(why));
+                // The footer's seam.
+                QLabel* footer = nullptr;
+                for (QLabel* l : popup.findChildren<QLabel*>())
+                    if (l->text().contains(QStringLiteral("navigate"))) footer = l;
+                QVERIFY(footer);
+                const Edges fo = edgesOf(QRect(footer->mapTo(&popup, QPoint(0, 0)), footer->size()), dpr);
+                QVERIFY2(seamRow(img, e, fo.top, QColor(), "footer seam", &why), qPrintable(why));
+                // The Clear All divider, at the bottom.
+                list->scrollToBottom();
+                QApplication::processEvents();
+                img = renderAt(popup, dpr);
+                const int last = list->model()->rowCount() - 1;
+                const Edges c = edgesOf(list->visualRect(list->model()->index(last, 0))
+                                            .translated(vp).adjusted(0, 4, 0, 0), dpr);
+                QVERIFY2(seamRow(img, e, c.top, QColor(), "Clear All divider", &why), qPrintable(why));
+                popup.hide();
+            }
+        }
     }
 
     void testFlipsAboveTheBarNotOverIt() {

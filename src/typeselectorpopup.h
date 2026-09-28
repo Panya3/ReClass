@@ -139,6 +139,11 @@ public:
     /// way the bottom "Show all types" row does — so render harnesses can grab
     /// the full (modifier-visible) layout deterministically.
     void setShowAllTypesForTest(bool all);
+    /// Test/harness hook: show or hide the detail pane. Its toolbar toggle
+    /// is commented out, so nothing in the UI reaches the pane today; the
+    /// hook is how its chrome (the seam colours in updateDetailPane's HTML)
+    /// gets rendered and pinned at all.
+    void setShowDetailForTest(bool on);
 
     /// One-time per-process primer: absorbs ~300ms DLL/style/font init cost.
     /// Call early (e.g. from main() or MainWindow constructor) so the first

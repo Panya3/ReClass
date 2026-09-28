@@ -22,6 +22,9 @@
 #include <QJsonObject>
 #include <QPainter>
 #include <QScrollBar>
+#include <QScrollArea>
+#include <QAbstractButton>
+#include <QTextDocument>
 #include <QtMath>
 #include <Qsci/qsciscintilla.h>
 #include "controller.h"
@@ -209,6 +212,56 @@ bool fieldHasOneSeam(const QImage& img, const QRect& fieldRect, const Theme& t, 
         return false;
     }
     return true;
+}
+
+// A catalogue big enough to scroll the chooser's list: every primitive the
+// app knows plus three structs, one with a name longer than the banner
+// (the render harness's list).
+QVector<TypeEntry> fullCatalogue() {
+    QVector<TypeEntry> types;
+    for (const auto& m : kKindMeta) {
+        if (m.kind == NodeKind::Struct || m.kind == NodeKind::Array) continue;
+        TypeEntry e;
+        e.entryKind     = TypeEntry::Primitive;
+        e.primitiveKind = m.kind;
+        e.displayName   = QString::fromLatin1(m.typeName);
+        e.sizeBytes     = m.size;
+        e.alignment     = m.align;
+        types.append(e);
+    }
+    auto composite = [&](const QString& name) {
+        TypeEntry e;
+        e.entryKind    = TypeEntry::Composite;
+        e.structId     = 100 + types.size();
+        e.displayName  = name;
+        e.classKeyword = QStringLiteral("struct");
+        e.kindGroup    = QStringLiteral("Ctr");
+        e.sizeBytes    = 32;
+        types.append(e);
+    };
+    composite(QStringLiteral("PlayerEntity"));
+    composite(QStringLiteral("CameraState"));
+    composite(QStringLiteral("PlayerEntityControllerStateMachineComponent"));
+    return types;
+}
+
+// One interior device row, from the column after the left frame to the
+// column before the right one, is entirely `a` (or entirely `b` when given):
+// a seam that reaches the frame on both sides.
+bool rowIsSeam(const QImage& img, const Edges& e, int y, const QColor& a, const QColor& b, QString* why) {
+    const int inner = e.right - e.left - 1;
+    const QRect row(e.left + 1, y, inner, 1);
+    const int na = countColour(img, row, a);
+    const int nb = b.isValid() ? countColour(img, row, b) : 0;
+    if (na == inner || nb == inner) return true;
+    QString where;
+    for (int x = row.left(); x <= row.right() && where.isEmpty(); ++x) {
+        const QRgb px = img.pixel(x, y);
+        if (!sameColour(px, a) && !(b.isValid() && sameColour(px, b)))
+            where = QStringLiteral(" first break at x=%1 (%2)").arg(x).arg(QColor(px).name());
+    }
+    *why = QStringLiteral("device row %1: %2 seam px of %3%4").arg(y).arg(qMax(na, nb)).arg(inner).arg(where);
+    return false;
 }
 
 }  // namespace
@@ -1517,15 +1570,18 @@ private slots:
         // probe runs under whatever that is: one surface, the device-exact
         // frame (was a 1-logical QPen in borderFocused), the filter's seam,
         // the footer on the same surface (was a backgroundAlt band under a
-        // 1-logical border-top). The rows' left accent stripe is the enum's
-        // own colour by design, so only the right strip is probed.
+        // 1-logical border-top). The rows' accent stripe ends at the house
+        // gutter: at the row's x=0 it was a coloured edge welded to the
+        // left frame down the whole list, so the LEFT strip is probed too,
+        // and the stripe is looked for further in on the current row.
         const Theme& t = ThemeManager::instance().current();
+        const QColor accent(0xc5, 0x86, 0xc0);
         QVector<EnumPickerPopup::Member> members;
         for (int i = 0; i < 12; ++i)
             members.append({QStringLiteral("MEMBER_%1").arg(i), int64_t(i)});
         for (const qreal dpr : { 1.0, 1.25 }) {
             EnumPickerPopup popup;
-            popup.show(QStringLiteral("Kind"), members, 3, QColor(0xc5, 0x86, 0xc0), QPoint(100, 100));
+            popup.show(QStringLiteral("Kind"), members, 3, accent, QPoint(100, 100));
             QTest::qWait(30);
             QApplication::processEvents();
             const QImage img = renderAt(popup, dpr);
@@ -1534,6 +1590,20 @@ private slots:
             // The current value's row is selected (t.selected across the row,
             // to the frame) by design; everything else in the strip is ground.
             QVERIFY2(edgeStripIsGround(img, popup.rect(), t, dpr, 4, false, &why, t.selected), qPrintable(why));
+            QVERIFY2(edgeStripIsGround(img, popup.rect(), t, dpr, 4, true, &why, t.selected), qPrintable(why));
+            {
+                auto* view = popup.findChild<QListView*>();
+                QVERIFY(view);
+                QVERIFY(view->currentIndex().isValid());
+                const QRect cur = view->visualRect(view->currentIndex())
+                                      .translated(view->viewport()->mapTo(&popup, QPoint(0, 0)));
+                const Edges e = edgesOf(popup.rect(), dpr);
+                const Edges c = edgesOf(cur, dpr);
+                // The stripe: full accent on the current row, past the clean
+                // strip and before the gutter's end (kGutter logical px).
+                const QRect stripe(e.left + 5, c.top + 1, qCeil(kGutter * dpr) - 4, c.bottom - c.top - 1);
+                QVERIFY2(countColour(img, stripe, accent) > 0, "the current row's stripe should sit before the gutter");
+            }
             auto* field = popup.findChild<QLineEdit*>();
             QVERIFY(field);
             QVERIFY2(!field->isHidden(), "twelve members should show the filter");
@@ -1582,6 +1652,455 @@ private slots:
                      "theme.background is not the dominant surface");
             popup.hide();
         }
+    }
+
+    void testSeamsReachTheFrameAtEveryWidth() {
+        // At 125 % the layout's 1-logical inset is 1.25 device px, so at the
+        // widths where W * dpr has a .5 or .75 fraction the children ended
+        // one device column short of the right frame, and every seam they
+        // painted — the field's, the section rules, the track's share —
+        // stopped with a notch of ground before it. The popup now paints
+        // every seam itself across its whole width, the frame last. Four
+        // consecutive widths cover every phase; the probe walks each seam
+        // from the column after the left frame to the column before the
+        // right one, under the scroll track included.
+        const qreal dpr = 1.25;
+        for (const QString& name : {QStringLiteral("tw"), QStringLiteral("vs")}) {
+            const Theme t = shippedTheme(name);
+            QVERIFY(t.background.isValid());
+            for (int w = 360; w <= 363; ++w) {
+                TypeSelectorPopup popup;
+                popup.applyTheme(t);
+                popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+                popup.setMode(TypePopupMode::FieldType);
+                popup.setTypes(fullCatalogue(), nullptr);
+                popup.popup(QPoint(100, 100));
+                popup.setFixedSize(w, popup.height());
+                // The list lays its rows out in batches on a timer
+                // (QListView::Batched): a visualRect is invalid until it ran.
+                QTest::qWait(30);
+                QApplication::processEvents();
+                popup.layout()->activate();
+                auto* list = popup.findChild<QListView*>();
+                QVERIFY(list);
+                QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
+                QImage img = renderAt(popup, dpr);
+                const Edges e = edgesOf(popup.rect(), dpr);
+                const QString tag = QStringLiteral("%1 w=%2: ").arg(name).arg(w);
+                QString why;
+                QVERIFY2(frameIsOneDeviceRow(img, popup.rect(), t, dpr, &why), qPrintable(tag + why));
+                // The field's seam, in whichever colour the field is in.
+                auto* field = popup.findChild<QLineEdit*>();
+                QVERIFY(field);
+                const Edges f = edgesOf(QRect(field->mapTo(&popup, QPoint(0, 0)), field->size()), dpr);
+                QVERIFY2(rowIsSeam(img, e, f.bottom, containerBorderColor(t), t.borderFocused, &why),
+                         qPrintable(tag + QStringLiteral("field seam: ") + why));
+                // Every section rule on screen — at the top, then scrolled
+                // to the bottom (the popup's mirror of the rules has to
+                // follow the scroll).
+                const QPoint vp = list->viewport()->mapTo(&popup, QPoint(0, 0));
+                const auto& rows = popup.filteredTypes();
+                auto probeRules = [&](const char* where) {
+                    int probed = 0;
+                    for (int r = 1; r < rows.size(); ++r) {
+                        if (rows[r].entryKind != TypeEntry::Section) continue;
+                        const QRect vr = list->visualRect(list->model()->index(r, 0));
+                        if (!vr.isValid() || vr.top() < 0 || vr.top() >= list->viewport()->height()) continue;
+                        const Edges h = edgesOf(vr.translated(vp), dpr);
+                        if (!rowIsSeam(img, e, h.top, containerBorderColor(t), QColor(), &why)) {
+                            why = tag + QStringLiteral("section rule %1 (%2): ").arg(r).arg(QLatin1String(where)) + why;
+                            return -1;
+                        }
+                        ++probed;
+                    }
+                    return probed;
+                };
+                int probed = probeRules("top");
+                QVERIFY2(probed >= 1, qPrintable(probed < 0 ? why : tag + QStringLiteral("no section rule on screen at the top")));
+                list->scrollToBottom();
+                QTest::qWait(30);
+                QApplication::processEvents();
+                img = renderAt(popup, dpr);
+                probed = probeRules("bottom");
+                QVERIFY2(probed >= 1, qPrintable(probed < 0 ? why : tag + QStringLiteral("no section rule on screen at the bottom")));
+                popup.hide();
+            }
+        }
+    }
+
+    void testSelectedSectionHeaderKeepsItsSeam() {
+        // A selected (or hovered) collapsible header paints t.selected
+        // across its row; the rule above it used to be painted first and
+        // covered, while the scrollbar still carried its share across the
+        // track — a short grey dash at the row's right end. The rule is
+        // painted after the fill now: the header's top device row is the
+        // seam from frame to frame, with no t.selected on it, and the row
+        // below it IS the selection.
+        const Theme t = shippedTheme(QStringLiteral("tw"));
+        QVERIFY(t.background.isValid());
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            TypeSelectorPopup popup;
+            popup.applyTheme(t);
+            popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+            popup.setMode(TypePopupMode::FieldType);
+            popup.setTypes(fullCatalogue(), nullptr);
+            popup.popup(QPoint(100, 100));
+            QTest::qWait(30);
+            QApplication::processEvents();
+            auto* list = popup.findChild<QListView*>();
+            QVERIFY(list);
+            QVERIFY2(list->verticalScrollBar()->maximum() > 0, "the list should scroll");
+            const auto& rows = popup.filteredTypes();
+            int hdr = -1;
+            for (int r = 1; r < rows.size() && hdr < 0; ++r)
+                if (rows[r].entryKind == TypeEntry::Section && rows[r].sectionCollapsible) hdr = r;
+            QVERIFY2(hdr > 0, "a collapsible section header below the first row");
+            list->setCurrentIndex(list->model()->index(hdr, 0));
+            QApplication::processEvents();
+            const QImage img = renderAt(popup, dpr);
+            const Edges e = edgesOf(popup.rect(), dpr);
+            const QRect vr = list->visualRect(list->model()->index(hdr, 0))
+                                 .translated(list->viewport()->mapTo(&popup, QPoint(0, 0)));
+            const Edges h = edgesOf(vr, dpr);
+            QString why;
+            QVERIFY2(rowIsSeam(img, e, h.top, containerBorderColor(t), QColor(), &why), qPrintable(why));
+            const int inner = e.right - e.left - 1;
+            QCOMPARE(countColour(img, QRect(e.left + 1, h.top, inner, 1), t.selected), 0);
+            const QRect below(e.left + 1, h.top + 1, inner, 1);
+            QVERIFY2(countColour(img, below, t.selected) > inner / 2,
+                     "the header's row under the seam should be the selection");
+            popup.hide();
+        }
+    }
+
+    void testCurrentRowStripeEndsAtTheGutter() {
+        // The current row's kind-colour stripe used to start at the row's
+        // x=0 — device columns 1..3, welded to the frame column. It ends at
+        // the house gutter now: the four columns inside the left frame are
+        // ground (or the row's t.selected), and the stripe sits past them.
+        const Theme t = shippedTheme(QStringLiteral("tw"));
+        QVERIFY(t.background.isValid());
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            TypeSelectorPopup popup;
+            popup.applyTheme(t);
+            popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+            popup.setMode(TypePopupMode::FieldType);
+            popup.setTypes(fullCatalogue(), nullptr);
+            popup.popup(QPoint(100, 100));
+            QTest::qWait(30);
+            QApplication::processEvents();
+            auto* list = popup.findChild<QListView*>();
+            QVERIFY(list);
+            const auto& rows = popup.filteredTypes();
+            int item = -1;
+            for (int r = 0; r < rows.size() && item < 0; ++r)
+                if (rows[r].entryKind == TypeEntry::Primitive && rows[r].enabled) item = r;
+            QVERIFY(item >= 0);
+            list->setCurrentIndex(list->model()->index(item, 0));
+            QApplication::processEvents();
+            const QImage img = renderAt(popup, dpr);
+            QString why;
+            QVERIFY2(edgeStripIsGround(img, popup.rect(), t, dpr, 4, true, &why, t.selected), qPrintable(why));
+            const QColor stripeCol = kindGroupColor(rows[item].kindGroup);
+            const QRect vr = list->visualRect(list->model()->index(item, 0))
+                                 .translated(list->viewport()->mapTo(&popup, QPoint(0, 0)));
+            const Edges e = edgesOf(popup.rect(), dpr);
+            const Edges c = edgesOf(vr, dpr);
+            const QRect stripe(e.left + 5, c.top + 1, qCeil(kGutter * dpr) - 4, c.bottom - c.top - 1);
+            QVERIFY2(countColour(img, stripe, stripeCol) > 0, "the current row's stripe should sit before the gutter");
+            popup.hide();
+        }
+    }
+
+    void testBannerElidesInsteadOfClipping() {
+        // The action row's banner yields to the buttons; a QLabel never
+        // elides, so at the default width a long name was cut mid-glyph
+        // ("PlayerEntit"). The banner elides its name now — an ellipsis, a
+        // rich text no wider than the label, the label ending before the
+        // OK button and the button inside the frame — and shows the whole
+        // name again once the popup is wide enough.
+        const Theme t = shippedTheme(QStringLiteral("tw"));
+        QVERIFY(t.background.isValid());
+        TypeSelectorPopup popup;
+        popup.applyTheme(t);
+        popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+        popup.setMode(TypePopupMode::FieldType);
+        popup.setTypes(fullCatalogue(), nullptr);
+        popup.popup(QPoint(100, 100));
+        QTest::qWait(30);
+        QApplication::processEvents();
+        auto* list = popup.findChild<QListView*>();
+        QVERIFY(list);
+        const QString longName = QStringLiteral("PlayerEntityControllerStateMachineComponent");
+        const auto& rows = popup.filteredTypes();
+        int row = -1;
+        for (int r = 0; r < rows.size() && row < 0; ++r)
+            if (rows[r].displayName == longName) row = r;
+        QVERIFY2(row >= 0, "the long struct should be listed");
+        list->setCurrentIndex(list->model()->index(row, 0));
+        QApplication::processEvents();
+        QLabel* banner = nullptr;
+        for (QLabel* l : popup.findChildren<QLabel*>())
+            if (l->accessibleName() == QStringLiteral("Type preview")) banner = l;
+        QVERIFY(banner);
+        QAbstractButton* ok = nullptr;
+        for (QAbstractButton* b : popup.findChildren<QAbstractButton*>())
+            if (b->accessibleName() == QStringLiteral("OK")) ok = b;
+        QVERIFY(ok);
+        auto shown = [&]() {
+            QTextDocument doc;
+            doc.setHtml(banner->text());
+            return doc.toPlainText();
+        };
+        const QString elided = shown();
+        // The buttons leave the banner ~11 glyphs: the size tail goes and
+        // the name keeps at least eight of them before the ellipsis (the
+        // rule was "Pla… → 32B" otherwise, which names nothing).
+        QVERIFY2(elided.startsWith(QStringLiteral("PlayerEn")), qPrintable(elided.toUtf8().toPercentEncoding()));
+        QVERIFY2(elided.contains(QChar(0x2026)), qPrintable(QStringLiteral("not elided: ") + elided.toUtf8().toPercentEncoding()));
+        QVERIFY2(!elided.contains(longName), "the full name cannot fit beside the buttons here");
+        QVERIFY2(!elided.contains(QStringLiteral("32B")), "the size tail should go before the name shrinks that far");
+        QVERIFY2(banner->sizeHint().width() > banner->width(), "the banner should be asking for its full text");
+        QVERIFY(QFontMetrics(banner->font()).horizontalAdvance(elided) <= banner->width());
+        QVERIFY(banner->geometry().right() < ok->geometry().left());
+        QVERIFY(ok->geometry().right() < popup.width() - 1);
+        // Wide enough: the whole name, no ellipsis. The render flushes the
+        // pending resize the hidden test desktop's closed popup would
+        // otherwise hold back from the label (it re-elides on resize).
+        popup.setFixedSize(popup.width() + 400, popup.height());
+        QApplication::processEvents();
+        popup.layout()->activate();
+        renderAt(popup, 1.0);
+        QApplication::processEvents();
+        const QString full = shown();
+        QVERIFY2(full.contains(longName) && !full.contains(QChar(0x2026)) && full.contains(QStringLiteral("32B")),
+                 qPrintable(full.toUtf8().toPercentEncoding()));
+        popup.hide();
+    }
+
+    void testHexToolbarOutlinesAndRingAreDeviceExact() {
+        // Every button outline is the same device-exact frame as the popup's
+        // (four 1-logical strips read a different weight on each edge at
+        // 125 %); the keyboard ring is two device rows of borderFocused on
+        // the focused button's own edges (it was a 2-logical QPen in the
+        // accent, and painted only when pinned); the pin is the tinted
+        // house glyph, not the raw SVG's #C5C5C5 ink; the accent is spent on
+        // the current size button alone.
+        const Theme& t = ThemeManager::instance().current();
+        const QColor bakedInk(0xC5, 0xC5, 0xC5);
+        for (const qreal dpr : { 1.0, 1.25 }) {
+            HexToolbarPopup popup;
+            popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+            HexPopupContext ctx;
+            ctx.currentKind = NodeKind::Hex64;
+            ctx.data = QByteArray(8, 'A');
+            ctx.hasPtr = true;
+            ctx.ptrSymbol = QStringLiteral("g_World");
+            popup.setContext(ctx);
+            popup.popup(QPoint(100, 100));
+            QTest::qWait(30);
+            QApplication::processEvents();
+            QImage img = renderAt(popup, dpr);
+            const QVector<QRect> hits = popup.hitRectsForTest();
+            QVERIFY2(hits.size() >= 6, "five size buttons and the pin");
+            // One device row / column of `c` on each edge of `r`, none just
+            // inside; names the first edge that is not.
+            auto outlineIsOneDeviceRow = [&](const QRect& r, const QColor& c, QString* why) {
+                const Edges b = edgesOf(r, dpr);
+                const int w = b.right - b.left + 1, h = b.bottom - b.top + 1;
+                struct Probe { QRect r; int want; const char* what; };
+                const Probe probes[] = {
+                    { QRect(b.left, b.top, w, 1), w, "top" },
+                    { QRect(b.left, b.bottom, w, 1), w, "bottom" },
+                    { QRect(b.left, b.top, 1, h), h, "left" },
+                    { QRect(b.right, b.top, 1, h), h, "right" },
+                    { QRect(b.left + 1, b.top + 1, w - 2, 1), 0, "row inside the top" },
+                    { QRect(b.left + 1, b.bottom - 1, w - 2, 1), 0, "row inside the bottom" },
+                    { QRect(b.left + 1, b.top + 1, 1, h - 2), 0, "column inside the left" },
+                    { QRect(b.right - 1, b.top + 1, 1, h - 2), 0, "column inside the right" },
+                };
+                for (const Probe& pr : probes) {
+                    const int got = countColour(img, pr.r, c);
+                    if (got == pr.want) continue;
+                    *why = QStringLiteral("%1: %2 of %3 outline px at dpr %4 (button %5,%6 %7x%8)")
+                               .arg(QLatin1String(pr.what)).arg(got).arg(pr.want).arg(dpr)
+                               .arg(r.x()).arg(r.y()).arg(r.width()).arg(r.height());
+                    return false;
+                }
+                return true;
+            };
+            // Sizes 8, 16, 32, [64 = current], 128.
+            for (int i = 0; i < 5; ++i) {
+                QString why;
+                QVERIFY2(outlineIsOneDeviceRow(hits[i], i == 3 ? t.indHoverSpan : t.border, &why), qPrintable(why));
+            }
+            // The accent, in the size row, lives inside the current button.
+            {
+                const Edges b = edgesOf(hits[3], dpr);
+                const QRect sizeRow(0, b.top, img.width(), b.bottom - b.top + 1);
+                const QRect cur(b.left, b.top, b.right - b.left + 1, b.bottom - b.top + 1);
+                QCOMPARE(countColour(img, sizeRow, t.indHoverSpan), countColour(img, cur, t.indHoverSpan));
+            }
+            // The pin: tinted ink, none of the SVG's baked grey. This target
+            // links no resources.qrc (every icon in it is blank), so the
+            // glyph is probed only where the SVG exists — the
+            // typeselector_render harness's `hex` mode links the qrc and
+            // shows it for real.
+            if (QFile::exists(QStringLiteral(":/vsicons/pin.svg"))) {
+                const Edges b = edgesOf(hits[5], dpr);
+                const QRect pin(b.left, b.top, b.right - b.left + 1, b.bottom - b.top + 1);
+                QVERIFY2(countColour(img, pin, t.textDim, 8) > 0, "the pin glyph should be textDim");
+                if (!sameColour(t.textDim.rgb(), bakedInk, 12))
+                    QCOMPARE(countColour(img, pin, bakedInk, 4), 0);
+            }
+            // The keyboard ring on the first size button, unpinned.
+            QKeyEvent right(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+            QApplication::sendEvent(&popup, &right);
+            QApplication::processEvents();
+            QCOMPARE(popup.focusedHitForTest(), 0);
+            img = renderAt(popup, dpr);
+            {
+                const Edges b = edgesOf(hits[0], dpr);
+                const int w = b.right - b.left + 1, h = b.bottom - b.top + 1;
+                QCOMPARE(countColour(img, QRect(b.left, b.top, w, 2), t.borderFocused), 2 * w);
+                QCOMPARE(countColour(img, QRect(b.left, b.bottom - 1, w, 2), t.borderFocused), 2 * w);
+                QCOMPARE(countColour(img, QRect(b.left, b.top, 2, h), t.borderFocused), 2 * h);
+                QCOMPARE(countColour(img, QRect(b.right - 1, b.top, 2, h), t.borderFocused), 2 * h);
+                QCOMPARE(countColour(img, QRect(b.left + 2, b.top + 2, w - 4, 1), t.borderFocused), 0);
+                QCOMPARE(countColour(img, QRect(b.left + 2, b.top + 2, 1, h - 4), t.borderFocused), 0);
+            }
+            popup.hide();
+        }
+    }
+
+    void testHexToolbarPinnedRowsSpendNoAccent() {
+        // Pinned, the popup adds the suggestion row: its labels were the
+        // accent, so a pointer suggestion showed two accent elements at
+        // once beside the current size button. They are plain text now,
+        // their outlines the device-exact frame, and the seam under the
+        // size row reaches both frame columns at a width whose device
+        // width has a .5 fraction (the notch case).
+        const Theme& t = ThemeManager::instance().current();
+        const qreal dpr = 1.25;
+        HexToolbarPopup popup;
+        popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+        HexPopupContext ctx;
+        ctx.currentKind = NodeKind::Hex64;
+        ctx.data = QByteArray(8, 'A');
+        ctx.hasPtr = true;
+        ctx.ptrSymbol = QStringLiteral("g_World");
+        ctx.hasFloat = true;
+        ctx.floatVal = 1.5f;
+        popup.setContext(ctx);
+        popup.popup(QPoint(100, 100));
+        QTest::qWait(30);
+        QApplication::processEvents();
+        QImage img = renderAt(popup, dpr);
+        QVector<QRect> hits = popup.hitRectsForTest();
+        QVERIFY(hits.size() >= 6);
+        // Pin it through its own hit rect (togglePin is private).
+        QMouseEvent press(QEvent::MouseButtonPress, QPointF(hits[5].center()),
+                          popup.mapToGlobal(hits[5].center()),
+                          Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&popup, &press);
+        QApplication::processEvents();
+        QVERIFY(popup.isPinned());
+        img = renderAt(popup, dpr);
+        hits = popup.hitRectsForTest();
+        QVERIFY2(hits.size() >= 8, "two suggestion buttons should follow the pin");
+        const Edges e = edgesOf(popup.rect(), dpr);
+        QString why;
+        QVERIFY2(frameIsOneDeviceRow(img, popup.rect(), t, dpr, &why), qPrintable(why));
+        for (int i = 6; i < 8; ++i) {
+            const Edges b = edgesOf(hits[i], dpr);
+            const int w = b.right - b.left + 1, h = b.bottom - b.top + 1;
+            const QRect r(b.left, b.top, w, h);
+            QCOMPARE(countColour(img, r, t.indHoverSpan), 0);
+            QCOMPARE(countColour(img, QRect(b.left, b.top, w, 1), t.border), w);
+            QCOMPARE(countColour(img, QRect(b.left, b.bottom, w, 1), t.border), w);
+            QCOMPARE(countColour(img, QRect(b.left + 1, b.top + 1, w - 2, 1), t.border), 0);
+            QVERIFY2(countColour(img, r, t.text) > 0, "a suggestion label should be plain text");
+        }
+        // The seam under the size row: the device row after the size
+        // buttons' bottom edge plus the 2-px gap, frame to frame.
+        {
+            const int y = hits[0].bottom() + 1 + 2;
+            const Edges s = edgesOf(QRect(0, y, popup.width(), 1), dpr);
+            QVERIFY2(rowIsSeam(img, e, s.top, containerBorderColor(t), QColor(), &why), qPrintable(why));
+        }
+        popup.hide();
+    }
+
+    void testDetailPaneDividersAreTheSeamColour() {
+        // The detail pane's dividers are the family's interior seam colour
+        // (containerBorderColor), never the frame's theme.border. They are
+        // 1-px CSS rules on <div>s, which Qt's rich-text engine does not
+        // draw at all (borders render on table cells only), so in pixels
+        // the probe can only be negative: no frame-coloured rule across
+        // the pane. The pane has no toggle in the UI today (commented out),
+        // so the test hook shows it.
+        //
+        // The AMBIENT theme, not a file one: that HTML is built by
+        // updateDetailPane(), which reads ThemeManager::current() instead of
+        // the theme applyTheme handed the popup (the hook above is its only
+        // caller). In the app the two can never disagree — the ctor seeds
+        // m_theme from the manager and themeChanged keeps it in step — but a
+        // file theme applied by hand does: the divider rule would then be
+        // checked against whatever theme happens to be loaded (VS2022 Dark
+        // on this box) and fail wherever the saved theme is not tw. The
+        // sibling chrome tests that DO apply a file theme are pixel checks
+        // on the widget, which paints the theme it was handed.
+        const Theme t = ThemeManager::instance().current();
+        QVERIFY(t.background.isValid());
+        TypeSelectorPopup popup;
+        popup.applyTheme(t);
+        popup.setFont(QFont(QStringLiteral("Consolas"), 10));
+        popup.setMode(TypePopupMode::FieldType);
+        popup.setTypes(fullCatalogue(), nullptr);
+        popup.popup(QPoint(100, 100));
+        QTest::qWait(30);
+        QApplication::processEvents();
+        auto* list = popup.findChild<QListView*>();
+        QVERIFY(list);
+        const auto& rows = popup.filteredTypes();
+        int item = -1;
+        for (int r = 0; r < rows.size() && item < 0; ++r)
+            if (rows[r].entryKind == TypeEntry::Primitive && rows[r].enabled) item = r;
+        QVERIFY(item >= 0);
+        list->setCurrentIndex(list->model()->index(item, 0));
+        popup.setShowDetailForTest(true);
+        QApplication::processEvents();
+        popup.layout()->activate();
+        QApplication::processEvents();
+        QLabel* content = nullptr;
+        for (QLabel* l : popup.findChildren<QLabel*>())
+            if (l->text().contains(QStringLiteral("border-bottom"))) content = l;
+        QVERIFY2(content, "the detail pane's HTML should be up");
+        const QString html = content->text();
+        const QString seamRule = QStringLiteral("1px solid %1").arg(containerBorderColor(t).name());
+        const QString frameRule = QStringLiteral("solid %1'").arg(t.border.name());
+        QVERIFY2(html.contains(QStringLiteral("border-bottom:") + seamRule), "dividers in the seam colour");
+        QVERIFY2(!html.contains(QStringLiteral("border-bottom:1px ") + frameRule)
+                 && !html.contains(QStringLiteral("border-top:1px ") + frameRule),
+                 "no divider in the frame colour");
+        // In pixels: inside the pane no row is a full-width rule in the
+        // frame colour (the pane is up: its content is mostly the surface).
+        auto* pane = popup.findChild<QScrollArea*>();
+        QVERIFY(pane);
+        QVERIFY(!pane->isHidden());
+        const qreal dpr = 1.25;
+        const QImage img = renderAt(popup, dpr);
+        const Edges p = edgesOf(QRect(pane->mapTo(&popup, QPoint(0, 0)), pane->size()), dpr);
+        const int w = p.right - p.left + 1;
+        const QRect all(p.left, p.top, w, p.bottom - p.top + 1);
+        QVERIFY2(countColour(img, all, t.background) > all.width() * all.height() / 3,
+                 "the pane should be on the popup surface");
+        for (int y = p.top; y <= p.bottom; ++y) {
+            const QRect row(p.left, y, w, 1);
+            QVERIFY2(countColour(img, row, t.border) < w * 9 / 10,
+                     qPrintable(QStringLiteral("a frame-coloured rule across the pane at device row %1").arg(y)));
+        }
+        popup.hide();
     }
 
     void testPopupUpdatesOnThemeChange() {

@@ -13,6 +13,7 @@
 #include <QPainter>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QResizeEvent>
 #include <QIcon>
 #include <QApplication>
 #include <QScreen>
@@ -133,6 +134,100 @@ QString kindGroupFor(NodeKind k) {
 
 // ── Custom delegate: group-colored rows + size bar + fuzzy highlight ──
 
+// ── The action row's banner ──
+// "PlayerEntity* → 8B (+4)": the name in `text`, the size and the delta in
+// textFaint, rich text in a QLabel. A QLabel never elides, so once the
+// banner had to yield to the buttons (its minimum is 1 px; before that the
+// OK button was pushed out through the frame) the name was cut mid-glyph:
+// "PlayerEntit". This keeps the segments and re-sets the label's text to
+// what fits on every resize — the name elided against what the tail
+// leaves, the tail's segments dropped from the end (the delta, then the
+// size) while they would leave the name fewer than eight glyphs — while
+// sizeHint stays the FULL text, so the layout gives the banner every px
+// it can spare and un-elides it when the popup widens. The size the tail
+// carried is still in the footer crumb.
+class BannerLabel : public QLabel {
+public:
+    struct Segment { QString text; QColor color; };
+    using QLabel::QLabel;
+
+    void setSegments(QVector<Segment> segs) {
+        m_segs = std::move(segs);
+        relayout();
+        updateGeometry();
+    }
+
+    QSize sizeHint() const override {
+        QSize s = QLabel::sizeHint();
+        if (m_segs.isEmpty()) return s;
+        const QFontMetrics fm(font());
+        int w = 0;
+        for (const Segment& seg : m_segs) w += fm.horizontalAdvance(seg.text);
+        const QMargins m = contentsMargins();
+        s.setWidth(w + m.left() + m.right());
+        return s;
+    }
+    // The banner yields before the buttons do.
+    QSize minimumSizeHint() const override { return QSize(1, sizeHint().height()); }
+
+protected:
+    void resizeEvent(QResizeEvent* e) override {
+        QLabel::resizeEvent(e);
+        relayout();
+    }
+    void changeEvent(QEvent* e) override {
+        QLabel::changeEvent(e);
+        if (e->type() == QEvent::FontChange) {
+            relayout();
+            updateGeometry();
+        }
+    }
+
+private:
+    static QString span(const QString& text, const QColor& c) {
+        return QStringLiteral("<span style='color:%1'>%2</span>")
+            .arg(c.name(), text.toHtmlEscaped());
+    }
+    void relayout() {
+        if (m_segs.isEmpty()) {
+            if (!text().isEmpty()) clear();
+            return;
+        }
+        const QFontMetrics fm(font());
+        const int avail = contentsRect().width();
+        int keep = m_segs.size();   // segments shown, the name always
+        int tailW = 0;
+        for (int i = 1; i < keep; ++i) tailW += fm.horizontalAdvance(m_segs[i].text);
+        const int headW = fm.horizontalAdvance(m_segs[0].text);
+        const bool fits = headW + tailW <= avail;
+        // The tail is context; the name is the point. A tail segment stays
+        // only while it leaves the name at least eight glyphs: at the
+        // default width the buttons leave the banner ~11 glyphs, and
+        // "Pla… → 32B" names nothing.
+        const int minHead = fm.horizontalAdvance(QStringLiteral("MMMMMMMM"));
+        while (!fits && keep > 1 && avail - tailW < minHead) {
+            --keep;
+            tailW -= fm.horizontalAdvance(m_segs[keep].text);
+        }
+        int headAvail = avail - tailW;
+        for (int pass = 0; pass < 3; ++pass) {
+            const QString head = fits ? m_segs[0].text
+                                      : fm.elidedText(m_segs[0].text, Qt::ElideRight, headAvail);
+            QString html = span(head, m_segs[0].color);
+            for (int i = 1; i < keep; ++i) html += span(m_segs[i].text, m_segs[i].color);
+            if (html != text()) QLabel::setText(html);
+            // The rich-text document measures itself with its own margins;
+            // when it still overshoots the label, take the overshoot off
+            // the name and go again.
+            const int over = QLabel::sizeHint().width() - width();
+            if (fits || over <= 0) break;
+            headAvail -= over;
+        }
+    }
+
+    QVector<Segment> m_segs;
+};
+
 class TypeSelectorDelegate : public QStyledItemDelegate {
 public:
     explicit TypeSelectorDelegate(TypeSelectorPopup* popup, QObject* parent = nullptr)
@@ -238,7 +333,11 @@ public:
         // ── Background ──
         if (isSel) {
             painter->fillRect(r, t.selected);
-            painter->fillRect(r.x(), y, m_accent, h, groupCol);
+            // The row's kind-colour stripe ends at the house gutter: at
+            // r.x() it sat on the device columns right against the frame
+            // column, a coloured shoulder on the popup's border — the "bar
+            // on the border" the family rule took out of the source chooser.
+            painter->fillRect(r.x() + qMax(1, kGutter - m_accent), y, m_accent, h, groupCol);
         } else if (isHov && !isSection && !isDisabled) {
             painter->fillRect(r, t.hover);
         }
@@ -249,12 +348,6 @@ public:
         // hierarchy instead of looking smaller than the items beneath them.
         if (isSection) {
             const bool collap = entry && entry->sectionCollapsible;
-            // Separator rule above every header except the very first row, so
-            // sections are clearly divided: one device row of the seam colour
-            // (the family's interior seam) across the viewport, continued
-            // across the scroll track by the popup's SeamScrollBar.
-            if (row > 0)
-                fillTopDeviceRowOfRect(*painter, QRectF(r), containerBorderColor(t));
             // Collapsible headers are interactive — selection / hover feedback.
             if (collap) {
                 if (option.state & QStyle::State_Selected)
@@ -262,6 +355,15 @@ public:
                 else if (option.state & QStyle::State_MouseOver)
                     painter->fillRect(r, t.hover);
             }
+            // Separator rule above every header except the very first row, so
+            // sections are clearly divided: one device row of the seam colour
+            // (the family's interior seam) across the viewport, continued
+            // across the scroll track by the popup's SeamScrollBar. Painted
+            // AFTER the header's fill: painted first, a selected or hovered
+            // header covered its share, and the track's share stood alone
+            // as a short grey dash at the row's right end.
+            if (row > 0)
+                fillTopDeviceRowOfRect(*painter, QRectF(r), containerBorderColor(t));
             QFont hf = m_font;
             hf.setBold(true);
             painter->setFont(hf);
@@ -816,6 +918,10 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
             return out;
         };
         m_listView->setVerticalScrollBar(seamBar);
+        // The popup paints the same seams under its children (paintEvent),
+        // so it repaints whenever they move with the scroll.
+        connect(seamBar, &QScrollBar::valueChanged, this, [this] { update(); });
+        connect(seamBar, &QScrollBar::rangeChanged, this, [this] { update(); });
 
         auto* delegate = new TypeSelectorDelegate(this, m_listView);
         m_listView->setItemDelegate(delegate);
@@ -984,15 +1090,16 @@ TypeSelectorPopup::TypeSelectorPopup(QWidget* parent)
         row->setContentsMargins(kGutter, 2, kGutter, 6);
         row->setSpacing(6);
 
-        m_titleLabel = new QLabel;
+        // A BannerLabel: it elides its name segment to the width the buttons
+        // leave it instead of clipping the text mid-glyph (a QLabel's
+        // minimum is its full text, and at a narrow popup that pushed the
+        // OK button out through the right frame).
+        m_titleLabel = new BannerLabel;
         m_titleLabel->setPalette(pal);
         m_titleLabel->setAlignment(Qt::AlignVCenter);
         m_titleLabel->setTextFormat(Qt::RichText);
         m_titleLabel->setContentsMargins(0, 0, 0, 0);
-        // The banner yields before the buttons do: a QLabel's minimum is its
-        // full text, and at a narrow popup that pushed the OK button out
-        // through the right frame (its outline painted ON the border).
-        m_titleLabel->setMinimumWidth(1);
+        m_titleLabel->setAccessibleName(QStringLiteral("Type preview"));
         row->addWidget(m_titleLabel);
 
         row->addStretch();
@@ -1134,7 +1241,7 @@ void TypeSelectorPopup::popupLoading(const QPoint& globalPos) {
     m_model->setStringList(dummy);
 
     // Reset UI to empty state
-    m_titleLabel->clear();
+    static_cast<BannerLabel*>(m_titleLabel)->setSegments({});
     if (m_statusLabel) m_statusLabel->clear();
 
     // Default popup size — scales with the current font so high zoom
@@ -1460,6 +1567,12 @@ void TypeSelectorPopup::setTypes(const QVector<TypeEntry>& types, const TypeEntr
     }
 }
 
+void TypeSelectorPopup::setShowDetailForTest(bool on) {
+    m_showDetail = on;
+    if (m_detailPane) m_detailPane->setVisible(on);
+    if (on) updateDetailPane();
+}
+
 void TypeSelectorPopup::setShowAllTypesForTest(bool all) {
     m_showAllTypes = all;
     updateModeChrome();
@@ -1520,10 +1633,10 @@ void TypeSelectorPopup::updateModifierPreview() {
     QModelIndex idx = m_listView->currentIndex();
     int row = idx.isValid() ? idx.row() : -1;
 
+    auto* banner = static_cast<BannerLabel*>(m_titleLabel);
     if (row < 0 || row >= m_filteredTypes.size()
         || m_filteredTypes[row].entryKind == TypeEntry::Section) {
-        m_titleLabel->setText(QStringLiteral("<span style='color:%1'>Select a type</span>")
-            .arg(t.textDim.name()));
+        banner->setSegments({{QStringLiteral("Select a type"), t.textDim}});
         if (m_footerLabel) m_footerLabel->setText(QStringLiteral(
             "<span style='color:%1'>\u2191\u2193 navigate \u00B7 Enter select \u00B7 Esc dismiss \u00B7 Ctrl+F filter</span>")
             .arg(t.textFaint.name()));
@@ -1534,8 +1647,7 @@ void TypeSelectorPopup::updateModifierPreview() {
 
     // Disabled entry
     if (!entry.enabled) {
-        m_titleLabel->setText(QStringLiteral("<span style='color:%1'>Not selectable</span>")
-            .arg(t.textDim.name()));
+        banner->setSegments({{QStringLiteral("Not selectable"), t.textDim}});
         if (m_footerLabel) m_footerLabel->clear();
         return;
     }
@@ -1571,23 +1683,22 @@ void TypeSelectorPopup::updateModifierPreview() {
         if (ok && count > 0) newSize *= count;
     }
 
-    // Format: "type+modifier → size (+diff)"
-    QString label = QStringLiteral("<span style='color:%1'>%2%3</span>")
-        .arg(t.text.name(), entry.displayName.toHtmlEscaped(), suffix);
+    // Format: "type+modifier → size (+diff)" — the name is the segment
+    // that elides when the banner has to yield to the buttons.
+    QVector<BannerLabel::Segment> segs;
+    segs.append({entry.displayName + suffix, t.text});
 
     if (newSize > 0) {
-        label += QStringLiteral("<span style='color:%1'> \u2192 %2B</span>")
-            .arg(t.textFaint.name()).arg(newSize);
+        segs.append({QStringLiteral(" \u2192 %1B").arg(newSize), t.textFaint});
 
         if (m_currentNodeSize > 0 && newSize != m_currentNodeSize) {
             int diff = newSize - m_currentNodeSize;
             QString sign = diff > 0 ? QStringLiteral("+") : QString();
-            label += QStringLiteral("<span style='color:%1'> (%2%3)</span>")
-                .arg(t.textFaint.name(), sign, QString::number(diff));
+            segs.append({QStringLiteral(" (%1%2)").arg(sign, QString::number(diff)), t.textFaint});
         }
     }
 
-    m_titleLabel->setText(label);
+    banner->setSegments(segs);
 }
 
 void TypeSelectorPopup::updateDetailPane() {
@@ -1614,6 +1725,17 @@ void TypeSelectorPopup::updateDetailPane() {
     const int ptS = qMax(7, pt - 2);   // small text
     const int ptXS = qMax(7, pt - 3);  // section labels
 
+    // The pane's dividers are the family's interior seam colour
+    // (containerBorderColor), like every other seam inside the popup; only
+    // the frame is full theme.border. They are `1px` CSS rules on <div>s,
+    // and Qt's rich-text engine draws a border on table cells only, never
+    // on a <div> — so today none of them is visible at all (a QTextDocument
+    // has no device-pixel unit either, so they could not be device-exact
+    // if they were). They carry the seam colour so that whatever renders
+    // them one day draws the family's seam and not the frame colour; the
+    // pane itself has no toggle in the UI (m_detailBtn is commented out).
+    const QString seam = containerBorderColor(t).name();
+
     QString html;
 
     // ── Section label helper ──
@@ -1622,7 +1744,7 @@ void TypeSelectorPopup::updateDetailPane() {
             "<div style='font-size:%1pt;color:%2;text-transform:uppercase;"
             "padding:0 0 2px 0;margin:0 0 4px 0;"
             "border-bottom:1px solid %3'>%4</div>")
-            .arg(ptXS).arg(t.textFaint.name(), t.border.name(), label);
+            .arg(ptXS).arg(t.textFaint.name(), seam, label);
     };
     // Key-value row (table)
     auto kv = [&](const QString& k, const QString& v, const QColor& vc) {
@@ -1637,12 +1759,12 @@ void TypeSelectorPopup::updateDetailPane() {
         "<div style='padding:7px 8px 5px 8px;border-bottom:1px solid %1'>"
         "<div style='font-size:%2pt;font-weight:bold;color:%3'>%4</div>"
         "<div style='font-size:%5pt;color:%6'>%7</div></div>")
-        .arg(t.border.name())
+        .arg(seam)
         .arg(pt).arg(t.text.name(), entry.displayName.toHtmlEscaped())
         .arg(ptXS).arg(t.textMuted.name(), entry.kindGroup);
 
     // ── Layout ──
-    html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(t.border.name());
+    html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(seam);
     html += secLabel(QStringLiteral("layout"));
     html += QStringLiteral("<table style='width:100%;border-collapse:collapse'>");
     html += kv(QStringLiteral("size"),
@@ -1656,7 +1778,7 @@ void TypeSelectorPopup::updateDetailPane() {
 
     // ── Memory grid (types <= 16 bytes) ──
     if (entry.sizeBytes > 0 && entry.sizeBytes <= 16) {
-        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(t.border.name());
+        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(seam);
         html += secLabel(QStringLiteral("memory"));
         html += QStringLiteral("<table style='border-collapse:collapse'><tr>");
         QColor cellBg = kindGroupDimColor(entry.kindGroup);
@@ -1674,7 +1796,7 @@ void TypeSelectorPopup::updateDetailPane() {
 
     // ── Properties ──
     {
-        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(t.border.name());
+        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(seam);
         html += secLabel(QStringLiteral("properties"));
         html += QStringLiteral("<table style='width:100%;border-collapse:collapse'>");
         if (entry.entryKind == TypeEntry::Composite) {
@@ -1694,7 +1816,7 @@ void TypeSelectorPopup::updateDetailPane() {
 
     // ── C declaration ──
     {
-        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(t.border.name());
+        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(seam);
         html += secLabel(QStringLiteral("C declaration"));
         html += QStringLiteral("<div style='font-size:%1pt;padding:4px 6px;background:%2;"
             "border:1px solid %3;line-height:1.6'>")
@@ -1741,7 +1863,7 @@ void TypeSelectorPopup::updateDetailPane() {
 
     // ── Fields (composites only) ──
     if (entry.entryKind == TypeEntry::Composite && !entry.fieldSummary.isEmpty()) {
-        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(t.border.name());
+        html += QStringLiteral("<div style='padding:5px 8px;border-bottom:1px solid %1'>").arg(seam);
         html += secLabel(QStringLiteral("fields (%1)").arg(entry.fieldCount));
         for (const auto& f : entry.fieldSummary)
             html += QStringLiteral("<div style='font-size:%1pt;color:%2;padding:1px 0'>%3</div>")
@@ -1754,7 +1876,7 @@ void TypeSelectorPopup::updateDetailPane() {
 
     // ── Actions ──
     {
-        html += QStringLiteral("<div style='padding:5px 8px;border-top:1px solid %1'>").arg(t.border.name());
+        html += QStringLiteral("<div style='padding:5px 8px;border-top:1px solid %1'>").arg(seam);
         html += QStringLiteral(
             "<div style='padding:3px 6px;margin-bottom:3px;background:%1;"
             "border:1px solid %2;font-size:%3pt'>"
@@ -2170,6 +2292,7 @@ void TypeSelectorPopup::applyFilter(const QString& text) {
     }
 
     m_model->setStringList(displayStrings);
+    update();   // the section seams the popup mirrors (paintEvent) moved
 
     for (auto it = m_groupChips.begin(); it != m_groupChips.end(); ++it) {
         int visible = groupCounts.value(it.key(), 0);
@@ -2433,13 +2556,32 @@ void TypeSelectorPopup::paintEvent(QPaintEvent*) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
     p.fillRect(rect(), t.background);
-    // The field's seam across the whole interior: the field paints its own
-    // row over its rect, and this carries it under the close glyph beside
-    // it in the same (focus-aware) colour.
+    // Every interior seam, across the WHOLE width and before the frame, so
+    // the frame's own column is what ends it. The children paint the same
+    // device row over their share (the field its own seam, the delegate the
+    // section rules, the scrollbar their continuation); what they cannot
+    // reach is the point: the layout's 1-logical inset is 1.25 device px
+    // at 125 %, so at half the widths the children end one device column
+    // short of the frame, and at 150 % and above they always do. A seam the
+    // children alone painted stopped with a notch of ground before the
+    // frame (the field seam here used to start at x=1 for the same reason).
     if (m_filterEdit && !m_filterEdit->isHidden()) {
         const QRect f = m_filterEdit->geometry();
-        fillBottomDeviceRowOfRect(p, QRectF(1, f.top(), width() - 2, f.height()),
+        fillBottomDeviceRowOfRect(p, QRectF(0, f.top(), width(), f.height()),
                                   static_cast<PopupFilterField*>(m_filterEdit)->seamColor());
+    }
+    if (m_listView && !m_listView->isHidden()) {
+        auto* bar = static_cast<SeamScrollBar*>(m_listView->verticalScrollBar());
+        if (bar->seams) {
+            // Viewport-relative rects; the viewport's offset is whole
+            // logical px, so the device row picked here is the delegate's.
+            const int vy = m_listView->viewport()->mapTo(this, QPoint(0, 0)).y();
+            for (const SeamScrollBar::Seam& s : bar->seams()) {
+                const QRectF across(0, s.rect.top() + vy, width(), s.rect.height());
+                if (s.bottomEdge) fillBottomDeviceRowOfRect(p, across, s.color);
+                else              fillTopDeviceRowOfRect(p, across, s.color);
+            }
+        }
     }
     fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
 }

@@ -94,18 +94,40 @@ inline void fillTopDeviceRowsOfRect(QPainter& p, const QRectF& r, int n, const Q
     p.fillRect(dt.inverted().mapRect(devRows), c);
 }
 
+// The column mirrors, for a ring of `n` device px (a focus ring): the
+// first column is the one the 1-column helper picks, so an n-column edge
+// sits on (and replaces) a 1-column one painted from the same rect.
+inline void fillLeftDeviceColsOfRect(QPainter& p, const QRectF& r, int n, const QColor& c) {
+    if (n <= 0) return;
+    const QTransform dt = p.deviceTransform();
+    const QRectF dev = dt.mapRect(r);
+    const qreal first = qFloor(dev.left() + 0.5);
+    const QRectF devCols(first, dev.top(), qreal(n), dev.height());
+    p.fillRect(dt.inverted().mapRect(devCols), c);
+}
+
+inline void fillRightDeviceColsOfRect(QPainter& p, const QRectF& r, int n, const QColor& c) {
+    if (n <= 0) return;
+    const QTransform dt = p.deviceTransform();
+    const QRectF dev = dt.mapRect(r);
+    const qreal last = qFloor(dev.right() - 0.5);
+    const QRectF devCols(last - (n - 1), dev.top(), qreal(n), dev.height());
+    p.fillRect(dt.inverted().mapRect(devCols), c);
+}
+
 // ── The popup frame ──
-// ONE device-exact row / column of `c` on each edge of `r`, in one call:
-// the popup family rule (the comment above SourceChooserPopup::paintEvent,
+// ONE device-exact row / column of `c` on each edge of `r` (`n` of them for
+// a ring, the hex toolbar's keyboard focus ring), in one call: the popup
+// family rule (the comment above SourceChooserPopup::paintEvent,
 // src/sourcechooserpopup.cpp) asks every popup for exactly this frame, and
 // four sites had each grown their own — a 1-logical QPen, a QFrame::Box,
 // four 1-logical fillRect strips — which snapped to one or two device rows
 // depending on where the window landed.
-inline void fillDeviceFrameOfRect(QPainter& p, const QRectF& r, const QColor& c) {
-    fillTopDeviceRowOfRect(p, r, c);
-    fillBottomDeviceRowOfRect(p, r, c);
-    fillLeftDeviceColOfRect(p, r, c);
-    fillRightDeviceColOfRect(p, r, c);
+inline void fillDeviceFrameOfRect(QPainter& p, const QRectF& r, const QColor& c, int n = 1) {
+    fillTopDeviceRowsOfRect(p, r, n, c);
+    fillBottomDeviceRowsOfRect(p, r, n, c);
+    fillLeftDeviceColsOfRect(p, r, n, c);
+    fillRightDeviceColsOfRect(p, r, n, c);
 }
 
 // An opaque blend of two theme tokens (k = 0 -> a, 1 -> b): the same colour

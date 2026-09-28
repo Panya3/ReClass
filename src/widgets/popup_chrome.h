@@ -43,10 +43,12 @@ inline QString popupFieldQss(const Theme& t, const QColor& ground, int leadPad =
 // The field itself: the rule above plus ONE device-exact hairline
 // underneath — containerBorderColor at rest, borderFocused while it has
 // focus — never a second surface, never a QSS box. The seam is painted
-// here and not by the popup because the field's QSS ground covers its
-// whole rect: a row the parent painted first would be gone. A popup that
-// seats something beside the field (the type chooser's close glyph) paints
-// the same row across the rest of its width in seamColor().
+// here because the field's QSS ground covers its whole rect: a row the
+// parent painted first would be gone under it — and ALSO by the popup,
+// across its whole width in seamColor() before its frame (the family
+// rule), because the field's own fill ends one device column short of
+// the frame at half the widths at 125 % (a 1-logical inset is 1.25 device
+// px); the popup's row is what reaches the frame.
 class PopupFilterField : public QLineEdit {
 public:
     using QLineEdit::QLineEdit;

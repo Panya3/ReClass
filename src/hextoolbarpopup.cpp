@@ -2,6 +2,7 @@
 #include "themes/thememanager.h"
 #include "fontutil.h"
 #include "paintutil.h"
+#include "svgicon.h"
 #include "widgets/popup_chrome.h"
 #include <QPainter>
 #include <QMouseEvent>
@@ -221,10 +222,13 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
 
     // The popup family rule (the comment above SourceChooserPopup::paintEvent,
     // src/sourcechooserpopup.cpp): ONE surface — theme.background, not the
-    // tooltip's backgroundAlt — inside ONE device-exact theme.border frame.
-    // Four 1-logical strips snapped to one or two device rows at 125 %.
+    // tooltip's backgroundAlt — inside ONE device-exact theme.border frame,
+    // painted LAST (the end of this function) so it ends the seam under the
+    // size row. Every outline in here is the same device-exact fill: the
+    // four 1-logical strips they were snapped to one or two device rows at
+    // 125 % depending on where each button landed, so a button read a
+    // different weight on each edge.
     p.fillRect(rect(), t.background);
-    fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
 
     int x = pad, y = pad;
     m_hits.clear();
@@ -248,11 +252,8 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         QColor bg = isCurrent ? t.selected : (isHovered ? t.hover : t.surface);
         p.fillRect(r, bg);
 
-        QColor bd = isCurrent ? t.indHoverSpan : t.border;
-        p.fillRect(r.x(), r.y(), r.width(), 1, bd);
-        p.fillRect(r.x(), r.bottom(), r.width(), 1, bd);
-        p.fillRect(r.x(), r.y(), 1, r.height(), bd);
-        p.fillRect(r.right(), r.y(), 1, r.height(), bd);
+        // The "current" size is the popup's one accent marker.
+        fillDeviceFrameOfRect(p, QRectF(r), isCurrent ? t.indHoverSpan : t.border);
 
         p.setPen(isCurrent ? t.indHoverSpan : (canDo ? t.text : t.textFaint));
         p.drawText(r, Qt::AlignCenter, label);
@@ -269,16 +270,26 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         bool pinHov = pinR.contains(mp);
         p.fillRect(pinR, pinHov ? t.hover : t.background);
 
-        QIcon pinIcon(m_pinned ? QStringLiteral(":/vsicons/pinned.svg")
-                               : QStringLiteral(":/vsicons/pin.svg"));
-        pinIcon.paint(&p, pinR.adjusted(2, 2, -2, -2));
+        // The house glyph: themedVsIcon at textDim, rasterised at the
+        // device resolution and drawn on a whole device pixel
+        // (drawPixmapSnapped) — QIcon::paint stamped the raw SVG, in its
+        // baked #C5C5C5 ink, through a smoothed logical-size scale.
+        const int px = pinSz - 4;
+        const qreal dpr = devicePixelRatioF();
+        const QPixmap pm = themedVsIcon(m_pinned ? QStringLiteral(":/vsicons/pinned.svg")
+                                                 : QStringLiteral(":/vsicons/pin.svg"),
+                                        t.textDim, px, dpr).pixmap(QSize(px, px), dpr);
+        drawPixmapSnapped(p, QPointF(pinR.left() + (pinR.width() - px) / 2.0,
+                                     pinR.top() + (pinR.height() - px) / 2.0), pm);
         m_hits.append({pinR, HA_Pin, true, NodeKind::Hex8});
     }
 
     y += lineH + 2;
     // The seam under the size row: one device row of containerBorderColor
-    // across the interior width, the family's interior seam.
-    fillTopDeviceRowOfRect(p, QRectF(1, y, width() - 2, 1), containerBorderColor(t));
+    // across the WHOLE width — the frame, painted last, ends it. Started at
+    // x=1 it stopped one device column short of the frame at half the
+    // widths at 125 % (a 1-logical inset is 1.25 device px).
+    fillTopDeviceRowOfRect(p, QRectF(0, y, width(), 1), containerBorderColor(t));
     y += 3;
 
     // ── Preview ──
@@ -312,9 +323,24 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
     p.drawText(pad, y, width() - 2 * pad, lineH, Qt::AlignVCenter | Qt::AlignLeft, infoForKind(previewKind));
     y += lineH;
 
-    // ── Pinned extras ──
-    if (!m_pinned) return;
+    if (m_pinned) paintPinnedExtras(p, t, fm, y, lineH, pad);
 
+    // Keyboard focus ring — m_hoveredBtn is set by arrow/Tab keys (see
+    // keyPressEvent). The main per-button highlight above is mouse-position
+    // driven, so without this overlay keyboard-focused buttons are
+    // invisible. The house focus colour (borderFocused, the field's focused
+    // seam), two device rows on the button's own edges — it was a 2-logical
+    // QPen in the accent, which snapped unevenly and spent the accent a
+    // second time; and it was painted after the pinned rows' early return,
+    // so an unpinned popup never showed it at all.
+    if (m_hoveredBtn >= 0 && m_hoveredBtn < m_hits.size())
+        fillDeviceFrameOfRect(p, QRectF(m_hits[m_hoveredBtn].rect), t.borderFocused, kUnderlineRows);
+
+    fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
+}
+
+void HexToolbarPopup::paintPinnedExtras(QPainter& p, const Theme& t, const QFontMetrics& fm,
+                                        int& y, int lineH, int pad) {
     y += 2;
 
     // Smart suggestions
@@ -327,11 +353,9 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
             QPoint mp = mapFromGlobal(QCursor::pos());
             bool hov = r.contains(mp);
             p.fillRect(r, hov ? t.hover : t.surface);
-            p.fillRect(r.x(), r.y(), r.width(), 1, t.border);
-            p.fillRect(r.x(), r.bottom(), r.width(), 1, t.border);
-            p.fillRect(r.x(), r.y(), 1, r.height(), t.border);
-            p.fillRect(r.right(), r.y(), 1, r.height(), t.border);
-            p.setPen(t.indHoverSpan);
+            fillDeviceFrameOfRect(p, QRectF(r), t.border);
+            // Plain text: the accent is spent on the current size button.
+            p.setPen(t.text);
             p.drawText(r, Qt::AlignCenter, label);
             m_hits.append({r, HA_Suggest, true, kind});
             sx += bw + 2;
@@ -364,10 +388,7 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
             QPoint mp = mapFromGlobal(QCursor::pos());
             bool hov = r.contains(mp);
             p.fillRect(r, hov ? t.hover : t.surface);
-            p.fillRect(r.x(), r.y(), r.width(), 1, t.border);
-            p.fillRect(r.x(), r.bottom(), r.width(), 1, t.border);
-            p.fillRect(r.x(), r.y(), 1, r.height(), t.border);
-            p.fillRect(r.right(), r.y(), 1, r.height(), t.border);
+            fillDeviceFrameOfRect(p, QRectF(r), t.border);
             p.setPen(t.text);
             p.drawText(r, Qt::AlignCenter, label);
             m_hits.append({r, action, true, wordKind});
@@ -397,10 +418,7 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         QPoint mp = mapFromGlobal(QCursor::pos());
         bool hov = r.contains(mp) && valid;
         p.fillRect(r, hov ? t.hover : t.surface);
-        p.fillRect(r.x(), r.y(), r.width(), 1, t.border);
-        p.fillRect(r.x(), r.bottom(), r.width(), 1, t.border);
-        p.fillRect(r.x(), r.y(), 1, r.height(), t.border);
-        p.fillRect(r.right(), r.y(), 1, r.height(), t.border);
+        fillDeviceFrameOfRect(p, QRectF(r), t.border);
         p.setPen(valid ? t.text : t.textFaint);
         p.drawText(r, Qt::AlignCenter, label);
         m_hits.append({r, HA_JoinSel, valid, joinKind});
@@ -426,25 +444,19 @@ void HexToolbarPopup::paintEvent(QPaintEvent*) {
         QPoint mp = mapFromGlobal(QCursor::pos());
         bool hov = goR.contains(mp);
         p.fillRect(goR, hov ? t.hover : t.surface);
-        p.fillRect(goR.x(), goR.y(), goR.width(), 1, t.border);
-        p.fillRect(goR.x(), goR.bottom(), goR.width(), 1, t.border);
-        p.fillRect(goR.x(), goR.y(), 1, goR.height(), t.border);
-        p.fillRect(goR.right(), goR.y(), 1, goR.height(), t.border);
+        fillDeviceFrameOfRect(p, QRectF(goR), t.border);
         p.setPen(t.text);
         p.drawText(goR, Qt::AlignCenter, QStringLiteral("Go"));
         m_hits.append({goR, HA_FillGo, true, NodeKind::Hex8});
+        y += lineH + 4;
     }
+}
 
-    // Keyboard focus ring — m_hoveredBtn is set by arrow/Tab keys (see
-    // keyPressEvent). The main per-button highlight above is mouse-position
-    // driven, so without this overlay keyboard-focused buttons are invisible.
-    if (m_hoveredBtn >= 0 && m_hoveredBtn < m_hits.size()) {
-        const QRect& r = m_hits[m_hoveredBtn].rect;
-        QPen focusPen(t.indHoverSpan, 2);
-        p.setPen(focusPen);
-        p.setBrush(Qt::NoBrush);
-        p.drawRect(r.adjusted(0, 0, -1, -1));
-    }
+QVector<QRect> HexToolbarPopup::hitRectsForTest() const {
+    QVector<QRect> out;
+    out.reserve(m_hits.size());
+    for (const HitRect& h : m_hits) out.append(h.rect);
+    return out;
 }
 
 void HexToolbarPopup::mouseMoveEvent(QMouseEvent* event) {

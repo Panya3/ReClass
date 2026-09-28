@@ -255,6 +255,10 @@ private:
     };
 
     // ── Custom delegate ──
+    // The row's accent stripe ends at kGutter (see paint); the row's
+    // first ink follows it.
+    static constexpr int kStripeW = 2;
+
     class Delegate : public QStyledItemDelegate {
     public:
         Delegate(Model* m, EnumPickerPopup* owner)
@@ -279,17 +283,22 @@ private:
 
             // Left accent stripe — brighter when this row is the current
             // value (a visual "you are here" cue, equivalent to the
-            // checkmark a stock QMenu draws but in our visual idiom).
+            // checkmark a stock QMenu draws but in our visual idiom). It
+            // ends at the house gutter: at r.x() it sat on the device
+            // columns right against the frame, a coloured edge welded to
+            // the popup's left border down the whole list — the "bar on
+            // the border" the family rule took out of the source chooser.
             QColor stripeCol = m_owner->m_accent;
             if (!isCurrent && !selected) {
                 stripeCol = QColor(stripeCol.red(), stripeCol.green(),
                                    stripeCol.blue(), 160);
             }
-            p->fillRect(r.x(), r.y(), 2, r.height(), stripeCol);
+            const int stripeX = r.x() + kGutter - kStripeW;
+            p->fillRect(stripeX, r.y(), kStripeW, r.height(), stripeCol);
 
             QFontMetrics fm(opt.font);
             int baseline = r.y() + (r.height() + fm.ascent() - fm.descent()) / 2;
-            int x = r.x() + 2 + 4;
+            int x = stripeX + kStripeW + 4;
 
             // Source pip (4×4)
             p->fillRect(x, r.y() + (r.height() - 4) / 2, 4, 4, m_owner->m_accent);
@@ -357,7 +366,7 @@ private:
             maxName = qMax(maxName, fm.horizontalAdvance(m.name));
         int valW = fm.horizontalAdvance(QStringLiteral("0x7FFFFFFFFFFFFFFF"))
                  + fm.horizontalAdvance(QStringLiteral("-9223372036854775808"));
-        return 2 + 4 + 4 + 6 + 9 + maxName + 8 + valW + 8 + 16;
+        return kGutter + 4 + 4 + 6 + 9 + maxName + 8 + valW + 8 + 16;
     }
 
     void applyFilter() {

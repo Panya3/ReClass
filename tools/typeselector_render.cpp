@@ -7,7 +7,7 @@
 //
 // Usage: typeselector_render <out.png> [mode] [light | <theme>]
 //   mode   filter=<text> | expand | perf | selecthdr | toggleclasses | bottom
-//          | ptr | arr (see below)
+//          | ptr | arr | detail | select | hex | hexpin (see below)
 //   theme  "light" picks the first light built-in; any other word is a
 //          built-in theme's "name" or JSON basename (tw, vs, ...). Either
 //          goes through setCurrent (the popup's delegate reads the manager)
@@ -28,8 +28,12 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QScrollBar>
+#include <QLabel>
+#include <QMouseEvent>
+#include <QTextDocument>
 #include <cstdio>
 #include "typeselectorpopup.h"
+#include "hextoolbarpopup.h"
 #include "core.h"
 #include "themes/thememanager.h"
 
@@ -268,8 +272,72 @@ int main(int argc, char** argv) {
         app.processEvents();
     }
 
+    // "select": the current index onto the long-named struct so the action
+    // row's banner has to elide. "detail": the same, plus the detail pane
+    // (its toolbar toggle is commented out; the test hook shows it).
+    if (arg2 == QStringLiteral("select") || arg2 == QStringLiteral("detail")) {
+        if (auto* lv = popup.findChild<QListView*>()) {
+            const auto& ft = popup.filteredTypes();
+            for (int i = 0; i < ft.size(); ++i)
+                if (ft[i].displayName.startsWith(QStringLiteral("PlayerEntityController"))) {
+                    lv->setCurrentIndex(lv->model()->index(i, 0));
+                    break;
+                }
+        }
+        if (arg2 == QStringLiteral("detail")) popup.setShowDetailForTest(true);
+        app.processEvents();
+        app.processEvents();
+    }
+
     const QString out = (argc > 1) ? QString::fromLocal8Bit(argv[1])
                                    : QStringLiteral("typeselector_render.png");
+
+    // "hex" / "hexpin": the hex toolbar instead of the chooser — unpinned
+    // with the keyboard ring on the first size button, or pinned (through
+    // its own pin hit rect) with a pointer and a float suggestion. This
+    // target links resources.qrc, so the pin glyph is the real one (the
+    // test target's is blank). Stdout: the hit rects, so a scan can crop
+    // every outline and the ring.
+    if (arg2 == QStringLiteral("hex") || arg2 == QStringLiteral("hexpin")) {
+        popup.hide();
+        HexToolbarPopup hex;
+        hex.setFont(QFont(QStringLiteral("Consolas"), 10));
+        HexPopupContext ctx;
+        ctx.currentKind = NodeKind::Hex64;
+        ctx.data = QByteArray::fromHex("4142434445464748");
+        ctx.hasPtr = true;
+        ctx.ptrSymbol = QStringLiteral("g_World");
+        ctx.hasFloat = true;
+        ctx.floatVal = 1.5f;
+        hex.setContext(ctx);
+        hex.popup(QPoint(120, 120));
+        app.processEvents();
+        hex.grab();   // paints once: builds the hit rects
+        if (arg2 == QStringLiteral("hexpin")) {
+            const QVector<QRect> hits = hex.hitRectsForTest();
+            if (hits.size() > 5) {
+                QMouseEvent press(QEvent::MouseButtonPress, QPointF(hits[5].center()),
+                                  hex.mapToGlobal(hits[5].center()),
+                                  Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(&hex, &press);
+            }
+        } else {
+            QKeyEvent right(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
+            QApplication::sendEvent(&hex, &right);
+        }
+        app.processEvents();
+        const QPixmap g = hex.grab();
+        g.save(out);
+        std::printf("theme: %s\n", qPrintable(ThemeManager::instance().current().name));
+        std::printf("%s  popup=%dx%d  dpr=%g  device=%dx%d  pinned=%d focused=%d\n", qPrintable(out),
+                    hex.width(), hex.height(), g.devicePixelRatio(), g.width(), g.height(),
+                    hex.isPinned() ? 1 : 0, hex.focusedHitForTest());
+        const QVector<QRect> hits = hex.hitRectsForTest();
+        for (int i = 0; i < hits.size(); ++i)
+            std::printf("  hit %d x=%d y=%d w=%d h=%d\n", i, hits[i].x(), hits[i].y(), hits[i].width(), hits[i].height());
+        return 0;
+    }
+
     const QPixmap grab = popup.grab();
     grab.save(out);
 
@@ -282,6 +350,12 @@ int main(int argc, char** argv) {
                 grab.devicePixelRatio(), grab.width(), grab.height());
     if (auto* fe = popup.findChild<QLineEdit*>())
         std::printf("  filter %s\n", qPrintable(rectStr(inPopup(fe))));
+    for (QLabel* l : popup.findChildren<QLabel*>()) {
+        if (l->accessibleName() != QStringLiteral("Type preview")) continue;
+        QTextDocument doc;
+        doc.setHtml(l->text());
+        std::printf("  banner \"%s\" %s\n", qPrintable(doc.toPlainText()), qPrintable(rectStr(inPopup(l))));
+    }
     if (auto* lv = popup.findChild<QListView*>()) {
         std::printf("  list %s\n", qPrintable(rectStr(inPopup(lv))));
         std::printf("  viewport %s\n", qPrintable(rectStr(inPopup(lv->viewport()))));

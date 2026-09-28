@@ -362,10 +362,29 @@ device row above the bar's TOP edge — `popup(anchor, anchorTop)`, the
 controller passing `bar->mapToGlobal(QPoint(0, 0)).y()` — never on the
 anchor, which would cover the bar and the chip. A per-row × delete rebuilds
 the list while the popup is up; `setSources()` then re-fits the height in
-place (top edge anchored) so no bare ground opens above the footer. The
-section hairlines and the Clear All divider run under the scroll track to
-the right frame (`SeamScrollBar`), and a disabled Clear All never lights
+place — the edge on the bar stays: the top edge under it, the bottom edge
+when the popup is flipped above it — so no bare ground opens above the
+footer and a flipped popup never detaches from the bar. The section
+hairlines and the Clear All divider run under the scroll track to the
+right frame (`SeamScrollBar`), and a disabled Clear All never lights
 `t.hover`.
+
+**Seams reach the frame because the popup paints them.** The layout's
+1-logical inset is not device-exact any more than a 1-logical line is: at
+125 % it is 1.25 device px, so at half the widths the children end one
+device column short of the right frame (and at 150 % and above they always
+do), and a seam painted only by the field, the delegate or the scrollbar
+stopped with a notch of ground before the frame. So every popup paints
+every interior seam itself, across its whole width and before the frame —
+the field's row in the field's own (focus-aware) colour, the section
+hairlines and dividers from the same rects it hands its `SeamScrollBar`
+(viewport-relative; the viewport's offset is whole logical px, so the
+device row picked is the delegate's), the footer's row — and repaints on
+every scroll. The children paint the same device row over their share; the
+popup's fill is what reaches the frame, and the frame, painted last, is
+what ends it. A row marker inside the popup (the type chooser's kind
+stripe on the current row, the enum picker's per-row stripe) ends at
+`kGutter`, never at the row's x=0 against the frame column.
 
 **The family today.** The rule's followers are `TypeSelectorPopup`,
 `EnumPickerPopup` and `HexToolbarPopup`, all built from the shared pieces
@@ -383,9 +402,14 @@ get the surface and the frame from `MenuBarStyle::PE_FrameMenu`.
 Pinned by `test_source_chooser` (the frame on exactly one device row /
 column per side, the surface strips, the accent budget, the sizing and the
 scroll case, at dpr 1.0 and 1.25 under tw and vs; the seams under the
-track, the disabled Clear All, the in-place re-fit and the flip above the
-bar), `test_type_selector` (the same frame / surface / field probes for the
-type chooser under tw and vs, the enum picker and the hex toolbar),
+track and to the frame at every width phase, the disabled Clear All, the
+in-place re-fit under and above the bar, and the flip above the bar),
+`test_type_selector` (the same frame / surface / field probes for the type
+chooser under tw and vs, the seams to the frame at every width phase, a
+selected header's seam, the current row's stripe inside the gutter, the
+banner's elision, the enum picker's left strip, the hex toolbar's
+device-exact outlines, focus ring, pin glyph and accent budget, and the
+detail pane's seam-coloured dividers),
 `test_ribbon_layout` (`overflowMenuOpenIsHover`) and `test_breadcrumb`
 (`testMenuOpenCellIsHoverNotSelected`,
 `testSourceChooserHangsOnTheSeamAtBothScales`). Harness:

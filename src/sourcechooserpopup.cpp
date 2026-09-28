@@ -468,6 +468,10 @@ SourceChooserPopup::SourceChooserPopup(QWidget* parent)
         return out;
     };
     m_listView->setVerticalScrollBar(seamBar);
+    // The popup paints the same seams under its children (paintEvent), so
+    // it repaints whenever they move with the scroll.
+    connect(seamBar, &QScrollBar::valueChanged, this, [this] { update(); });
+    connect(seamBar, &QScrollBar::rangeChanged, this, [this] { update(); });
 
     auto* delegate = new SourceChooserDelegate(this);
     m_listView->setItemDelegate(delegate);
@@ -590,8 +594,8 @@ void SourceChooserPopup::setSources(const QVector<SourceEntry>& entries) {
     // Rebuilt while up — a per-row x delete — the popup kept the height the
     // old list needed, and the list's stretch turned the difference into
     // bare ground between the last row and the footer. Re-fit to the new
-    // rows; the top edge stays where the user is looking.
-    if (isVisible()) fitToScreen(/*keepTop*/ true);
+    // rows; the edge on the bar stays where the user is looking.
+    if (isVisible()) fitToScreen(/*inPlace*/ true);
 }
 
 void SourceChooserPopup::setLivenessResults(const QVector<bool>& alive) {
@@ -647,6 +651,7 @@ void SourceChooserPopup::applyFilter(const QString& text) {
     // without this the re-fit setSources() runs measured the OLD list.
     m_listView->updateGeometry();
     m_listView->verticalScrollBar()->update();   // the seams it continues moved
+    update();                                    // and the popup's mirror of them
 
     // Footer
     int total = 0;
@@ -688,7 +693,7 @@ void SourceChooserPopup::popup(const QPoint& globalPos, int anchorTop) {
         : QRect(0, 0, 1920, 1080);
     setFixedWidth(popupW);
     move(qBound(screen.left(), globalPos.x(), screen.right() - popupW), globalPos.y());
-    fitToScreen(/*keepTop*/ false);
+    fitToScreen(/*inPlace*/ false);
 
     show();
     raise();
@@ -711,8 +716,12 @@ void SourceChooserPopup::warmUp() {
 // the popup flips over the bar (EnumPickerPopup's rule) — ending one device
 // row above the bar's TOP edge when the caller named it (m_anchorTop), not
 // on the anchor, which is the bar's bottom edge: a popup ending there
-// covered the bar and the chip that opened it.
-void SourceChooserPopup::fitToScreen(bool keepTop) {
+// covered the bar and the chip that opened it. A re-fit while up
+// (setSources after a per-row x delete) keeps the edge that sits on the
+// bar: the top edge under it — and, flipped above it, the BOTTOM edge.
+// Always keeping the top edge left a flipped popup detached from the bar
+// by the removed row's height.
+void SourceChooserPopup::fitToScreen(bool inPlace) {
     layout()->invalidate();
     layout()->activate();
     const int wanted = layout()->sizeHint().height();
@@ -723,8 +732,13 @@ void SourceChooserPopup::fitToScreen(bool keepTop) {
     constexpr int kMinH = 140;
     int y = pos().y();
     int popupH;
-    if (keepTop) {
-        // A re-fit while up: only the bottom edge moves.
+    if (inPlace && y < m_anchor.y()) {
+        // Flipped above the bar: the bottom edge stays, the top moves.
+        const int bottom = y + height();
+        popupH = qMax(kMinH, qMin(wanted, bottom - screen.top() - kScreenPad));
+        y = bottom - popupH;
+    } else if (inPlace) {
+        // Under the bar: the top edge stays, only the bottom moves.
         popupH = qMin(wanted, screen.bottom() - y - kScreenPad);
     } else {
         const int barTop = m_anchorTop >= 0 ? m_anchorTop : m_anchor.y();
@@ -759,25 +773,55 @@ void SourceChooserPopup::fitToScreen(bool keepTop) {
 // only the frame is full theme.border. Scrollbars are the popup's local
 // 6-px rule (popupScrollBarQss), icons are themedVsIcon at a real tone drawn
 // with drawPixmapSnapped, and the accent (indHoverSpan) is budgeted to one
-// "current" marker per popup at most.
+// "current" marker per popup at most — and never a stripe against the
+// frame: a row marker (the type chooser's kind stripe, the enum picker's)
+// ends at kGutter, with clean ground between it and the frame column.
 //
 // Why device fills and not 1-logical-px fillRect strips: 1 logical px is
 // 1.25 device px at 125 %, which snaps to ONE or TWO device rows depending
 // on where the window lands, so the frame read a different weight on each
-// edge and left stray corner pixels. The shared pieces live in
-// widgets/popup_chrome.h; TypeSelectorPopup, EnumPickerPopup and
-// HexToolbarPopup follow this rule. The one exception is the editor's
-// HoverPopupHost: a hover popup is transient like RcxTooltip, so it keeps
-// the TOOLTIP surface (backgroundAlt) — but its frame is this same
-// device-exact one, not a QFrame::Box.
+// edge and left stray corner pixels. The same fraction is why the POPUP
+// paints every interior seam itself, across its whole width and before the
+// frame: the children's 1-logical inset is not device-exact either, so at
+// half the widths at 125 % (and always at 150 % and above) a child ends one
+// device column short of the frame, and a seam only the field, the delegate
+// or the scrollbar painted stopped with a notch of ground before it. The
+// children paint the same device row over their share; the popup's fill is
+// what reaches the frame, and the frame, painted last, is what ends it. The
+// shared pieces live in widgets/popup_chrome.h; TypeSelectorPopup,
+// EnumPickerPopup and HexToolbarPopup follow this rule. The one exception
+// is the editor's HoverPopupHost: a hover popup is transient like
+// RcxTooltip, so it keeps the TOOLTIP surface (backgroundAlt) — but its
+// frame is this same device-exact one, not a QFrame::Box.
 void SourceChooserPopup::paintEvent(QPaintEvent*) {
     const Theme& t = m_theme;
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
     p.fillRect(rect(), t.background);
+    const QColor seam = containerBorderColor(t);
+    // The field's seam, in the field's own (focus-aware) colour: the field
+    // paints the same row over its rect, which ends short of the frame at
+    // half the widths (see above).
+    const QRect fe = m_filterEdit->geometry();
+    fillBottomDeviceRowOfRect(p, QRectF(0, fe.top(), width(), fe.height()),
+                              static_cast<PopupFilterField*>(m_filterEdit)->seamColor());
     // The seam over the footer: the list's viewport ends where the footer
     // starts, and a QLabel paints no ground, so the row shows through.
-    fillTopDeviceRowOfRect(p, QRectF(m_footerLabel->geometry()), containerBorderColor(t));
+    const QRect fg = m_footerLabel->geometry();
+    fillTopDeviceRowOfRect(p, QRectF(0, fg.top(), width(), fg.height()), seam);
+    // The section hairlines and the Clear All divider, under the list and
+    // its track (the SeamScrollBar hands over the same rects, viewport-
+    // relative; the viewport's offset is whole logical px, so the device
+    // row picked here is the delegate's).
+    auto* bar = static_cast<SeamScrollBar*>(m_listView->verticalScrollBar());
+    if (bar->seams && !m_listView->isHidden()) {
+        const int vy = m_listView->viewport()->mapTo(this, QPoint(0, 0)).y();
+        for (const SeamScrollBar::Seam& s : bar->seams()) {
+            const QRectF across(0, s.rect.top() + vy, width(), s.rect.height());
+            if (s.bottomEdge) fillBottomDeviceRowOfRect(p, across, s.color);
+            else              fillTopDeviceRowOfRect(p, across, s.color);
+        }
+    }
     fillDeviceFrameOfRect(p, QRectF(rect()), t.border);
 }
 
