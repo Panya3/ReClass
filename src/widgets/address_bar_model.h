@@ -14,6 +14,7 @@
 #include <QStringList>
 #include <QVector>
 #include <algorithm>
+#include <functional>
 
 namespace rcx {
 
@@ -40,6 +41,10 @@ struct AddressBarState {
     QString        baseFormula;       // NodeTree::baseAddressFormula (full, never elided)
     uint64_t       resolvedBase = 0;  // what the formula evaluates to right now
     QVector<Crumb> crumbs;            // the trail, dotted production shape
+    QString        trailPath;         // the trail as one dotted path (trailPathText):
+                                      // what the bar's path edit opens on. Carried
+                                      // in the state — it changes exactly when the
+                                      // crumbs do, so a callback would be no cheaper
     bool           canBack = false;
     bool           canForward = false;
     bool           canUp = false;
@@ -52,6 +57,7 @@ struct AddressBarState {
             && baseFormula == o.baseFormula
             && resolvedBase == o.resolvedBase
             && crumbs == o.crumbs
+            && trailPath == o.trailPath
             && canBack == o.canBack
             && canForward == o.canForward
             && canUp == o.canUp;
@@ -148,6 +154,25 @@ inline QVector<RootEntry> rootClassEntries(const NodeTree& tree) {
     }
     return out;
 }
+
+// What the bar's chevron menus and its path edit read from the tree,
+// pulled on demand (a menu opening, a keystroke) — never per refresh. The
+// bar has no NodeTree: the controller answers these through the editor.
+// Lives here, not in the bar, so editor.h can take one by value without
+// pulling the widget header into every consumer.
+struct AddressBarTreeQueries {
+    // Drillable fields of the class at crumb `level`, the trail's hop
+    // flagged current; level == crumbs.size()-1 is the deepest class
+    // (nothing current — its chevron drills further).
+    std::function<QVector<SiblingEntry>(int)>            siblingsOf;
+    // The root classes (rootClassEntries), for root.chev.
+    std::function<QVector<RootEntry>()>                  roots;
+    // Drillable fields of the class a dotted path lands in; "" lists the
+    // roots in the same shape. Empty when the path does not resolve.
+    std::function<QVector<SiblingEntry>(const QString&)> fieldsAtPath;
+    // resolveDrillPath's words for a typed path, "" when it resolves.
+    std::function<QString(const QString&)>               validatePath;
+};
 
 // The trail as one dotted path — "RcxEditor.vptr.parent": the view root's
 // label, then the field followed at each hop. What the bar's path edit

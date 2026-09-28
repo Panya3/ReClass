@@ -1804,11 +1804,17 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     {
         AddressBar::Callbacks cb;
         cb.onCrumb       = [this](int i) { emit crumbClicked(i); };
-        // The deepest crumb: crumbClicked(n-1) → collapseToFocus(n-1), which
-        // collapses nothing (the index is past the focus path) and only
-        // scrolls that class's header to the top — the non-mutating click
-        // the design keeps for "you are here".
-        cb.onCurrentCrumb = [this] { emit crumbClicked(m_addressBar->state().crumbs.size() - 1); };
+        // The deepest crumb is "you are here": its click only brings that
+        // class's header back to the top of THIS pane — the hop row it was
+        // entered through, or line 0 (the command row IS the view root's
+        // header) when nothing is drilled. No signal, no controller, no
+        // undo entry: it mutates nothing, so it never leaves the editor.
+        cb.onCurrentCrumb = [this] {
+            const QVector<Crumb>& cr = m_addressBar->state().crumbs;
+            if (cr.isEmpty() || !m_sci) return;
+            if (cr.last().pointerId) scrollNodeToTop(cr.last().pointerId);
+            else m_sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, (unsigned long)0);
+        };
         cb.onSourceClick = [this](QPoint g) { emit sourcePopupRequested(g); };
         cb.onGotoDialog  = [this] { emit gotoDialogRequested(); };
         // The document takes focus back after a keyboard-ended edit; the
@@ -4547,6 +4553,13 @@ void RcxEditor::scrollToNodeId(uint64_t nodeId) {
     }
 }
 
+void RcxEditor::setAddressBarTreeQueries(AddressBarTreeQueries q) {
+    // A straight hand-off: the bar pulls these itself when a menu opens or
+    // a path key is typed. Out of line because editor.h only forward-
+    // declares AddressBar.
+    if (m_addressBar) m_addressBar->setTreeQueries(std::move(q));
+}
+
 void RcxEditor::scrollNodeToTop(uint64_t nodeId) {
     // First display line of the node — O(1) via the per-refresh index, with a
     // linear fallback. Compose re-emits only visible lines (collapsed nodes'
@@ -5949,6 +5962,13 @@ bool RcxEditor::eventFilter(QObject* obj, QEvent* event) {
         int line, tCol; EditTarget t;
         if (hitTestTarget(m_sci, m_meta, me->pos(), line, tCol, t)) {
             m_pendingClickNodeId = 0;   // cancel deferred selection change
+            // The address span edits in the bar (the same redirect the
+            // single press takes): a double-click used to slip past it and
+            // start the legacy Scintilla edit on the elided text.
+            if (t == EditTarget::BaseAddress && m_addressBar) {
+                m_addressBar->beginBaseEdit();
+                return true;
+            }
             // Narrow selection to this node before editing
             if (h.nodeId != 0 && h.nodeId != kCommandRowId)
                 emit nodeClicked(h.line, h.nodeId, Qt::NoModifier);
@@ -6140,8 +6160,23 @@ bool RcxEditor::handleNormalKey(QKeyEvent* ke) {
         }
         return true;
     case Qt::Key_D:
+        // Alt+D: edit the drill path in the address bar (Explorer's key).
+        // Handled here rather than as a QAction so it lives with F2/F12,
+        // the other keys that act on the document's own chrome.
+        if (ke->modifiers() == Qt::AltModifier && m_addressBar) {
+            m_addressBar->beginPathEdit();
+            return true;
+        }
         if ((ke->modifiers() & Qt::ControlModifier) && !m_currentSelIds.isEmpty()) {
             emit duplicateSelectedRequested();
+            return true;
+        }
+        return false;
+    case Qt::Key_L:
+        // Ctrl+L: the browser spelling of Alt+D. Free here — the scanner's
+        // Ctrl+L is a WidgetWithChildrenShortcut on its own panel.
+        if (ke->modifiers() == Qt::ControlModifier && m_addressBar) {
+            m_addressBar->beginPathEdit();
             return true;
         }
         return false;

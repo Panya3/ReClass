@@ -1277,6 +1277,35 @@ void RcxController::connectEditor(RcxEditor* editor) {
             return names;
         });
 
+    // Sideways navigation. A chevron pick is one undoable switch; a root
+    // pick is the F12 jump (new root, empty trail); the path edit's Enter
+    // resolves the typed path and answers the bar the way the base edit is
+    // answered — a success closes the overlay, a miss keeps it open with the
+    // seam in markerError (statusHint has already named the segment).
+    // History joins all three in P5.
+    connect(editor, &RcxEditor::siblingPickRequested, this, &RcxController::switchSibling);
+    connect(editor, &RcxEditor::rootPickRequested, this, &RcxController::setViewRootId);
+    connect(editor, &RcxEditor::pathCommitRequested, this, [this, editor](const QString& path) {
+        QString err;
+        const bool ok = navigateToDrillPath(path, &err);
+        if (auto* bar = editor->addressBar()) bar->pathCommitFinished(ok, err);
+    });
+    // What the chevron menus and the path edit read from the tree, pulled
+    // only when a menu opens or a key is typed — never per refresh. The bar
+    // has no NodeTree; these keep it that way.
+    {
+        AddressBar::TreeQueries q;
+        q.siblingsOf   = [this](int level) { return siblingsForCrumb(level); };
+        q.roots        = [this] { return rootClassEntries(m_doc->tree); };
+        q.fieldsAtPath = [this](const QString& path) { return drillFieldsAt(path); };
+        q.validatePath = [this](const QString& text) {
+            QString err;
+            resolveDrillPath(m_doc->tree, text, nullptr, nullptr, &err);
+            return err;
+        };
+        editor->setAddressBarTreeQueries(std::move(q));
+    }
+
     // Source liveness on the bar's chip. The per-refresh state push carries
     // it too, but a source that just died gets no more refresh ticks, so the
     // push alone would leave the dot green: the status signal turns it the
@@ -1953,6 +1982,141 @@ void RcxController::collapseToFocus(int crumbIndex) {
     if (ed) ed->scrollNodeToTop(scrollPid ? scrollPid : m_viewRootId);
 }
 
+// The class crumb `level` names, walked from the view root down the focus
+// path the same way addressBarState builds the crumbs — so a menu built
+// here and the crumb it hangs under always agree. 0 when a hop is gone.
+static uint64_t classAtLevel(const NodeTree& tree, uint64_t viewRootId,
+                             const QVector<uint64_t>& focusPath, int level) {
+    uint64_t container = viewRootId;
+    for (int i = 0; i < level && i < focusPath.size(); ++i) {
+        const int pi = tree.indexOfId(focusPath[i]);
+        if (pi < 0) return 0;
+        container = drillTargetId(tree.nodes[pi]);
+    }
+    // A show-all view (root 0) labels the first root struct; its fields are
+    // the ones the root crumb's chevron lists.
+    if (container == 0) {
+        const int ri = detail::firstRootStructIdx(tree);
+        return ri >= 0 ? tree.nodes[ri].id : 0;
+    }
+    return container;
+}
+
+QVector<SiblingEntry> RcxController::siblingsForCrumb(int level) const {
+    if (level < 0 || level > m_focusPath.size()) return {};
+    const uint64_t classId = classAtLevel(m_doc->tree, m_viewRootId, m_focusPath, level);
+    if (classId == 0) return {};
+    const uint64_t current = level < m_focusPath.size() ? m_focusPath[level] : 0;
+    return siblingFieldsOf(m_doc->tree, classId, current);
+}
+
+QVector<SiblingEntry> RcxController::drillFieldsAt(const QString& path) const {
+    const NodeTree& tree = m_doc->tree;
+    if (path.trimmed().isEmpty()) {
+        // Nothing typed yet: the first segment is a root class, so offer
+        // those in the same row shape the field menu uses.
+        QVector<SiblingEntry> roots;
+        for (const RootEntry& r : rootClassEntries(tree)) {
+            SiblingEntry e;
+            e.id = r.id; e.field = r.label; e.classLabel = r.label; e.keyword = r.keyword;
+            roots.push_back(e);
+        }
+        return roots;
+    }
+    uint64_t root = 0;
+    QVector<uint64_t> hops;
+    if (!resolveDrillPath(tree, path, &root, &hops, nullptr)) return {};
+    uint64_t container = root;
+    if (!hops.isEmpty()) {
+        const int pi = tree.indexOfId(hops.last());
+        if (pi < 0) return {};
+        container = drillTargetId(tree.nodes[pi]);
+    }
+    return siblingFieldsOf(tree, container, 0);
+}
+
+void RcxController::switchSibling(int level, uint64_t newPointerId) {
+    if (level < 0 || level > m_focusPath.size()) return;
+    const NodeTree& tree = m_doc->tree;
+    const int ni = tree.indexOfId(newPointerId);
+    if (ni < 0 || drillTargetId(tree.nodes[ni]) == 0) return;   // not a hop
+    const uint64_t oldPointer = level < m_focusPath.size() ? m_focusPath[level] : 0;
+    if (oldPointer == newPointerId) return;   // already there: nothing to undo
+    const int oi = oldPointer ? tree.indexOfId(oldPointer) : -1;
+    const bool collapseOld = oi >= 0 && !tree.nodes[oi].collapsed;
+    const bool expandNew   = tree.nodes[ni].collapsed;
+    const Node& hop = tree.nodes[ni];
+    const QString field = hop.name.isEmpty() ? fmt::typeNameRaw(hop.kind) : hop.name;
+    // One gesture, one undo entry: the collapse and the expand travel
+    // together (the "Collapse all" / "Expand all" shape). Refresh is held
+    // until the focus path is set below, so the crumbs never show a
+    // half-switched trail.
+    if (collapseOld || expandNew) {
+        const bool wasSuppressed = m_suppressRefresh;
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(QStringLiteral("Switch to %1").arg(field));
+        if (collapseOld)
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{oldPointer, false, true}));
+        if (expandNew)
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{newPointerId, true, false}));
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = wasSuppressed;
+    }
+    m_focusPath.resize(level);
+    m_focusPath.push_back(newPointerId);
+    refresh();
+    RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
+    if (!ed) ed = primaryEditor();
+    if (ed) ed->scrollNodeToTop(newPointerId);
+}
+
+bool RcxController::navigateToDrillPath(const QString& text, QString* err) {
+    const NodeTree& tree = m_doc->tree;
+    uint64_t root = 0;
+    QVector<uint64_t> path;
+    QString why;
+    if (!resolveDrillPath(tree, text, &root, &path, &why)) {
+        if (err) *err = why;
+        emit statusHint(QStringLiteral("Path: %1").arg(why));
+        return false;
+    }
+    // A show-all view names the first root struct in its crumb and its
+    // trail text, so committing that text unchanged must stay a no-op
+    // there too — only a path into ANOTHER root switches the view.
+    const int firstRoot = detail::firstRootStructIdx(tree);
+    const bool rootDiffers = m_viewRootId != 0
+        ? root != m_viewRootId
+        : (firstRoot < 0 || tree.nodes[firstRoot].id != root);
+    QVector<uint64_t> toExpand;
+    for (uint64_t hop : path) {
+        const int pi = tree.indexOfId(hop);
+        if (pi >= 0 && tree.nodes[pi].collapsed) toExpand.push_back(hop);
+    }
+    // setViewRootId is the one root switch (it clears the focus path and
+    // refreshes on its own — a second refresh below then shows the trail);
+    // the expands are held so the crumbs never show a half-built path.
+    if (rootDiffers) setViewRootId(root);
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    if (!toExpand.isEmpty()) {
+        m_doc->undoStack.beginMacro(QStringLiteral("Navigate to path"));
+        for (uint64_t hop : toExpand)
+            m_doc->undoStack.push(new RcxCommand(this, cmd::Collapse{hop, true, false}));
+        m_doc->undoStack.endMacro();
+    }
+    m_suppressRefresh = wasSuppressed;
+    m_focusPath = path;
+    refresh();
+    RcxEditor* ed = qobject_cast<RcxEditor*>(sender());
+    if (!ed) ed = primaryEditor();
+    if (ed) {
+        if (!path.isEmpty()) ed->scrollNodeToTop(path.last());
+        else                 ed->scrollNodeToTop(m_viewRootId);
+    }
+    if (err) err->clear();
+    return true;
+}
+
 QString RcxController::classLabelOf(uint64_t id) const {
     int idx = id ? m_doc->tree.indexOfId(id) : -1;
     if (idx >= 0) return nodeClassLabel(m_doc->tree.nodes[idx]);
@@ -2109,6 +2273,7 @@ AddressBarState RcxController::addressBarState() {
     s.baseFormula  = tree.baseAddressFormula;
     s.resolvedBase = tree.baseAddress;
     s.crumbs       = crumbs;
+    s.trailPath    = trailPathText(tree, m_viewRootId, m_focusPath);
     s.canBack      = false;   // P5: NavHistory
     s.canForward   = false;
     s.canUp        = !m_focusPath.isEmpty();

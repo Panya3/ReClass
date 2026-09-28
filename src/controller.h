@@ -494,6 +494,34 @@ public:
     // for tests; handleNodeClick assigns its result to m_focusPath.
     QVector<uint64_t> focusChainToNode(uint64_t nodeId) const;
 
+    // ── Sideways navigation (the address bar's chevrons and its path edit) ──
+    // The drillable fields of the class at crumb `level` (0 = the view root,
+    // i = the class focus hop i-1 opens), the hop the trail goes through
+    // flagged current; level == focusPath().size() is the deepest class and
+    // nothing is current. What a chev:<level> menu lists.
+    QVector<SiblingEntry> siblingsForCrumb(int level) const;
+    // The drillable fields of the class a dotted path lands in ("Player" →
+    // Player's fields, "Player.stats" → Stats's); an empty path lists the
+    // root classes in the same shape (field = class label), and a path that
+    // does not resolve lists nothing. What the path edit's Down completes
+    // from.
+    QVector<SiblingEntry> drillFieldsAt(const QString& path) const;
+    // Explorer's sideways jump: make `newPointerId` the hop at `level` —
+    // collapse the hop that was there (if any and expanded) and expand the
+    // new one (if collapsed) in ONE undo macro "Switch to <field>", set the
+    // focus path to focusPath[0..level) + newPointerId, refresh and scroll
+    // the new hop's row to the top of the sender pane. level ==
+    // focusPath().size() appends (the deepest crumb's "drill further").
+    // Choosing the hop already there is a no-op: no undo entry.
+    void switchSibling(int level, uint64_t newPointerId);
+    // The path edit's Enter: resolve "RcxEditor.vptr.parent"
+    // (resolveDrillPath), switch the view root if the path names another
+    // one, expand every collapsed hop in ONE undo macro "Navigate to path",
+    // set the focus path, refresh and scroll the deepest hop to the top.
+    // On a miss: *err names the segment, statusHint carries it, nothing
+    // changes, false.
+    bool navigateToDrillPath(const QString& text, QString* err = nullptr);
+
     // Rebase the document to `expr` (anything AddressParser understands —
     // "0x7FF6...", "<game.exe>+0x40", "[ntdll!Ldr]"). THE base-address
     // mutation: the inline command-row edit, Goto, the bookmarks dock, the

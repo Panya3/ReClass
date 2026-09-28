@@ -316,6 +316,7 @@ private slots:
         a.baseAddress = 0x1000; a.baseFormula = "<game.exe>"; a.resolvedBase = 0x1000;
         Crumb c; c.label = "Player"; c.classId = 1; c.address = 0x1000; c.keyword = "struct";
         a.crumbs = { c };
+        a.trailPath = "Player";
         a.canBack = true; a.canForward = false; a.canUp = true;
         AddressBarState b = a;
         QVERIFY(a == b);
@@ -333,6 +334,7 @@ private slots:
         QVERIFY(differs([](AddressBarState& s) { s.baseFormula = "0x2000"; }));
         QVERIFY(differs([](AddressBarState& s) { s.resolvedBase = 0x2000; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].label = "Enemy"; }));
+        QVERIFY(differs([](AddressBarState& s) { s.trailPath = "Player.stats"; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].classId = 2; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].pointerId = 3; }));
         QVERIFY(differs([](AddressBarState& s) { s.crumbs[0].address = 0; }));

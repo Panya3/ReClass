@@ -50,22 +50,33 @@
 // (P2a); the source chip with its liveness dot and the popup click, and the
 // base segment with its resolved-address suffix (P2b); the base edit overlay
 // with live validation, the resolved-address preview and the recent /
-// bookmarks / modules menu, the recent cell and Up (P3). The path edit, the
-// chevron menus, history and keyboard mode land in the phases behind —
-// their cells are laid out and painted now so the geometry is final, and
-// their clicks are no-ops.
+// bookmarks / modules menu, the recent cell and Up (P3); the chevron menus
+// (a crumb's drillable fields, the other roots), the path edit with its
+// completion menu, and Alt+D / Ctrl+L (P4). History and keyboard mode land
+// in P5 — their cells are laid out and painted now so the geometry is
+// final, and their clicks are no-ops.
 //
-// The base edit is the one place the bar owns a child widget: a hidden
-// QLineEdit shown over the base segment (grown to kEditMinW) on the FULL
-// formula, never the elided display text — the command row used to feed
-// its ellipsis to the parser and silently no-op. It wears PanelSearchField's
-// interior rule (panelFieldInteriorQss); the bar paints the focus seam
-// under the field itself, borderFocused while the text parses and
-// markerError while it does not (or the controller refused it). Enter is
-// the only commit (through onBaseCommit; the controller answers with
-// baseCommitFinished); Esc and losing focus restore, the Explorer / Goto-
-// dialog rule. While the overlay is up the layout is frozen: a state push
-// is stored and its relayout waits for the edit to end.
+// The edits are the one place the bar owns a child widget: a hidden
+// QLineEdit shown in one of two scopes. The BASE edit sits over the base
+// segment (grown to kEditMinW) on the FULL formula, never the elided
+// display text — the command row used to feed its ellipsis to the parser
+// and silently no-op. The PATH edit spans from the base's right edge to
+// the recent cell on the dotted trail ("RcxEditor.vptr.parent"); Down
+// completes the last segment from the fields of the class the segments
+// before it reach. Both wear PanelSearchField's interior rule
+// (panelFieldInteriorQss); the bar paints the focus seam under the field
+// itself, borderFocused while the text parses / resolves and markerError
+// while it does not (or the controller refused it). Enter is the only
+// commit (onBaseCommit / onPathCommit; the controller answers with
+// baseCommitFinished / pathCommitFinished); Esc and losing focus restore,
+// the Explorer / Goto-dialog rule. While the overlay is up the layout is
+// frozen: a state push is stored and its relayout waits for the edit to
+// end, and the cells the overlay covers stop answering to hover.
+//
+// The bar has no NodeTree. What its menus and the path edit need from the
+// tree (a crumb's siblings, the roots, the fields a path lands in, whether
+// a path resolves) arrives as TreeQueries the controller installs through
+// the editor, pulled only when a menu opens or a key is typed.
 
 #include "core.h"
 #include "paintutil.h"
@@ -127,7 +138,7 @@ inline Theme fallbackTheme() {
         "syntaxPreproc": "#9b9b9b", "syntaxType": "#4ec9b0", "indHoverSpan": "#b180d7",
         "indCmdPill": "#2d2d30", "indDataChanged": "#8fbc7a", "indHintGreen": "#5a8248",
         "indRttiHint": "#D7BA7D", "markerPtr": "#f44747", "markerCycle": "#e5a00d",
-        "markerError": "#7a2e2e" })";
+        "markerError": "#7a2e2e", "focusGlow": "#E5A00D" })";
     return Theme::fromJson(QJsonDocument::fromJson(kJson).object());
 }
 
@@ -162,13 +173,13 @@ public:
     // its click is a no-op.
     struct Callbacks {
         std::function<void(int)>           onCrumb;          // ancestor crumb / « pick → collapse to index
-        std::function<void()>              onCurrentCrumb;   // the deepest crumb (inert; unwired for now)
+        std::function<void()>              onCurrentCrumb;   // the deepest crumb: scroll its header up (non-mutating)
         std::function<void(QPoint)>        onSourceClick;    // chip click — global anchor: the bar's bottom edge under the chip
-        std::function<void(int, uint64_t)> onSiblingPick;    // P4 — chev:<level> menu pick
-        std::function<void(uint64_t)>      onRootPick;       // P4 — root.chev menu pick
-        std::function<void(QString)>       onBaseCommit;     // P3 — Enter in the base edit
-        std::function<void(QString)>       onPathCommit;     // P4 — Enter in the path edit
-        std::function<void(QString)>       onRecentPick;     // P3 — recent-places menu pick
+        std::function<void(int, uint64_t)> onSiblingPick;    // chev:<level> menu pick → switch the hop at that level
+        std::function<void(uint64_t)>      onRootPick;       // root.chev menu pick → view that root
+        std::function<void(QString)>       onBaseCommit;     // Enter in the base edit
+        std::function<void(QString)>       onPathCommit;     // Enter in the path edit
+        std::function<void(QString)>       onRecentPick;     // recent-places menu pick
         std::function<void()>              onBack;           // P5
         std::function<void()>              onForward;        // P5
         std::function<void()>              onUp;             // P5
@@ -187,6 +198,27 @@ public:
         std::function<QVector<Bookmark>()>     bookmarks;
         std::function<QStringList()>           modules;
     };
+
+    // What the chevron menus and the path edit read from the tree, pulled
+    // on demand (a menu opening, a keystroke) — never per refresh. The bar
+    // has no NodeTree; the controller answers through the editor. The
+    // struct itself lives in the model header so editor.h can carry one
+    // without this widget header.
+    using TreeQueries = AddressBarTreeQueries;
+    void setTreeQueries(TreeQueries q) { m_treeQ = std::move(q); }
+
+    // The text a chevron / completion row shows: "field  →  Class", or the
+    // field alone when the class repeats it (an auto-named pointer). One
+    // rule, so the tests build their expectations from the same entries.
+    static QString siblingActionText(const SiblingEntry& e) {
+        return (e.classLabel.isEmpty() || e.classLabel == e.field)
+            ? e.field
+            : e.field + QStringLiteral("  ") + QChar(0x2192) + QStringLiteral("  ") + e.classLabel;
+    }
+    // A root.chev row: "struct Player".
+    static QString rootActionText(const RootEntry& r) {
+        return r.keyword.isEmpty() ? r.label : r.keyword + QLatin1Char(' ') + r.label;
+    }
 
     explicit AddressBar(QWidget* parent = nullptr) : QWidget(parent) {
         setObjectName(QStringLiteral("rcxAddressBar"));
@@ -221,57 +253,85 @@ public:
 
     void setCallbacks(Callbacks cb) { m_cb = std::move(cb); }
 
-    // ── Base edit ──
-    // Open the overlay over the base segment, grown to at least kEditMinW,
-    // on the FULL formula (or "0x…") with everything selected. Enter →
-    // onBaseCommit; the controller answers through baseCommitFinished. Esc
-    // and losing focus restore (revert, never commit). The bar holds
-    // StrongFocus only while the overlay is up.
+    // ── Edits (two scopes, one overlay) ──
+    enum class EditScope { None, Base, Path };
+
+    // BASE: open the overlay over the base segment, grown to at least
+    // kEditMinW, on the FULL formula (or "0x…") with everything selected.
+    // Enter → onBaseCommit; the controller answers through
+    // baseCommitFinished. Esc and losing focus restore (revert, never
+    // commit). The bar holds StrongFocus only while the overlay is up. A
+    // path edit in progress is dropped first (one overlay, one scope).
     void beginBaseEdit() {
-        if (m_editVisible) { m_edit->setFocus(); m_edit->selectAll(); return; }
+        if (m_editVisible && m_editScope == EditScope::Base) { m_edit->setFocus(); m_edit->selectAll(); return; }
+        if (m_editVisible) endEdit();
         const QRect base = itemRect(QStringLiteral("base"));
         if (base.isNull()) return;
-        m_editVisible = true;
-        m_relayoutDeferred = false;
-        m_commitError.clear();
         // The base cell grown rightward to the minimum, stopping short of
         // the recent cell. The crumbs under it are simply covered — the
         // layout is frozen while the overlay is up, so nothing shifts.
-        const QRect recent = itemRect(QStringLiteral("recent"));
-        const int limit = recent.isNull() ? width() - kRightMargin : recent.left() - kChevW;
+        const int limit = editLimit();
         QRect r = base;
         r.setWidth(qMax(base.width(), kEditMinW));
         if (r.right() >= limit) r.setRight(limit - 1);
         if (r.width() < kBaseMinW) r.setWidth(kBaseMinW);   // a narrow strip: cover `recent` rather than shrink to nothing
-        m_editRect = r;
-        m_edit->setFont(font());
-        m_edit->setGeometry(r);
-        m_edit->setText(baseFullText());
-        m_edit->selectAll();
-        setFocusPolicy(Qt::StrongFocus);
-        m_edit->show();
-        m_edit->setFocus(Qt::OtherFocusReason);
-        dismissRcxTooltip();
-        update();
+        openEdit(EditScope::Base, r, r.left(), baseFullText());
     }
+
+    // PATH: the overlay from the base's right edge to the recent cell on
+    // the dotted trail (state().trailPath, "RcxEditor.vptr.parent"), all
+    // selected; the first glyph lands where the root crumb's did, so the
+    // trail reads as having turned editable in place. Down completes the
+    // last segment; Enter → onPathCommit; the controller answers through
+    // pathCommitFinished. Alt+D and Ctrl+L in the document, or a click on
+    // the empty stretch, land here.
+    void beginPathEdit() {
+        if (m_editVisible && m_editScope == EditScope::Path) { m_edit->setFocus(); m_edit->selectAll(); return; }
+        if (m_editVisible) endEdit();
+        const QRect base = itemRect(QStringLiteral("base"));
+        if (base.isNull()) return;
+        const int limit = editLimit();
+        const int coveredLeft = base.right() + 1;
+        // The line edit's own left padding is 2 px (panelFieldInteriorQss);
+        // the crumb label sat kCrumbPad in — start the field kCrumbPad - 2
+        // later so the text does not jump when the overlay opens.
+        QRect r(coveredLeft + kCrumbPad - 2, kCellTop, 0, kCellH);
+        r.setRight(limit - 1);
+        // A narrow strip: keep the field usable — grow back over the base,
+        // then past the recent cell, before shrinking below the minimum.
+        if (r.width() < kEditMinW) r.setLeft(qMax(base.left(), limit - kEditMinW));
+        if (r.width() < kBaseMinW) r.setWidth(kBaseMinW);
+        openEdit(EditScope::Path, r, qMin(coveredLeft, r.left()), m_state.trailPath);
+    }
+
     bool isEditing() const { return m_editVisible; }
+    bool isPathEditing() const { return m_editVisible && m_editScope == EditScope::Path; }
+    bool isBaseEditing() const { return m_editVisible && m_editScope == EditScope::Base; }
+    EditScope editScope() const { return m_editVisible ? m_editScope : EditScope::None; }
     QString editText() const { return m_edit->text(); }
     QLineEdit* editWidget() const { return m_edit; }       // test hook
     QRect editRect() const { return m_editVisible ? m_editRect : QRect(); }
+    // Everything the open edit hides: the overlay plus the paper painted
+    // from it to the recent cell. Cells under it stop answering to hover.
+    QRect editCoveredRect() const { return m_editVisible ? m_coveredRect : QRect(); }
     // The seam colour under the field while editing: borderFocused while
-    // the text parses and no commit was refused, markerError otherwise.
+    // the text parses / resolves and no commit was refused, markerError
+    // otherwise.
     bool editTextValid() const { return m_editValid && m_commitError.isEmpty(); }
     // What is painted after the overlay: "→ 0x…" or the parser's words.
     QString editPreviewText() const { return m_editPreview; }
 
-    // The controller's verdict on the last onBaseCommit. A success closes
-    // the overlay and applies the state push the rebase produced (deferred
-    // while the overlay was up); a refusal keeps it open, seam markerError,
-    // `err` where the preview goes, until the text changes.
-    void baseCommitFinished(bool ok, const QString& err = QString()) {
+    // The controller's verdict on the last onBaseCommit / onPathCommit. A
+    // success closes the overlay and applies the state push the navigation
+    // produced (deferred while the overlay was up); a refusal keeps it
+    // open, seam markerError, `err` where the preview goes (when there is
+    // room), until the text changes.
+    void baseCommitFinished(bool ok, const QString& err = QString()) { commitFinished(ok, err); }
+    void pathCommitFinished(bool ok, const QString& err = QString()) { commitFinished(ok, err); }
+    void commitFinished(bool ok, const QString& err) {
         if (!m_editVisible) return;
         if (ok) {
-            endBaseEdit();
+            endEdit();
             if (m_cb.onFocusReturn) m_cb.onFocusReturn();
             return;
         }
@@ -334,6 +394,10 @@ public:
     // ── Geometry queries (the test + harness surface) ──
     QString itemIdAt(QPoint pos) const {
         ensureLayout();
+        // While an edit is up, what it covers is not there: the layout is
+        // frozen, so the cells still exist, but a crumb hidden under the
+        // paper must not offer a hand cursor and a tooltip over nothing.
+        if (m_editVisible && m_coveredRect.contains(pos)) return QString();
         for (const LaidItem& li : m_layout.items)
             if (li.rect.contains(pos)) return li.id;
         return QString();
@@ -431,7 +495,8 @@ public:
     static constexpr int kRightMargin  = 6;
     static constexpr int kCellTop      = 2;
     static constexpr int kCellH        = 22;
-    static constexpr int kEditMinW     = 180;  // the base-edit overlay never opens narrower
+    static constexpr int kEditMinW     = 180;  // an edit overlay never opens narrower
+    static constexpr int kEditPreviewMinW = 48; // room the preview beside the overlay needs to be worth painting
     static constexpr double kDisabledOpacity = 0.40;
 
 protected:
@@ -460,14 +525,17 @@ protected:
                 switch (ke->key()) {
                 case Qt::Key_Return:
                 case Qt::Key_Enter:
-                    commitBaseEdit();
+                    commitEdit();
                     return true;
                 case Qt::Key_Escape:
-                    endBaseEdit();
+                    endEdit();
                     if (m_cb.onFocusReturn) m_cb.onFocusReturn();
                     return true;
                 case Qt::Key_Down:
-                    showPlacesMenu(true);
+                    // The scope's list: places for the base, the fields of
+                    // the class the typed path reaches for the path.
+                    if (m_editScope == EditScope::Path) showPathCompletionMenu();
+                    else                                showPlacesMenu(true);
                     return true;
                 default:
                     break;
@@ -479,8 +547,17 @@ protected:
                 // reverts: Enter is the only commit.
                 const Qt::FocusReason why = static_cast<QFocusEvent*>(e)->reason();
                 if (why != Qt::PopupFocusReason && why != Qt::ActiveWindowFocusReason
-                    && why != Qt::MenuBarFocusReason)
-                    endBaseEdit();
+                    && why != Qt::MenuBarFocusReason) {
+                    endEdit();
+                    // A click-away ends the edit. Qt moves focus BEFORE it
+                    // delivers the press, so by the time mousePressEvent
+                    // runs the overlay is gone, the layout has thawed, and
+                    // the point may sit on a cell the user never saw (a
+                    // chevron that was under the paper). The press that
+                    // closed the edit is spent — mousePressEvent keeps only
+                    // its click-in-the-same-field case.
+                    if (why == Qt::MouseFocusReason) m_swallowNextPress = true;
+                }
             }
         }
         return QWidget::eventFilter(obj, e);
@@ -506,6 +583,10 @@ protected:
     }
 
     void mouseMoveEvent(QMouseEvent* e) override {
+        // The pointer moved: whatever press ended an edit is history. (A
+        // focus-out caused by a press on another widget also arms the
+        // flag; the pointer has to travel back here before it can press.)
+        m_swallowNextPress = false;
         updateHover(e->pos());
         QWidget::mouseMoveEvent(e);
     }
@@ -514,6 +595,20 @@ protected:
         if (e->button() != Qt::LeftButton) { QWidget::mousePressEvent(e); return; }
         dismissRcxTooltip();
         const QString id = itemIdAt(e->pos());
+        if (m_swallowNextPress) {
+            // This press already ended an edit (see eventFilter) and is
+            // spent — except on the field's own text cells: a click on the
+            // base or the empty stretch while editing is the user clicking
+            // elsewhere in the same field, and the edit re-opens there in
+            // that cell's scope (the release does it). Menus and nav never
+            // fire off a press whose target the user did not see.
+            m_swallowNextPress = false;
+            const LaidItem* li = itemById(id);
+            if (!li || (li->kind != Cell::Base && li->kind != Cell::Space)) {
+                e->accept();
+                return;
+            }
+        }
         if (id == QLatin1String("overflow")) {
             // Menus open on press (like every other dropdown in the app);
             // the cell shows pressed through m_menuOpenId until it hides.
@@ -525,6 +620,18 @@ protected:
         if (id == QLatin1String("recent")) {
             m_pressedId.clear();
             showPlacesMenu(false);
+            e->accept();
+            return;
+        }
+        if (id == QLatin1String("root.chev")) {
+            m_pressedId.clear();
+            showRootMenu();
+            e->accept();
+            return;
+        }
+        if (const LaidItem* li = itemById(id); li && li->kind == Cell::Chev) {
+            m_pressedId.clear();
+            showSiblingMenu(li->index);
             e->accept();
             return;
         }
@@ -549,6 +656,7 @@ protected:
 
     void leaveEvent(QEvent* e) override {
         QWidget::leaveEvent(e);
+        m_swallowNextPress = false;
         if (!m_hoverId.isEmpty()) {
             m_hoverId.clear();
             refreshToolTip();
@@ -1051,11 +1159,14 @@ private:
     // one device row, the way PanelSearchField rings.
     void paintEditChrome(QPainter& p) const {
         const Theme& t = m_theme;
-        const QRect recent = itemRect(QStringLiteral("recent"));
-        const int stop = recent.isNull() ? width() - kRightMargin : recent.left();
-        const QRect after(m_editRect.right() + 1, kCellTop, qMax(0, stop - m_editRect.right() - 1), kCellH);
-        if (after.width() > 0) p.fillRect(after, editorPaperColor(t));
-        if (!m_editPreview.isEmpty() && after.width() > 2 * kBasePad) {
+        // Paper over everything the edit covers (the overlay child paints
+        // its own rect on top); the preview goes in what is left of that
+        // after the field — the base edit leaves a run, the path edit only
+        // a sliver, where the seam and the status bar carry the verdict.
+        if (m_coveredRect.width() > 0) p.fillRect(m_coveredRect, editorPaperColor(t));
+        const QRect after(m_editRect.right() + 1, kCellTop,
+                          qMax(0, m_coveredRect.right() - m_editRect.right()), kCellH);
+        if (!m_editPreview.isEmpty() && after.width() >= kEditPreviewMinW) {
             p.setFont(font());
             p.setPen(editTextValid() ? t.textMuted : t.markerError);
             const QRect tr = after.adjusted(kBasePad, 0, -kBasePad, 0);
@@ -1195,8 +1306,10 @@ private:
             if (m_cb.onSourceClick) m_cb.onSourceClick(mapToGlobal(QPoint(chip.left(), height())));
             break;
         }
-        // P4: root.chev / chev:<i> menus, space → beginPathEdit. P5: hist
-        // menu. Painted now, inert until then.
+        // Click-to-type on the empty stretch (Explorer): the trail turns
+        // into its dotted path. root.chev / chev:<i> open on PRESS.
+        case Cell::Space:  beginPathEdit(); break;
+        // P5: the hist menu. Painted now, inert until then.
         default: break;
         }
     }
@@ -1220,6 +1333,111 @@ private:
         });
         update();
         menu->popup(mapToGlobal(QPoint(r.left(), r.bottom() + 1)));
+    }
+
+    // A menu hung under a cell: the cell stays pressed (m_menuOpenId) until
+    // the menu hides, and the menu frees itself then — every dropdown the
+    // bar owns is built per open, since what it lists changes underneath.
+    void popupUnderCell(QMenu* menu, const QString& cellId, const QRect& cell) {
+        m_menuOpenId = cellId;
+        connect(menu, &QMenu::aboutToHide, this, [this, menu, cellId] {
+            if (m_menuOpenId == cellId) m_menuOpenId.clear();
+            update();
+            menu->deleteLater();
+        });
+        update();
+        menu->popup(mapToGlobal(QPoint(cell.left(), cell.bottom() + 1)));
+    }
+
+    // chev:<level>: the drillable fields of the class at crumb `level`,
+    // in memory order, the trail's hop checked. Every drillable sibling is
+    // listed — expanded or not — because a pick is a switch (collapse the
+    // current hop, open the chosen one) and not a jump between things
+    // already open. The chevron after the deepest crumb lists that class's
+    // fields with nothing checked: drill further.
+    void showSiblingMenu(int level) {
+        const QString cellId = QStringLiteral("chev:%1").arg(level);
+        const QRect r = itemRect(cellId);
+        if (r.isNull()) return;
+        const QVector<SiblingEntry> sibs = m_treeQ.siblingsOf ? m_treeQ.siblingsOf(level)
+                                                              : QVector<SiblingEntry>();
+        auto* menu = new QMenu(this);
+        menu->setObjectName(QStringLiteral("rcxAddressBarSiblingMenu"));
+        if (sibs.isEmpty()) {
+            QAction* none = menu->addAction(QStringLiteral("No classes to open here"));
+            none->setEnabled(false);
+        }
+        for (const SiblingEntry& e : sibs) {
+            QAction* a = menu->addAction(siblingActionText(e));
+            a->setCheckable(true);
+            a->setChecked(e.current);
+            a->setData(QVariant::fromValue<qulonglong>(e.id));
+            connect(a, &QAction::triggered, this, [this, level, id = e.id] {
+                if (m_cb.onSiblingPick) m_cb.onSiblingPick(level, id);
+            });
+        }
+        dismissRcxTooltip();
+        popupUnderCell(menu, cellId, r);
+    }
+
+    // root.chev: the other root classes (rootClassEntries), the one in view
+    // checked. A pick views that root — the F12 jump, trail cleared.
+    void showRootMenu() {
+        const QString cellId = QStringLiteral("root.chev");
+        const QRect r = itemRect(cellId);
+        if (r.isNull()) return;
+        const QVector<RootEntry> roots = m_treeQ.roots ? m_treeQ.roots() : QVector<RootEntry>();
+        const uint64_t current = m_state.crumbs.isEmpty() ? 0 : m_state.crumbs[0].classId;
+        auto* menu = new QMenu(this);
+        menu->setObjectName(QStringLiteral("rcxAddressBarRootMenu"));
+        if (roots.isEmpty()) {
+            QAction* none = menu->addAction(QStringLiteral("No classes"));
+            none->setEnabled(false);
+        }
+        for (const RootEntry& e : roots) {
+            QAction* a = menu->addAction(rootActionText(e));
+            a->setCheckable(true);
+            a->setChecked(e.id == current);
+            a->setData(QVariant::fromValue<qulonglong>(e.id));
+            connect(a, &QAction::triggered, this, [this, id = e.id] {
+                if (m_cb.onRootPick) m_cb.onRootPick(id);
+            });
+        }
+        dismissRcxTooltip();
+        popupUnderCell(menu, cellId, r);
+    }
+
+    // The path edit's Down: the drillable fields of the class the segments
+    // before the last dot reach (the roots when there is no dot yet),
+    // fuzzy-filtered by the partial last segment; a pick REPLACES that
+    // segment and leaves the overlay open — Enter still commits. Nothing
+    // to offer → no menu.
+    void showPathCompletionMenu() {
+        if (!m_editVisible || m_editScope != EditScope::Path) return;
+        const QString text = m_edit->text();
+        const int dot = text.lastIndexOf(QLatin1Char('.'));
+        const QString prefix  = dot < 0 ? QString() : text.left(dot);
+        const QString partial = (dot < 0 ? text : text.mid(dot + 1)).trimmed();
+        const QVector<SiblingEntry> fields = m_treeQ.fieldsAtPath ? m_treeQ.fieldsAtPath(prefix)
+                                                                  : QVector<SiblingEntry>();
+        auto* menu = new QMenu(this);
+        menu->setObjectName(QStringLiteral("rcxAddressBarPathMenu"));
+        for (const SiblingEntry& e : fields) {
+            if (!partial.isEmpty() && fuzzyScore(partial, e.field) <= 0) continue;
+            QAction* a = menu->addAction(siblingActionText(e));
+            a->setData(e.field);
+            connect(a, &QAction::triggered, this, [this, prefix, field = e.field] {
+                if (!m_editVisible || m_editScope != EditScope::Path) return;
+                m_edit->setText(prefix.isEmpty() ? field : prefix + QLatin1Char('.') + field);
+                m_edit->setFocus();
+                m_edit->deselect();
+                m_edit->end(false);
+            });
+        }
+        if (menu->actions().isEmpty()) { menu->deleteLater(); return; }
+        // The overlay is its own pressed state; no cell to hold down.
+        connect(menu, &QMenu::aboutToHide, this, [this, menu] { update(); menu->deleteLater(); });
+        menu->popup(mapToGlobal(QPoint(m_editRect.left(), height())));
     }
 
     // The places menu: Recent (the Goto dialog's list), Bookmarks (name and
@@ -1305,45 +1523,93 @@ private:
         m_edit->setStyleSheet(panelFieldInteriorQss(m_theme));
     }
 
-    // Every keystroke: the parser's verdict picks the seam colour, and a
-    // parsing formula is evaluated for the "→ 0x…" preview (the number the
-    // Goto dialog alone used to show). A refused commit is cleared by the
-    // first change — the user is answering it.
+    // Where an overlay may reach: short of the recent cell by one chevron
+    // width (so the field never touches its glyph), or the right margin
+    // when the strip is too narrow to lay `recent` out.
+    int editLimit() const {
+        const QRect recent = itemRect(QStringLiteral("recent"));
+        return recent.isNull() ? width() - kRightMargin : recent.left() - kChevW;
+    }
+
+    // Show the overlay in `scope` at `r` on `text`, all selected. What it
+    // covers runs from `coveredLeft` to the recent cell: the overlay plus
+    // the paper painted beside it, where hover goes quiet.
+    void openEdit(EditScope scope, const QRect& r, int coveredLeft, const QString& text) {
+        const QRect recent = itemRect(QStringLiteral("recent"));
+        const int stop = recent.isNull() ? width() - kRightMargin : recent.left();
+        m_editScope = scope;
+        m_editVisible = true;
+        m_relayoutDeferred = false;
+        m_commitError.clear();
+        m_editRect = r;
+        m_coveredRect = QRect(coveredLeft, kCellTop, qMax(r.width(), stop - coveredLeft), kCellH);
+        m_edit->setFont(font());
+        m_edit->setGeometry(r);
+        m_edit->setText(text);
+        m_edit->selectAll();
+        setFocusPolicy(Qt::StrongFocus);
+        m_edit->show();
+        m_edit->setFocus(Qt::OtherFocusReason);
+        // The pointer may be parked over a cell the overlay just covered.
+        m_hoverId.clear();
+        unsetCursor();
+        refreshToolTip();
+        dismissRcxTooltip();
+        update();
+    }
+
+    // Every keystroke: the scope's verdict picks the seam colour. BASE — the
+    // parser's, and a parsing formula is evaluated for the "→ 0x…" preview
+    // (the number the Goto dialog alone used to show). PATH — the
+    // resolver's, naming the segment that does not exist. A refused commit
+    // is cleared by the first change — the user is answering it.
     void onEditTextChanged() {
         if (!m_editVisible) return;
         m_commitError.clear();
         const QString text = m_edit->text().trimmed();
+        if (m_editScope == EditScope::Path) {
+            const QString why = m_treeQ.validatePath ? m_treeQ.validatePath(text) : QString();
+            m_editValid = why.isEmpty();
+            m_editPreview = why;
+            update();
+            return;
+        }
         const QString why = fmt::validateBaseAddress(text);
         m_editValid = why.isEmpty();
         if (m_editValid) {
             const QString r = m_cb.evaluate ? m_cb.evaluate(text) : QString();
-            m_editPreview = r.isEmpty() ? QString() : QStringLiteral("\u2192 ") + r;
+            m_editPreview = r.isEmpty() ? QString() : QString(QChar(0x2192)) + QLatin1Char(' ') + r;
         } else {
             m_editPreview = why;
         }
         update();
     }
 
-    void commitBaseEdit() {
+    void commitEdit() {
         const QString text = m_edit->text().trimmed();
         if (text.isEmpty()) {
-            m_commitError = QStringLiteral("empty formula");
+            m_commitError = m_editScope == EditScope::Path ? QStringLiteral("empty path")
+                                                           : QStringLiteral("empty formula");
             m_editPreview = m_commitError;
             update();
             return;
         }
-        // The controller answers through baseCommitFinished, synchronously
-        // (the signal chain is direct). With no one listening the overlay
-        // simply stays: there is nobody to accept the edit.
-        if (m_cb.onBaseCommit) m_cb.onBaseCommit(text);
+        // The controller answers through baseCommitFinished /
+        // pathCommitFinished, synchronously (the signal chain is direct).
+        // With no one listening the overlay simply stays: there is nobody
+        // to accept the edit.
+        if (m_editScope == EditScope::Path) { if (m_cb.onPathCommit) m_cb.onPathCommit(text); }
+        else                                { if (m_cb.onBaseCommit) m_cb.onBaseCommit(text); }
     }
 
-    // Close the overlay. The segment shows the state's text either way —
-    // a cancel "restores" by dropping the overlay's text, a success by the
-    // state push the rebase already delivered, applied here.
-    void endBaseEdit() {
+    // Close the overlay. The cells show the state's text either way — a
+    // cancel "restores" by dropping the overlay's text, a success by the
+    // state push the navigation already delivered, applied here.
+    void endEdit() {
         if (!m_editVisible) return;
         m_editVisible = false;      // before hide(): its FocusOut must not re-enter
+        m_editScope = EditScope::None;
+        m_coveredRect = QRect();
         m_commitError.clear();
         m_editPreview.clear();
         m_edit->hide();
@@ -1356,6 +1622,7 @@ private:
     // ── State ──
 
     Callbacks       m_cb;
+    TreeQueries     m_treeQ;       // the menus' and the path edit's window onto the tree
     AddressBarState m_state;
     Theme           m_theme;
     int             m_stateApplyCount = 0;
@@ -1366,10 +1633,14 @@ private:
     QString m_hoverId;
     QString m_pressedId;
     QString m_menuOpenId;      // cell kept pressed while its menu (or the source popup) is up
-    // The base-edit overlay. While it is visible a state push is stored but
-    // not laid out (see setState); endBaseEdit applies the deferred relayout.
+    bool    m_swallowNextPress = false;   // the press that ended an edit does nothing else
+    // The edit overlay (base or path scope). While it is visible a state
+    // push is stored but not laid out (see setState); endEdit applies the
+    // deferred relayout.
     QLineEdit* m_edit = nullptr;
     QRect      m_editRect;
+    QRect      m_coveredRect;      // overlay + the paper beside it: hover-quiet while up
+    EditScope  m_editScope = EditScope::None;
     bool       m_editVisible = false;
     bool       m_relayoutDeferred = false;
     bool       m_editValid = true;

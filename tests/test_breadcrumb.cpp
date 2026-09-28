@@ -250,6 +250,40 @@ private:
         m_ctrl->handleNodeClick(m_editor, lineOf(m_id.parent), m_id.parent, Qt::NoModifier);
         QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
     }
+    void drillOneLevel() {
+        expand(m_id.vptr);
+        m_ctrl->handleNodeClick(m_editor, lineOf(m_id.vptr), m_id.vptr, Qt::NoModifier);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+    }
+    // A second drillable field in RcxEditor (ptr2 → QWidget at +0x18), so a
+    // chevron has somewhere sideways to go. Added per test rather than to
+    // buildChain: every earlier slot was written against the shared chain.
+    uint64_t addSibling() {
+        Node n; n.kind = NodeKind::Pointer64; n.name = QStringLiteral("ptr2");
+        n.parentId = m_id.editor; n.offset = 24; n.refId = m_id.widget; n.collapsed = true;
+        const uint64_t id = m_doc->tree.nodes[m_doc->tree.addNode(n)].id;
+        m_ctrl->refresh();
+        return id;
+    }
+    // The menu a press on `cellId` opens, inspected before any event pump
+    // (the hidden desktop closes a popup at the first one).
+    QMenu* openMenuOn(AddressBar* bar, const QString& cellId, const QString& menuName) {
+        const QRect r = bar->itemRect(cellId);
+        if (r.isNull()) return nullptr;
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, r.center());
+        return visibleMenu(bar, menuName);
+    }
+    void closeMenuOn(AddressBar* bar, const QString& cellId, QMenu* menu) {
+        menu->hide();
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(cellId).center());
+        QTest::qWait(10);                                        // runs the menu's deleteLater
+    }
+    static QStringList actionData(const QMenu* menu) {
+        QStringList out;
+        for (QAction* a : menu->actions()) out << a->data().toString();
+        return out;
+    }
 
 private slots:
     void init() {
@@ -905,11 +939,10 @@ private slots:
         AddressBar* bar = m_editor->addressBar();
         const Theme& t = bar->theme();
         QSignalSpy spy(m_editor, &RcxEditor::crumbClicked);
-        // The deepest crumb is "you are here": its click fires the index
-        // past the focus path, which collapseToFocus turns into a scroll
-        // to that class's header and nothing else — no collapse, no undo
-        // entry, the trail as it was. Visually it stays inert: no hover
-        // fill, arrow cursor.
+        // The deepest crumb is "you are here": its click scrolls that
+        // class's header to the top inside the editor and nothing else —
+        // no crumbClicked, no collapse, no undo entry, the trail as it
+        // was. Visually it stays inert: no hover fill, arrow cursor.
         const QRect deep = bar->itemRect(QStringLiteral("crumb:2"));
         QVERIFY(!deep.isNull());
         const int undoBefore = m_doc->undoStack.count();
@@ -920,8 +953,7 @@ private slots:
         QVERIFY(bar->cursor().shape() == Qt::ArrowCursor);
         QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, deep.center());
         QApplication::processEvents();
-        QCOMPARE(spy.count(), 1);
-        QCOMPARE(spy.at(0).at(0).toInt(), 2);                   // n - 1
+        QCOMPARE(spy.count(), 0);
         QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
         QCOMPARE(m_doc->undoStack.count(), undoBefore);
         QCOMPARE(collapsed(m_id.vptr), vptrWas);
@@ -1669,19 +1701,27 @@ private slots:
         grabOf(bar);                                             // paints the stale cells: no crash
         // A click on a stale crumb cell is a no-op, not an out-of-range pick.
         // The press lands on the bar (StrongFocus while editing), so it is
-        // also a click-away: the overlay loses focus and the edit reverts,
-        // which applies the lone-crumb state.
+        // also a click-away: the overlay loses focus and the base edit
+        // reverts, which applies the lone-crumb state. On the thawed
+        // layout the point sits on the empty stretch — the field's own
+        // click-to-type cell — so the field re-opens there as a PATH edit
+        // (the same field, the other scope), never as a pick.
         int picked = -1;
         AddressBar::Callbacks cb;
         cb.onCrumb = [&](int i) { picked = i; };
         bar.setCallbacks(std::move(cb));
-        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("crumb:1")).center());
+        const QPoint at = bar.itemRect(QStringLiteral("crumb:1")).center();
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, at);
         QCOMPARE(picked, -1);
-        QVERIFY(!bar.isEditing());
-        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
-        QVERIFY(bar.itemRect(QStringLiteral("crumb:2")).isNull());
+        QVERIFY(!bar.isBaseEditing());
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:2")).isNull());      // the lone-crumb state applied
         QVERIFY(bar.itemRect(QStringLiteral("crumb:1")).isNull());
         QCOMPARE(bar.segments(), QStringList{ QStringLiteral("RcxEditor") });
+        QVERIFY(bar.isPathEditing());
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+        QCOMPARE(bar.itemIdAt(at), QStringLiteral("space"));            // what the press landed on
     }
 
     void testDownOpensPlacesMenuAndPickInserts() {
@@ -1905,6 +1945,471 @@ private slots:
         QVERIFY2(tip.startsWith(QStringLiteral("REECLASS.exe")), qPrintable(tip));
         QVERIFY2(!tip.contains(QStringLiteral("Plugin")), qPrintable(tip));
         QVERIFY(tip.contains(QStringLiteral("Live")));
+    }
+
+    // ── P4: sideways navigation + the path edit ──
+
+    void testChevronMenuListsSiblingsWithCurrentChecked() {
+        // chev:0 lists every drillable field of the root class in memory
+        // order — expanded or not — with the trail's hop checked; a pick
+        // asks for the switch.
+        const uint64_t ptr2 = addSibling();
+        drillOneLevel();                                        // RcxEditor.vptr › QWidgetPrivate
+        AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
+        QSignalSpy pick(m_editor, &RcxEditor::siblingPickRequested);
+        const QRect chev = bar->itemRect(QStringLiteral("chev:0"));
+        QVERIFY(!chev.isNull());
+        QMenu* menu = openMenuOn(bar, QStringLiteral("chev:0"), QStringLiteral("rcxAddressBarSiblingMenu"));
+        QVERIFY(menu);
+        const QVector<SiblingEntry> sibs = siblingFieldsOf(m_doc->tree, m_id.editor, m_id.vptr);
+        QStringList expected;
+        for (const SiblingEntry& e : sibs) expected << AddressBar::siblingActionText(e);
+        QCOMPARE(actionTexts(menu), expected);
+        QCOMPARE(expected.size(), 2);                          // vptr, ptr2 — dptr (no refId) is no hop
+        QVERIFY2(expected[0].startsWith(QStringLiteral("vptr")), qPrintable(expected[0]));
+        QVERIFY2(expected[0].contains(QStringLiteral("QWidgetPrivate")), qPrintable(expected[0]));
+        QVERIFY2(expected[1].startsWith(QStringLiteral("ptr2")), qPrintable(expected[1]));
+        QVERIFY(!expected.join('|').contains(QStringLiteral("dptr")));
+        QVERIFY(menu->actions()[0]->isCheckable());
+        QVERIFY(menu->actions()[0]->isChecked());
+        QVERIFY(!menu->actions()[1]->isChecked());
+        QVERIFY(menu->actions()[1]->isEnabled());              // collapsed siblings are not dimmed
+        // The chevron reads pressed while its menu is up (grab before the pump).
+        QImage img = bar->grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        QVERIFY2(countColour(img, devRect(img, chev), pressedFill(t)) > 0, "chevron not pressed while its menu is up");
+        menu->actions()[1]->trigger();
+        closeMenuOn(bar, QStringLiteral("chev:0"), menu);
+        QCOMPARE(pick.count(), 1);
+        QCOMPARE(pick.at(0).at(0).toInt(), 0);
+        QCOMPARE(pick.at(0).at(1).toULongLong(), (qulonglong)ptr2);
+        // …and the controller switched.
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ ptr2 }));
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.ptr2"), QStringLiteral("QWidget") }));
+        img = grabOf(*bar);
+        QVERIFY2(countColour(img, devRect(img, chev), pressedFill(t)) < 16, "chevron stayed pressed after its menu hid");
+        // The trailing chevron (after the deepest crumb) lists the deepest
+        // class's fields with nothing checked: drill further. QWidget has
+        // none in this chain, so the menu says so and offers nothing.
+        menu = openMenuOn(bar, QStringLiteral("chev:1"), QStringLiteral("rcxAddressBarSiblingMenu"));
+        QVERIFY(menu);
+        QCOMPARE(menu->actions().size(), 1);
+        QVERIFY(!menu->actions()[0]->isEnabled());
+        closeMenuOn(bar, QStringLiteral("chev:1"), menu);
+    }
+
+    void testSwitchSiblingIsOneUndoStep() {
+        const uint64_t ptr2 = addSibling();
+        drillOneLevel();
+        const int undoBefore = m_doc->undoStack.count();
+        m_ctrl->switchSibling(0, ptr2);
+        QApplication::processEvents();
+        QVERIFY(collapsed(m_id.vptr));
+        QVERIFY(!collapsed(ptr2));
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ ptr2 }));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);     // ONE entry for both halves
+        QCOMPARE(m_doc->undoStack.text(undoBefore), QStringLiteral("Switch to ptr2"));
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.ptr2"), QStringLiteral("QWidget") }));
+        QCOMPARE(m_editor->addressBar()->state().trailPath, QStringLiteral("RcxEditor.ptr2"));
+        // Choosing the hop already in the trail is a no-op: no entry.
+        m_ctrl->switchSibling(0, ptr2);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ ptr2 }));
+        // Undo reverses BOTH halves; redo re-applies both.
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QVERIFY(!collapsed(m_id.vptr));
+        QVERIFY(collapsed(ptr2));
+        m_doc->undoStack.redo();
+        QApplication::processEvents();
+        QVERIFY(collapsed(m_id.vptr));
+        QVERIFY(!collapsed(ptr2));
+        // A non-hop (no refId) and an unknown level are refused outright.
+        const int n = m_doc->undoStack.count();
+        m_ctrl->switchSibling(0, m_id.dptr);
+        m_ctrl->switchSibling(7, m_id.vptr);
+        QCOMPARE(m_doc->undoStack.count(), n);
+    }
+
+    void testSwitchSiblingAtTheEndDrillsFurther() {
+        // level == focusPath.size() appends: the deepest chevron's pick.
+        drillOneLevel();                                        // {vptr}; parent collapsed
+        const int undoBefore = m_doc->undoStack.count();
+        m_ctrl->switchSibling(1, m_id.parent);
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QVERIFY(!collapsed(m_id.vptr));                          // nothing collapsed
+        QVERIFY(!collapsed(m_id.parent));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                           QStringLiteral("QWidgetPrivate.parent"),
+                                           QStringLiteral("QWidget") }));
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QVERIFY(collapsed(m_id.parent));
+        QVERIFY(!collapsed(m_id.vptr));
+    }
+
+    void testRootChevronMenuSwitchesRoot() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QSignalSpy pick(m_editor, &RcxEditor::rootPickRequested);
+        QMenu* menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
+        QVERIFY(menu);
+        QStringList expected;
+        for (const RootEntry& r : rootClassEntries(m_doc->tree)) expected << AddressBar::rootActionText(r);
+        QCOMPARE(actionTexts(menu), expected);
+        QCOMPARE(expected, (QStringList{ QStringLiteral("struct RcxEditor"),
+                                         QStringLiteral("struct QWidgetPrivate"),
+                                         QStringLiteral("struct QWidget") }));
+        QVERIFY(menu->actions()[0]->isChecked());               // the root in view
+        QVERIFY(!menu->actions()[1]->isChecked());
+        QVERIFY(!menu->actions()[2]->isChecked());
+        menu->actions()[2]->trigger();
+        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
+        QCOMPARE(pick.count(), 1);
+        QCOMPARE(pick.at(0).at(0).toULongLong(), (qulonglong)m_id.widget);
+        QCOMPARE(m_ctrl->viewRootId(), m_id.widget);
+        QVERIFY(m_ctrl->focusPath().isEmpty());                 // a jump: fresh trail
+        QCOMPARE(segments(), QStringList{ QStringLiteral("QWidget") });
+        QCOMPARE(bar->state().trailPath, QStringLiteral("QWidget"));
+        // The new root is the checked one now.
+        menu = openMenuOn(bar, QStringLiteral("root.chev"), QStringLiteral("rcxAddressBarRootMenu"));
+        QVERIFY(menu);
+        QVERIFY(!menu->actions()[0]->isChecked());
+        QVERIFY(menu->actions()[2]->isChecked());
+        closeMenuOn(bar, QStringLiteral("root.chev"), menu);
+    }
+
+    void testSpaceClickOpensPathEditOnTheTrail() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QCOMPARE(bar->state().trailPath, QStringLiteral("RcxEditor.vptr"));
+        const QRect space = bar->itemRect(QStringLiteral("space"));
+        QVERIFY(!space.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, space.center());
+        QApplication::processEvents();
+        QVERIFY(bar->isEditing());
+        QVERIFY(bar->isPathEditing());
+        QVERIFY(!bar->isBaseEditing());
+        QCOMPARE(bar->editScope(), AddressBar::EditScope::Path);
+        QCOMPARE(bar->editText(), QStringLiteral("RcxEditor.vptr"));
+        QCOMPARE(bar->editWidget()->selectedText(), QStringLiteral("RcxEditor.vptr"));
+        QVERIFY(bar->editTextValid());
+        QCOMPARE(bar->window()->focusWidget(), bar->editWidget());
+        // Geometry: the field starts where the root crumb's label did (so
+        // the text does not jump) and reaches short of the recent cell;
+        // what it covers starts at the base's right edge.
+        const QRect base = bar->itemRect(QStringLiteral("base"));
+        const QRect recent = bar->itemRect(QStringLiteral("recent"));
+        QCOMPARE(bar->editRect().left(), base.right() + 1 + AddressBar::kCrumbPad - 2);
+        QVERIFY(bar->editRect().right() < recent.left());
+        QVERIFY(bar->editRect().width() >= AddressBar::kEditMinW);
+        QCOMPARE(bar->editRect(), bar->editWidget()->geometry());
+        QCOMPARE(bar->editCoveredRect().left(), base.right() + 1);
+        QCOMPARE(bar->editCoveredRect().right(), recent.left() - 1);
+        // Enter on a deeper path → pathCommitRequested → the controller
+        // navigates, the overlay closes, focus returns to the document.
+        QSignalSpy commit(m_editor, &RcxEditor::pathCommitRequested);
+        const int undoBefore = m_doc->undoStack.count();
+        bar->editWidget()->setText(QStringLiteral("RcxEditor.vptr.parent"));
+        QVERIFY(bar->editTextValid());
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QCOMPARE(commit.count(), 1);
+        QCOMPARE(commit.at(0).at(0).toString(), QStringLiteral("RcxEditor.vptr.parent"));
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QVERIFY(!collapsed(m_id.vptr));
+        QVERIFY(!collapsed(m_id.parent));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(bar->focusPolicy(), Qt::NoFocus);
+        QCOMPARE(m_editor->window()->focusWidget(), m_editor->scintilla());
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                           QStringLiteral("QWidgetPrivate.parent"),
+                                           QStringLiteral("QWidget") }));
+        QCOMPARE(bar->state().trailPath, QStringLiteral("RcxEditor.vptr.parent"));
+    }
+
+    void testNavigateToDrillPathExpandsHopsUndoably() {
+        QVERIFY(collapsed(m_id.vptr));
+        QVERIFY(collapsed(m_id.parent));
+        const int undoBefore = m_doc->undoStack.count();
+        QString err;
+        QVERIFY(m_ctrl->navigateToDrillPath(QStringLiteral("RcxEditor.vptr.parent"), &err));
+        QVERIFY2(err.isEmpty(), qPrintable(err));
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QVERIFY(!collapsed(m_id.vptr));
+        QVERIFY(!collapsed(m_id.parent));
+        QCOMPARE(m_doc->undoStack.count(), undoBefore + 1);     // both expands, ONE entry
+        QCOMPARE(m_doc->undoStack.text(undoBefore), QStringLiteral("Navigate to path"));
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);            // same root: no view switch
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                           QStringLiteral("QWidgetPrivate.parent"),
+                                           QStringLiteral("QWidget") }));
+        m_doc->undoStack.undo();
+        QApplication::processEvents();
+        QVERIFY(collapsed(m_id.vptr));
+        QVERIFY(collapsed(m_id.parent));
+        QCOMPARE(segments(), QStringList{ QStringLiteral("RcxEditor") });   // the trail reconciled away
+        // A path into another root switches the view first, then drills.
+        QVERIFY(m_ctrl->navigateToDrillPath(QStringLiteral("QWidgetPrivate.parent")));
+        QApplication::processEvents();
+        QCOMPARE(m_ctrl->viewRootId(), m_id.priv);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.parent }));
+        QVERIFY(!collapsed(m_id.parent));
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("QWidgetPrivate.parent"), QStringLiteral("QWidget") }));
+        // Re-committing the trail as it stands changes nothing: no entry.
+        const int n = m_doc->undoStack.count();
+        QVERIFY(m_ctrl->navigateToDrillPath(QStringLiteral("QWidgetPrivate.parent")));
+        QCOMPARE(m_doc->undoStack.count(), n);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.parent }));
+    }
+
+    void testNavigateToUnknownSegmentIsRefused() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
+        QSignalSpy hint(m_ctrl, &RcxController::statusHint);
+        const int undoBefore = m_doc->undoStack.count();
+        const bool vptrWas = collapsed(m_id.vptr), parentWas = collapsed(m_id.parent);
+        QString err;
+        QVERIFY(!m_ctrl->navigateToDrillPath(QStringLiteral("RcxEditor.nope"), &err));
+        QVERIFY2(err.contains(QStringLiteral("'nope'")), qPrintable(err));
+        QCOMPARE(hint.count(), 1);
+        QVERIFY2(hint.at(0).at(0).toString().contains(QStringLiteral("'nope'")),
+                 qPrintable(hint.at(0).at(0).toString()));
+        QCOMPARE(collapsed(m_id.vptr), vptrWas);                // tree untouched
+        QCOMPARE(collapsed(m_id.parent), parentWas);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QCOMPARE(m_ctrl->viewRootId(), m_id.editor);
+        // Through the bar: the resolver already says no while typing (seam
+        // markerError); Enter is refused and the overlay stays open.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("space")).center());
+        QVERIFY(bar->isPathEditing());
+        bar->editWidget()->setText(QStringLiteral("RcxEditor.nope"));
+        QVERIFY(!bar->editTextValid());
+        QVERIFY2(bar->editPreviewText().contains(QStringLiteral("'nope'")), qPrintable(bar->editPreviewText()));
+        QImage img = grabOf(*bar);
+        const QRect seam = seamRowUnder(img, bar->editRect());
+        QVERIFY(countColour(img, seam, t.markerError) > seam.width() / 2);
+        QCOMPARE(countColour(img, seam, t.borderFocused), 0);
+        QTest::keyClick(bar->editWidget(), Qt::Key_Return);
+        QApplication::processEvents();
+        QVERIFY(bar->isPathEditing());                          // refused: still open
+        QCOMPARE(bar->editText(), QStringLiteral("RcxEditor.nope"));
+        QCOMPARE(hint.count(), 2);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QCOMPARE(bar->window()->focusWidget(), bar->editWidget());
+        img = grabOf(*bar);
+        QVERIFY(countColour(img, seam, t.markerError) > seam.width() / 2);
+        QCOMPARE(countColour(img, seam, t.borderFocused), 0);
+        // Fixing the text turns the seam back.
+        bar->editWidget()->setText(QStringLiteral("RcxEditor.vptr"));
+        QVERIFY(bar->editTextValid());
+        img = grabOf(*bar);
+        QVERIFY(countColour(img, seam, t.borderFocused) > seam.width() / 2);
+        QCOMPARE(countColour(img, seam, t.markerError), 0);
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QCOMPARE(m_editor->window()->focusWidget(), m_editor->scintilla());
+    }
+
+    void testDownInPathEditCompletesTheLastSegment() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("space")).center());
+        QVERIFY(bar->isPathEditing());
+        // The partial last segment filters the container's drillable fields.
+        bar->editWidget()->setText(QStringLiteral("RcxEditor.v"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        QMenu* menu = visibleMenu(bar, QStringLiteral("rcxAddressBarPathMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionData(menu), QStringList{ QStringLiteral("vptr") });   // dptr: no refId; leaf: a value
+        QVERIFY2(actionTexts(menu)[0].startsWith(QStringLiteral("vptr")), qPrintable(actionTexts(menu)[0]));
+        QVERIFY(!actionTexts(menu).join('|').contains(QStringLiteral("dptr")));
+        menu->actions()[0]->trigger();
+        menu->hide();
+        QTest::qWait(10);
+        QCOMPARE(bar->editText(), QStringLiteral("RcxEditor.vptr"));       // the segment replaced
+        QVERIFY(bar->isPathEditing());                                      // completed, not committed
+        // A trailing dot: the fields of the class the path reaches, all of them.
+        bar->editWidget()->setText(QStringLiteral("RcxEditor.vptr."));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        menu = visibleMenu(bar, QStringLiteral("rcxAddressBarPathMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionData(menu), QStringList{ QStringLiteral("parent") });
+        menu->actions()[0]->trigger();
+        menu->hide();
+        QTest::qWait(10);
+        QCOMPARE(bar->editText(), QStringLiteral("RcxEditor.vptr.parent"));
+        // No dot yet: the roots, filtered by what is typed.
+        bar->editWidget()->setText(QStringLiteral("QW"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        menu = visibleMenu(bar, QStringLiteral("rcxAddressBarPathMenu"));
+        QVERIFY(menu);
+        QCOMPARE(actionData(menu), (QStringList{ QStringLiteral("QWidgetPrivate"), QStringLiteral("QWidget") }));
+        menu->hide();
+        QTest::qWait(10);
+        // Nothing matches → no menu at all.
+        bar->editWidget()->setText(QStringLiteral("RcxEditor.zzz"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Down);
+        QVERIFY(!visibleMenu(bar, QStringLiteral("rcxAddressBarPathMenu")));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));   // nothing committed
+    }
+
+    void testAltDAndCtrlLOpenThePathEdit() {
+        drillOneLevel();
+        AddressBar* bar = m_editor->addressBar();
+        QsciScintilla* sci = m_editor->scintilla();
+        sci->setFocus();
+        QCOMPARE(m_editor->window()->focusWidget(), sci);
+        QTest::keyClick(sci, Qt::Key_D, Qt::AltModifier);
+        QVERIFY2(bar->isPathEditing(), "Alt+D did not open the path edit");
+        QCOMPARE(bar->editText(), QStringLiteral("RcxEditor.vptr"));
+        QCOMPARE(bar->window()->focusWidget(), bar->editWidget());
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(m_editor->window()->focusWidget(), sci);
+        QTest::keyClick(sci, Qt::Key_L, Qt::ControlModifier);
+        QVERIFY2(bar->isPathEditing(), "Ctrl+L did not open the path edit");
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        QCOMPARE(m_editor->window()->focusWidget(), sci);
+        // Plain D and plain L stay the document's: no edit opens.
+        QTest::keyClick(sci, Qt::Key_D);
+        QTest::keyClick(sci, Qt::Key_L);
+        QVERIFY(!bar->isEditing());
+        // One overlay: Alt+D over an open base edit swaps the scope.
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, bar->itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar->isBaseEditing());
+        bar->beginPathEdit();
+        QVERIFY(bar->isPathEditing());
+        QCOMPARE(bar->editText(), QStringLiteral("RcxEditor.vptr"));
+        QCOMPARE(bar->findChildren<QLineEdit*>().size(), 1);
+        bar->beginBaseEdit();
+        QVERIFY(bar->isBaseEditing());
+        QCOMPARE(bar->editText(), QStringLiteral("0x0"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+    }
+
+    void testDeepestCrumbClickScrollsWithoutMutating() {
+        // A short pane, so the document is taller than the viewport and a
+        // scroll can land the deepest hop's row at the top.
+        m_splitter->resize(800, 120);
+        QApplication::processEvents();
+        drillTwoLevels();                                       // RcxEditor.vptr › QWidgetPrivate.parent › QWidget
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QsciScintilla* sci = m_editor->scintilla();
+        QSignalSpy crumb(m_editor, &RcxEditor::crumbClicked);
+        QSignalSpy pick(m_editor, &RcxEditor::siblingPickRequested);
+        const int undoBefore = m_doc->undoStack.count();
+        sci->SendScintilla(QsciScintillaBase::SCI_SETFIRSTVISIBLELINE, 0UL);
+        QCOMPARE((int)sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE), 0);
+        const QRect deep = bar->itemRect(QStringLiteral("crumb:2"));
+        QVERIFY(!deep.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, deep.center());
+        QApplication::processEvents();
+        QCOMPARE(crumb.count(), 0);
+        QCOMPARE(pick.count(), 0);
+        QCOMPARE(m_doc->undoStack.count(), undoBefore);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, m_id.parent }));
+        QVERIFY(!collapsed(m_id.vptr));
+        QVERIFY(!collapsed(m_id.parent));
+        // The hop's row (the header of the class the deepest crumb names)
+        // is the first visible line — as far up as Scintilla lets a short
+        // document scroll (end-at-last-line: lines - linesOnScreen).
+        const int hopLine = lineOf(m_id.parent);
+        QVERIFY(hopLine > 0);
+        const int lines = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETLINECOUNT);
+        const int onScreen = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINESONSCREEN);
+        const int maxFirst = qMax(0, lines - onScreen);
+        QVERIFY2(maxFirst > 0, "pane not short enough to scroll — the assertion below would be vacuous");
+        const int first = (int)sci->SendScintilla(QsciScintillaBase::SCI_GETFIRSTVISIBLELINE);
+        QCOMPARE(first, qMin(hopLine, maxFirst));
+        QVERIFY(first > 0);
+    }
+
+    void testDoubleClickOnAddressSpanEditsInTheBar() {
+        // Phase-3 follow-up: the single press was redirected to the bar,
+        // a double-click still slipped into the legacy Scintilla edit.
+        QApplication::processEvents();
+        QsciScintilla* sci = m_editor->scintilla();
+        const int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)0);
+        QVERIFY(len > 0);
+        QByteArray buf(len + 1, '\0');
+        sci->SendScintilla(QsciScintillaBase::SCI_GETLINE, (unsigned long)0, (void*)buf.data());
+        QString line = QString::fromUtf8(buf.constData(), len);
+        while (line.endsWith('\n') || line.endsWith('\r')) line.chop(1);
+        const ColumnSpan as = commandRowAddrSpan(line);
+        QVERIFY2(as.valid, qPrintable(line));
+        const int col = (as.start + as.end) / 2;
+        const long pos = (long)sci->SendScintilla(QsciScintillaBase::SCI_POSITIONFROMLINE, (unsigned long)0)
+                       + line.left(col).toUtf8().size();
+        const int x = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTXFROMPOSITION, 0UL, pos);
+        const int y = (int)sci->SendScintilla(QsciScintillaBase::SCI_POINTYFROMPOSITION, 0UL, pos);
+        const int lh = (int)sci->SendScintilla(QsciScintillaBase::SCI_TEXTHEIGHT, 0UL);
+        AddressBar* bar = m_editor->addressBar();
+        QVERIFY(!bar->isEditing());
+        // The double-click event itself, as the viewport's filter sees it.
+        const QPoint at(x + 2, y + lh / 2);
+        QMouseEvent dbl(QEvent::MouseButtonDblClick, at, sci->viewport()->mapToGlobal(at),
+                        Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(sci->viewport(), &dbl);
+        QApplication::processEvents();
+        QVERIFY2(bar->isBaseEditing(), "line-0 address double-click did not open the bar's edit");
+        QVERIFY2(!m_editor->isEditing(), "a Scintilla inline edit started as well");
+        QCOMPARE(bar->editText(), QStringLiteral("0x0"));
+        QTest::keyClick(bar->editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar->isEditing());
+        QVERIFY(!m_editor->isEditing());
+    }
+
+    void testCoveredCellsGoQuietWhileEditing() {
+        // Phase-3 follow-up: the crumbs under the overlay's paper painted
+        // as nothing but still answered hover with a hand and a tooltip.
+        AddressBar bar;
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        const QRect c0 = bar.itemRect(QStringLiteral("crumb:0"));
+        const QRect recent = bar.itemRect(QStringLiteral("recent"));
+        QVERIFY(!c0.isNull());
+        hoverAt(bar, c0.center());
+        QCOMPARE(bar.cursor().shape(), Qt::PointingHandCursor);
+        QVERIFY(bar.toolTip().contains(QStringLiteral("RcxEditor.vptr")));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY(bar.isBaseEditing());
+        QVERIFY(bar.editCoveredRect().contains(c0.center()));
+        QCOMPARE(bar.editCoveredRect().right(), recent.left() - 1);
+        hoverAt(bar, c0.center());
+        QVERIFY(bar.cursor().shape() != Qt::PointingHandCursor);
+        QVERIFY2(bar.toolTip().isEmpty(), qPrintable(bar.toolTip()));
+        QVERIFY(bar.itemIdAt(c0.center()).isEmpty());
+        // Past the covered range the recent cell still answers.
+        QCOMPARE(bar.itemIdAt(recent.center()), QStringLiteral("recent"));
+        hoverAt(bar, recent.center());
+        QVERIFY(!bar.toolTip().isEmpty());
+        QTest::keyClick(bar.editWidget(), Qt::Key_Escape);
+        QVERIFY(!bar.isEditing());
+        hoverAt(bar, c0.center());
+        QCOMPARE(bar.cursor().shape(), Qt::PointingHandCursor);   // back
+        QCOMPARE(bar.itemIdAt(c0.center()), QStringLiteral("crumb:0"));
+    }
+
+    void testFallbackThemeCarriesFocusGlow() {
+        // Phase-3 follow-up: without it Theme::fromJson defaulted focusGlow
+        // to borderFocused, and the stale dot wore the focus ring's colour.
+        const Theme t = address_bar_detail::fallbackTheme();
+        QCOMPARE(t.focusGlow, QColor(QStringLiteral("#E5A00D")));
+        QVERIFY(t.focusGlow != t.borderFocused);
+        QVERIFY(t.focusGlow != t.indHoverSpan);
     }
 };
 

@@ -2,6 +2,7 @@
 #include "core.h"
 #include "providerregistry.h"
 #include "themes/theme.h"
+#include "widgets/address_bar_model.h"   // AddressBarState, AddressBarTreeQueries (Core-only)
 #include <QWidget>
 #include <QSet>
 #include <QPoint>
@@ -20,8 +21,7 @@ namespace rcx {
 
 class HoverPreviewRegistry;  // src/widgets/hover_preview.h
 class HoverPreview;          // src/widgets/hover_preview.h
-class AddressBar;            // src/widgets/address_bar.h
-struct AddressBarState;      // src/widgets/address_bar_model.h
+class AddressBar;            // src/widgets/address_bar.h (the widget stays out of this header)
 
 class RcxEditor : public QWidget {
     Q_OBJECT
@@ -162,6 +162,11 @@ public:
         m_bookmarkProvider = std::move(bookmarks);
         m_moduleProvider   = std::move(modules);
     }
+    // What the bar's chevron menus and its path edit read from the tree
+    // (siblings of a crumb, the root classes, the fields a dotted path
+    // lands in, whether a path resolves). Installed by the controller;
+    // handed straight to the bar, which has no NodeTree of its own.
+    void setAddressBarTreeQueries(AddressBarTreeQueries q);
     void setProviderRef(const Provider* prov, const Provider* realProv, const NodeTree* tree) {
         m_disasmProvider = prov; m_disasmRealProv = realProv; m_disasmTree = tree;
     }
