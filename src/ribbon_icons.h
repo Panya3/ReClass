@@ -269,9 +269,16 @@ inline QPixmap addBytesIcon(int n, int logicalSize, qreal dpr, const Theme& them
             const int side = kPlus5x5.w * s;
             drawBitmap(p, (cell.width() - side) / 2, (cell.height() - side) / 2, kPlus5x5, s, ink);
         } else {
+            // RIGHT-ALIGNED, not centred. These sit in a column (+4 / +8 /
+            // +64), and centring each one in its own cell made the shorter
+            // counts wander left of the longer one. Right-aligning gives the
+            // digits a shared edge — the same reason a column of numbers is
+            // right-aligned anywhere else. `pad` keeps the block off the
+            // cell's right edge by the same 3 px a labelled icon uses.
             const QString text = ribbonBytesGlyphLabel(n, true);
             const int s = pixelLabelScale(text, cell.width(), cell.height(), dpr);
-            drawPixelLabel(p, (cell.width() - pixelLabelWidth(text) * s) / 2,
+            const int pad = 3 * k;
+            drawPixelLabel(p, cell.width() - pad - pixelLabelWidth(text) * s,
                            (cell.height() - kGlyphH * s) / 2, text, s, ink);
         }
     }
@@ -308,7 +315,9 @@ inline QPixmap insertBytesIcon(int n, int logicalSize, qreal dpr, const Theme& t
             const int s = pixelLabelScale(text, cell.width() - arrowSide - 2 * k, cell.height(), dpr);
             const int textW = pixelLabelWidth(text) * s;
             const int blockW = arrowSide + 2 * k + textW;
-            const int x0 = (cell.width() - blockW) / 2;
+            // Right-aligned like Add's, so the counts line up down the column
+            // and the hook arrows stay a fixed gap to their left.
+            const int x0 = cell.width() - 3 * k - blockW;
             drawBitmap(p, x0, (cell.height() - arrowSide) / 2, kHookArrow7x7, k, ink);
             drawPixelLabel(p, x0 + arrowSide + 2 * k, (cell.height() - kGlyphH * s) / 2, text, s, ink);
         }
