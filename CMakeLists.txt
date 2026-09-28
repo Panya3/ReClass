@@ -107,6 +107,8 @@ add_executable(REECLASS
     src/editor.cpp
     src/controller.h
     src/controller.cpp
+    src/ribbon_actions.h
+    src/ribbon_actions.cpp
     src/compose.cpp
     src/format.cpp
     src/generator.h
@@ -129,6 +131,11 @@ add_executable(REECLASS
     src/dockoverlay.h
     src/hextoolbarpopup.h
     src/hextoolbarpopup.cpp
+    src/pixelglyphs.h
+    src/ribbon_icons.h
+    src/ribbon_spec.h
+    src/ribbon.h
+    src/ribbon.cpp
     src/themes/theme.h
     src/themes/theme.cpp
     src/themes/thememanager.h
@@ -699,6 +706,18 @@ if(BUILD_TESTING)
     target_link_libraries(titlebar_render PRIVATE
         ${QT}::Widgets ${QT}::Svg)
 
+    # Offscreen render harness for the ReClassEx-style ribbon — renders both
+    # tabs at 760/1350/1920 px for a theme (dark default or a JSON path) so the
+    # panel/caption/column metrics and the pixel-glyph icons can be eyeballed.
+    #   ribbon_render <out-prefix> [themeJsonPath|themeName] [labels 0|1|2]
+    add_executable(ribbon_render EXCLUDE_FROM_ALL tools/ribbon_render.cpp
+        src/ribbon.cpp src/themes/theme.cpp src/themes/thememanager.cpp
+        src/resources.qrc)
+    target_include_directories(ribbon_render PRIVATE src)
+    target_compile_definitions(ribbon_render PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(ribbon_render PRIVATE
+        ${QT}::Widgets ${QT}::Svg)
+
     # Offscreen render harness for the RcxEditor — grabs the structure view
     # to a PNG so a multi-row byte selection (grey M_SELECTED rows + accent
     # IND_BYTE_SEL digits coexisting) can be verified deterministically, and
@@ -865,6 +884,38 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_byte_selection_controller COMMAND test_byte_selection_controller)
 
+        # ── Ribbon action wiring (RibbonActions ↔ controller selection ops) ──
+        add_executable(test_ribbon_actions tests/test_ribbon_actions.cpp
+        src/ribbon_actions.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_ribbon_actions PRIVATE src third_party/fadec)
+        target_link_libraries(test_ribbon_actions PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(test_ribbon_actions PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_ribbon_actions COMMAND test_ribbon_actions)
+
+        # -- Ribbon id parity: RibbonActions ids <-> RibbonBar spec ids + data --
+        add_executable(test_ribbon_ids tests/test_ribbon_ids.cpp
+        src/ribbon.cpp src/ribbon_actions.cpp
+        src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
+        src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
+        src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp src/resources.qrc ${WIDGET_SRCS} ${DISASM_SRCS})
+        target_include_directories(test_ribbon_ids PRIVATE src third_party/fadec)
+        target_link_libraries(test_ribbon_ids PRIVATE
+        ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg
+        QScintilla::QScintilla)
+        if(WIN32)
+            target_link_libraries(test_ribbon_ids PRIVATE dbghelp psapi ${_QT_WINEXTRAS})
+        endif()
+        add_test(NAME test_ribbon_ids COMMAND test_ribbon_ids)
+
         # ── Refresh speedups (memory-source-only optimizations) ──
         add_executable(test_refresh_speedups tests/test_refresh_speedups.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
@@ -1027,6 +1078,37 @@ if(BUILD_TESTING)
         target_include_directories(test_tab_source_icon PRIVATE src)
         target_link_libraries(test_tab_source_icon PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
         add_test(NAME test_tab_source_icon COMMAND test_tab_source_icon)
+
+        # ── Ribbon pixel-glyph icons: crispness / scale rule / family contrast ──
+        # Headless (QImage only). Loads the built-in themes straight from
+        # src/themes/defaults via RCX_SOURCE_DIR so it doesn't depend on
+        # ThemeManager's exe-dir lookup.
+        add_executable(test_pixel_glyphs tests/test_pixel_glyphs.cpp
+            src/ribbon.cpp src/themes/theme.cpp src/themes/thememanager.cpp
+            src/resources.qrc)
+        target_include_directories(test_pixel_glyphs PRIVATE src)
+        target_compile_definitions(test_pixel_glyphs PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        target_link_libraries(test_pixel_glyphs PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
+        add_test(NAME test_pixel_glyphs COMMAND test_pixel_glyphs)
+
+        # ── RibbonBar layout engine: overlap / 3-per-column / overflow / focus ──
+        add_executable(test_ribbon_layout tests/test_ribbon_layout.cpp
+            src/ribbon.cpp src/themes/theme.cpp src/themes/thememanager.cpp
+            src/resources.qrc)
+        target_include_directories(test_ribbon_layout PRIVATE src)
+        target_compile_definitions(test_ribbon_layout PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        target_link_libraries(test_ribbon_layout PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
+        add_test(NAME test_ribbon_layout COMMAND test_ribbon_layout)
+
+        # -- Ribbon in a real QMainWindow: sits between the title bar and the
+        # dock area, fills the width, and DockOverlay drop zones skip it --
+        add_executable(test_ribbon_mainwindow tests/test_ribbon_mainwindow.cpp
+            src/dockoverlay.h src/ribbon.cpp src/titlebar.cpp src/themes/theme.cpp src/themes/thememanager.cpp
+            src/resources.qrc)
+        target_include_directories(test_ribbon_mainwindow PRIVATE src)
+        target_compile_definitions(test_ribbon_mainwindow PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+        target_link_libraries(test_ribbon_mainwindow PRIVATE ${QT}::Widgets ${QT}::Svg ${QT}::Test)
+        add_test(NAME test_ribbon_mainwindow COMMAND test_ribbon_mainwindow)
 
         add_executable(test_source_provider tests/test_source_provider.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp

@@ -41,6 +41,7 @@
 #include <QMessageBox>
 #include <QSettings>
 #include <QRegularExpression>
+#include <QRandomGenerator>
 #include <QtConcurrent/QtConcurrentRun>
 #include <limits>
 #include <functional>
@@ -767,30 +768,13 @@ void RcxController::connectEditor(RcxEditor* editor) {
         showSourcePopup(editor, globalPos);
     });
 
-    // Delete key shortcut
+    // Delete key shortcut — same op as the ribbon's Selected ▸ Delete.
     connect(editor, &RcxEditor::deleteSelectedRequested,
-            this, [this]() {
-        QSet<uint64_t> ids = m_selIds;
-        QVector<int> indices;
-        for (uint64_t id : ids) {
-            int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(id));
-            if (idx >= 0) indices.append(idx);
-        }
-        if (indices.size() > 1)
-            batchRemoveNodes(indices);
-        else if (indices.size() == 1)
-            removeNode(indices.first());
-    });
+            this, [this]() { deleteSelection(); });
 
-    // Ctrl+D duplicate shortcut
+    // Ctrl+D duplicate shortcut — same op as the ribbon's Selected ▸ Duplicate.
     connect(editor, &RcxEditor::duplicateSelectedRequested,
-            this, [this]() {
-        QSet<uint64_t> ids = m_selIds;
-        for (uint64_t id : ids) {
-            int idx = m_doc->tree.indexOfId(baseNodeIdFromSelId(id));
-            if (idx >= 0) duplicateNode(idx);
-        }
-    });
+            this, [this]() { duplicateSelection(); });
 
     // Real clipboard (Ctrl+C / Ctrl+X / Ctrl+V).
     // Serialize via ClipboardCodec to "application/x-REECLASS-nodes-v1" plus a
@@ -1024,45 +1008,11 @@ void RcxController::connectEditor(RcxEditor* editor) {
     connect(editor, &RcxEditor::statusHintRequested, this,
             [this](const QString& text) { emit statusHint(text); });
 
-    // Quick type change (Space, 1-5, P, F, S, U keys)
+    // Quick type change (Space, 1-5, P, F, S, U keys) — the rule lives in
+    // applyQuickTypeChange so the ribbon Type panel shares it verbatim.
     connect(editor, &RcxEditor::quickTypeChangeRequested,
             this, [this](int nodeIdx, NodeKind targetKind) {
-        if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
-
-        // Apply to ALL selected nodes when multi-selected
-        if (m_selIds.size() > 1) {
-            QVector<int> indices;
-            for (uint64_t sid : m_selIds) {
-                uint64_t nid = baseNodeIdFromSelId(sid);
-                int ni = m_doc->tree.indexOfId(nid);
-                if (ni >= 0) indices.append(ni);
-            }
-            if (indices.size() > 1) {
-                batchChangeKind(indices, targetKind);
-                int ni = m_doc->tree.indexOfId(baseNodeIdFromSelId(*m_selIds.begin()));
-                if (ni >= 0) emit nodeSelected(ni);
-                return;
-            }
-        }
-
-        const auto& node = m_doc->tree.nodes[nodeIdx];
-        if (isHexNode(targetKind) && isHexNode(node.kind)) {
-            int curSz = sizeForKind(node.kind);
-            int tgtSz = sizeForKind(targetKind);
-            if (tgtSz < curSz) {
-                // Shrink: changeNodeKind inserts hex padding for freed bytes.
-                // These padding nodes can be joined back later (reversible cycle).
-                changeNodeKind(nodeIdx, targetKind);
-            } else if (tgtSz > curSz) {
-                // Grow: consume adjacent hex nodes to fill the target size.
-                joinHexNodes(node.id, targetKind);
-            }
-        } else {
-            changeNodeKind(nodeIdx, targetKind);
-        }
-        // Re-emit so status bar updates with new type
-        nodeIdx = m_doc->tree.indexOfId(m_doc->tree.nodes[nodeIdx].id);
-        if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
+        applyQuickTypeChange(nodeIdx, targetKind);
     });
 
     // Left/Right arrow: cycle through same-size type variants. With a
@@ -1289,74 +1239,10 @@ void RcxController::connectEditor(RcxEditor* editor) {
         refresh();
     });
 
-    // Comment edit (';' key) — respects selection
+    // Comment edit (';' key) — respects selection; shared with the ribbon's
+    // Selected ▸ Comment via commentSelection.
     connect(editor, &RcxEditor::commentEditRequested,
-            this, [this, editor]() {
-        if (!m_showComments) return;
-        QSet<uint64_t> ids = m_selIds;
-        // Strip footer/array/member bits to get real node IDs
-        QSet<uint64_t> nodeIds;
-        for (uint64_t id : ids) {
-            uint64_t nid = baseNodeIdFromSelId(id);
-            if (m_doc->tree.indexOfId(nid) >= 0)
-                nodeIds.insert(nid);
-        }
-
-        if (nodeIds.size() <= 1) {
-            // Single selection (or empty): find the selected node's first line and edit inline
-            uint64_t targetId = nodeIds.isEmpty() ? 0 : *nodeIds.begin();
-            if (targetId == 0) {
-                // Nothing selected — use cursor position
-                editor->beginInlineEdit(EditTarget::Comment);
-                return;
-            }
-            // Find the display line for this node
-            for (int i = 0; i < m_lastResult.meta.size(); i++) {
-                const auto& lm = m_lastResult.meta[i];
-                if (lm.nodeId == targetId && lm.lineKind == LineKind::Field
-                    && !lm.isContinuation && !lm.isMemberLine) {
-                    editor->beginInlineEdit(EditTarget::Comment, i);
-                    return;
-                }
-            }
-            // Fallback: try cursor position
-            editor->beginInlineEdit(EditTarget::Comment);
-        } else {
-            // Multi-selection: prompt for comment text and apply to all
-            // Gather existing comment from first selected node as default
-            QString existingComment;
-            for (uint64_t nid : nodeIds) {
-                int idx = m_doc->tree.indexOfId(nid);
-                if (idx >= 0 && !m_doc->tree.nodes[idx].comment.isEmpty()) {
-                    existingComment = m_doc->tree.nodes[idx].comment;
-                    break;
-                }
-            }
-            bool ok = false;
-            QString text = showCommentDialog(
-                qobject_cast<QWidget*>(parent()),
-                QStringLiteral("Comment %1 nodes").arg(nodeIds.size()),
-                existingComment, &ok);
-            if (!ok) return;
-            QString comment = text.trimmed();
-
-            m_suppressRefresh = true;
-            m_doc->undoStack.beginMacro(
-                QStringLiteral("Comment %1 nodes").arg(nodeIds.size()));
-            for (uint64_t nid : nodeIds) {
-                int idx = m_doc->tree.indexOfId(nid);
-                if (idx < 0) continue;
-                const Node& node = m_doc->tree.nodes[idx];
-                if (node.comment != comment) {
-                    m_doc->undoStack.push(new RcxCommand(this,
-                        cmd::ChangeComment{nid, node.comment, comment}));
-                }
-            }
-            m_doc->undoStack.endMacro();
-            m_suppressRefresh = false;
-            refresh();
-        }
-    });
+            this, [this, editor]() { commentSelection(editor); });
 
     // Footer "+1024" button
     // Footer "+1" pill / Down-at-end shortcut — append one Hex64 field
@@ -1458,58 +1344,11 @@ void RcxController::connectEditor(RcxEditor* editor) {
         emit selectionChanged(m_selIds.size());
     });
 
+    // Footer "+10h / +100h / +1000h" pills — shared with the ribbon's Add
+    // panel and the Append Bytes… dialog via appendBytes.
     connect(editor, &RcxEditor::appendBytesRequested,
             this, [this](uint64_t structId, int byteCount) {
-        int si = m_doc->tree.indexOfId(structId);
-        if (si < 0) return;
-
-        // Array: grow arrayLen by enough elements to cover `byteCount`
-        // (rounded up). Inserting raw Hex64/Hex8 children here would
-        // produce the same out-of-sync header bug as the +1 path.
-        if (m_doc->tree.nodes[si].kind == NodeKind::Array) {
-            const Node& arr = m_doc->tree.nodes[si];
-            int elemSize = qMax(1, sizeForKind(arr.elementKind));
-            int addCount = (byteCount + elemSize - 1) / elemSize;
-            if (addCount <= 0) return;
-            const uint64_t arrParent = arr.parentId;
-            // One undo step: the array growth AND the absorption of any
-            // siblings it now swallows (a union member growing makes the
-            // union span cover following fields — they become members).
-            m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-            m_doc->undoStack.push(new RcxCommand(this,
-                cmd::ChangeArrayMeta{arr.id,
-                    arr.elementKind, arr.elementKind,
-                    arr.arrayLen, arr.arrayLen + addCount}));
-            int pi = m_doc->tree.indexOfId(arrParent);
-            if (pi >= 0 && m_doc->tree.nodes[pi].isUnion())
-                absorbUnionOverlaps(arrParent);
-            m_doc->undoStack.endMacro();
-            return;
-        }
-
-        // Struct path: append raw Hex64 + Hex8 padding. If the struct
-        // is an embedded reference (refId != 0), redirect to the
-        // referenced root class so the change persists across uses.
-        uint64_t targetId = structId;
-        if (m_doc->tree.childrenOf(structId).isEmpty()
-            && m_doc->tree.nodes[si].refId != 0)
-            targetId = m_doc->tree.nodes[si].refId;
-        const bool is32 = (m_doc->tree.pointerSize < 8);
-        const NodeKind wordKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
-        const int stride = is32 ? 4 : 8;
-        int wordCount = byteCount / stride;
-        int remainBytes = byteCount % stride;
-        m_suppressRefresh = true;
-        m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-        for (int i = 0; i < wordCount; i++)
-            insertNode(targetId, -1, wordKind,
-                       QStringLiteral("field_%1").arg(i));
-        for (int i = 0; i < remainBytes; i++)
-            insertNode(targetId, -1, NodeKind::Hex8,
-                       QStringLiteral("field_%1").arg(wordCount + i));
-        m_doc->undoStack.endMacro();
-        m_suppressRefresh = false;
-        refresh();
+        appendBytes(structId, byteCount);
     });
 
     // Footer "+vf" pill on a vftable block — append a virtual function entry.
@@ -4359,6 +4198,10 @@ void RcxController::convertToTypedPointer(uint64_t nodeId) {
     const uint64_t oldRefId = m_doc->tree.nodes[ni].refId;
     const NodeKind ptrKind = nativePointerKind(m_doc->tree.pointerSize);
 
+    // Nest-safe: convertSelectionToTypedPointers wraps several of these in
+    // one outer macro, so restore the caller's suppress flag and only
+    // refresh on the top-level path.
+    const bool wasSuppressed = m_suppressRefresh;
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QStringLiteral("Change to ptr*"));
     if (m_doc->tree.nodes[ni].kind != ptrKind)
@@ -4367,8 +4210,8 @@ void RcxController::convertToTypedPointer(uint64_t nodeId) {
     m_doc->undoStack.push(new RcxCommand(this,
         cmd::ChangePointerRef{nodeId, oldRefId, newId}));
     m_doc->undoStack.endMacro();
-    m_suppressRefresh = false;
-    refresh();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
 }
 
 uint64_t RcxController::attachRttiClassToPointer(uint64_t nodeId,
@@ -5058,21 +4901,7 @@ void RcxController::appendBytesDialog(QWidget* parent, uint64_t targetId) {
     else
         byteCount = trimmed.toInt(&ok, 10);
     if (!ok || byteCount <= 0) return;
-    const bool is32 = (m_doc->tree.pointerSize < 8);
-    const NodeKind wordKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
-    const int stride = is32 ? 4 : 8;
-    int wordCount = byteCount / stride;
-    int remainBytes = byteCount % stride;
-    m_suppressRefresh = true;
-    m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
-    int idx = 0;
-    for (int i = 0; i < wordCount; i++, idx++)
-        insertNode(targetId, -1, wordKind, QStringLiteral("field_%1").arg(idx));
-    for (int i = 0; i < remainBytes; i++, idx++)
-        insertNode(targetId, -1, NodeKind::Hex8, QStringLiteral("field_%1").arg(idx));
-    m_doc->undoStack.endMacro();
-    m_suppressRefresh = false;
-    refresh();
+    appendBytes(targetId, byteCount);
 }
 
 // Helper: create a prev ← center → next button row for a context menu.
@@ -6164,13 +5993,9 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
                 convertMenu->setEnabled(false);
         }
 
-        // ── Big-endian toggle (scalar numeric kinds only) ──
+        // ── Big-endian toggle (only kinds the formatter actually swaps) ──
         {
-            bool isScalar = (node.kind >= NodeKind::Hex16 && node.kind <= NodeKind::Hex128)
-                         || (node.kind >= NodeKind::Int16 && node.kind <= NodeKind::UInt128)
-                         || node.kind == NodeKind::Float16 || node.kind == NodeKind::Float
-                         || node.kind == NodeKind::Double;
-            if (isScalar) {
+            if (isEndianSwappable(node.kind)) {
                 bool cur = node.bigEndian;
                 QAction* act = menu.addAction("Big &endian", [this, nodeId, cur]() {
                     int ni = m_doc->tree.indexOfId(nodeId);
@@ -6576,21 +6401,543 @@ void RcxController::batchChangeKind(const QVector<int>& nodeIndices, NodeKind ne
     idSet = m_doc->tree.normalizePreferDescendants(idSet);
     if (idSet.isEmpty()) return;
 
+    // Apply in ascending offset order (ties by id). Iterating the QSet
+    // directly would push the ChangeKind/pad commands in hash order — the
+    // user-visible sequence inside the macro (and the pad names) must be
+    // deterministic. Sorted from a snapshot of the indices; the loop still
+    // re-resolves each id because a shrink inserts pads and shifts indices.
+    QVector<uint64_t> ordered(idSet.begin(), idSet.end());
+    std::sort(ordered.begin(), ordered.end(), [this](uint64_t a, uint64_t b) {
+        const int ia = m_doc->tree.indexOfId(a), ib = m_doc->tree.indexOfId(b);
+        const int64_t oa = ia >= 0 ? m_doc->tree.computeOffset(ia) : 0;
+        const int64_t ob = ib >= 0 ? m_doc->tree.computeOffset(ib) : 0;
+        return oa != ob ? oa < ob : a < b;
+    });
+
     // Preserve selection across batch change so user can keep pressing ←→
     QSet<uint64_t> savedSel = m_selIds;
 
+    bool wasSuppressed = m_suppressRefresh;
     m_suppressRefresh = true;
     m_doc->undoStack.beginMacro(QString("Change type of %1 nodes").arg(idSet.size()));
-    for (uint64_t id : idSet) {
+    for (uint64_t id : ordered) {
         int idx = m_doc->tree.indexOfId(id);
         if (idx >= 0) changeNodeKind(idx, newKind);
     }
     m_doc->undoStack.endMacro();
-    m_suppressRefresh = false;
+    m_suppressRefresh = wasSuppressed;
 
     // Restore selection (node IDs are preserved across kind changes)
     m_selIds = savedSel;
-    refresh();
+    if (!m_suppressRefresh) refresh();
+}
+
+// ── Selection-level operations (ribbon / key / menu shared) ──
+
+QVector<uint64_t> RcxController::orderedSelectedIds(unsigned flags) const {
+    const auto& tree = m_doc->tree;
+    QSet<uint64_t> seen;
+    QVector<uint64_t> out;
+    for (uint64_t sid : m_selIds) {
+        const SelKind sk = selKindOf(sid);
+        if (sk == SelKind::Member) continue;
+        if (sk == SelKind::Footer && !(flags & SF_FooterAsContainer)) continue;
+        if (sk == SelKind::ArrayElem && !(flags & SF_ArrayElemAsArray)) continue;
+        const uint64_t nid = baseNodeIdFromSelId(sid);
+        const int idx = tree.indexOfId(nid);
+        if (idx < 0 || seen.contains(nid)) continue;
+        const Node& n = tree.nodes[idx];
+        if ((flags & SF_SkipRoots) && n.parentId == 0) continue;
+        if ((flags & SF_SkipContainers) && isContainerKind(n.kind)) continue;
+        seen.insert(nid);
+        out.append(nid);
+    }
+    // QSet order is hash order — sort so every consumer mutates in a
+    // deterministic, user-visible top-to-bottom sequence.
+    std::sort(out.begin(), out.end(), [&tree](uint64_t a, uint64_t b) {
+        const int64_t oa = tree.computeOffset(tree.indexOfId(a));
+        const int64_t ob = tree.computeOffset(tree.indexOfId(b));
+        return oa != ob ? oa < ob : a < b;
+    });
+    return out;
+}
+
+void RcxController::quickTypeChangeSingle(int nodeIdx, NodeKind targetKind) {
+    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+    const auto& node = m_doc->tree.nodes[nodeIdx];
+    if (isHexNode(targetKind) && isHexNode(node.kind)) {
+        int curSz = sizeForKind(node.kind);
+        int tgtSz = sizeForKind(targetKind);
+        if (tgtSz < curSz) {
+            // Shrink: changeNodeKind inserts hex padding for freed bytes.
+            // These padding nodes can be joined back later (reversible cycle).
+            changeNodeKind(nodeIdx, targetKind);
+        } else if (tgtSz > curSz) {
+            // Grow: consume adjacent hex nodes to fill the target size.
+            joinHexNodes(node.id, targetKind);
+        }
+    } else {
+        changeNodeKind(nodeIdx, targetKind);
+    }
+    // Re-emit so status bar updates with new type. A join removes nodes,
+    // so the index may have gone out of range — re-resolve by id only
+    // while it is still a valid slot.
+    if (nodeIdx >= m_doc->tree.nodes.size()) return;
+    nodeIdx = m_doc->tree.indexOfId(m_doc->tree.nodes[nodeIdx].id);
+    if (nodeIdx >= 0) emit nodeSelected(nodeIdx);
+}
+
+void RcxController::applyQuickTypeChange(int nodeIdx, NodeKind targetKind) {
+    if (nodeIdx < 0 || nodeIdx >= m_doc->tree.nodes.size()) return;
+
+    // Apply to ALL selected nodes when multi-selected
+    if (m_selIds.size() > 1) {
+        QVector<int> indices;
+        for (uint64_t sid : m_selIds) {
+            uint64_t nid = baseNodeIdFromSelId(sid);
+            int ni = m_doc->tree.indexOfId(nid);
+            if (ni >= 0) indices.append(ni);
+        }
+        if (indices.size() > 1) {
+            batchChangeKind(indices, targetKind);
+            int ni = m_doc->tree.indexOfId(baseNodeIdFromSelId(*m_selIds.begin()));
+            if (ni >= 0) emit nodeSelected(ni);
+            return;
+        }
+    }
+
+    quickTypeChangeSingle(nodeIdx, targetKind);
+}
+
+void RcxController::retypeSelection(NodeKind kind) {
+    const QVector<uint64_t> ids = orderedSelectedIds(SF_SkipRoots | SF_SkipContainers);
+    if (ids.isEmpty()) {
+        emit statusHint(QStringLiteral("Select a field to change its type"));
+        return;
+    }
+    if (ids.size() == 1) {
+        quickTypeChangeSingle(m_doc->tree.indexOfId(ids.first()), kind);
+        return;
+    }
+    QVector<int> indices;
+    for (uint64_t id : ids) {
+        int idx = m_doc->tree.indexOfId(id);
+        if (idx >= 0) indices.append(idx);
+    }
+    batchChangeKind(indices, kind);
+    int ni = m_doc->tree.indexOfId(ids.first());
+    if (ni >= 0) emit nodeSelected(ni);
+}
+
+void RcxController::appendBytes(uint64_t targetId, int byteCount) {
+    if (byteCount <= 0) return;
+    if (targetId == 0) {
+        // Ribbon / menu callers don't know the target: the viewed class,
+        // else the first root struct of the document.
+        targetId = m_viewRootId;
+        if (targetId == 0 || m_doc->tree.indexOfId(targetId) < 0) {
+            targetId = 0;
+            for (const auto& n : m_doc->tree.nodes)
+                if (n.kind == NodeKind::Struct && n.parentId == 0) { targetId = n.id; break; }
+        }
+    }
+    int si = m_doc->tree.indexOfId(targetId);
+    if (si < 0) return;
+
+    // Enums and bitfields hold MEMBERS, not raw bytes: a Hex64 child under
+    // an enum / bitfield would render as garbage and never round-trip. The
+    // footer "+1 / +10" pills grow those via the enum-member path instead.
+    auto takesMembersNotBytes = [](const Node& n) { return n.isEnum() || n.isBitfield(); };
+    auto refuse = [this](const Node& n) {
+        emit statusHint(QStringLiteral("Append: %1 takes members, not raw bytes")
+                            .arg(n.isEnum() ? QStringLiteral("an enum")
+                                            : QStringLiteral("a bitfield")));
+    };
+    if (takesMembersNotBytes(m_doc->tree.nodes[si])) { refuse(m_doc->tree.nodes[si]); return; }
+
+    // Array: grow arrayLen by enough elements to cover `byteCount`
+    // (rounded up). Inserting raw Hex64/Hex8 children here would
+    // produce the same out-of-sync header bug as the +1 path.
+    if (m_doc->tree.nodes[si].kind == NodeKind::Array) {
+        const Node& arr = m_doc->tree.nodes[si];
+        int elemSize = qMax(1, sizeForKind(arr.elementKind));
+        int addCount = (byteCount + elemSize - 1) / elemSize;
+        if (addCount <= 0) return;
+        const uint64_t arrParent = arr.parentId;
+        // One undo step: the array growth AND the absorption of any
+        // siblings it now swallows (a union member growing makes the
+        // union span cover following fields — they become members).
+        m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeArrayMeta{arr.id,
+                arr.elementKind, arr.elementKind,
+                arr.arrayLen, arr.arrayLen + addCount}));
+        int pi = m_doc->tree.indexOfId(arrParent);
+        if (pi >= 0 && m_doc->tree.nodes[pi].isUnion())
+            absorbUnionOverlaps(arrParent);
+        m_doc->undoStack.endMacro();
+        return;
+    }
+
+    // Struct path: append raw word-size + Hex8 padding. If the struct
+    // is an embedded reference (refId != 0), redirect to the
+    // referenced root class so the change persists across uses.
+    uint64_t appendTo = targetId;
+    if (m_doc->tree.childrenOf(targetId).isEmpty()
+        && m_doc->tree.nodes[si].refId != 0)
+        appendTo = m_doc->tree.nodes[si].refId;
+    {
+        // The redirect target can be an enum class too (typed enum field).
+        const int ti = m_doc->tree.indexOfId(appendTo);
+        if (ti < 0) return;
+        if (takesMembersNotBytes(m_doc->tree.nodes[ti])) { refuse(m_doc->tree.nodes[ti]); return; }
+    }
+    // 32-bit targets append Hex32 words (stride 4), 64-bit Hex64 —
+    // matches the pointer size used by the +10h / +100h footer pills.
+    const bool is32 = (m_doc->tree.pointerSize < 8);
+    const NodeKind wordKind = is32 ? NodeKind::Hex32 : NodeKind::Hex64;
+    const int stride = is32 ? 4 : 8;
+    int wordCount = byteCount / stride;
+    int remainBytes = byteCount % stride;
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Append %1 bytes").arg(byteCount));
+    for (int i = 0; i < wordCount; i++)
+        insertNode(appendTo, -1, wordKind,
+                   QStringLiteral("field_%1").arg(i));
+    for (int i = 0; i < remainBytes; i++)
+        insertNode(appendTo, -1, NodeKind::Hex8,
+                   QStringLiteral("field_%1").arg(wordCount + i));
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+}
+
+void RcxController::insertBytesAbove(uint64_t anchorNodeId, int byteCount) {
+    if (byteCount <= 0) return;
+    const int ai = m_doc->tree.indexOfId(anchorNodeId);
+    if (ai < 0) return;
+    if (m_doc->tree.nodes[ai].parentId == 0) {
+        // A root class has no siblings to shift — nothing sensible to
+        // insert "above"; the ribbon routes footer-only selections to
+        // appendBytes instead.
+        emit statusHint(QStringLiteral("Insert: select a field first"));
+        return;
+    }
+    const Node& anchor = m_doc->tree.nodes[ai];
+    const QString anchorName = anchor.name.isEmpty()
+        ? QStringLiteral("field_%1").arg(anchor.offset, 4, 16, QChar('0'))
+        : anchor.name;
+    const int hex64Count = byteCount / 8;
+    const int remainBytes = byteCount % 8;
+
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Insert %1 bytes above %2")
+                                    .arg(byteCount).arg(anchorName));
+    // Each block lands at the anchor's CURRENT offset: insertNodeAbove shifts
+    // the anchor (and everything after it) down by the block size, so the
+    // blocks come out ascending and contiguous. The anchor index is
+    // re-resolved every step because each Insert changes the node order.
+    auto insertBlock = [this, anchorNodeId](NodeKind kind) -> bool {
+        const int idx = m_doc->tree.indexOfId(anchorNodeId);
+        if (idx < 0) return false;
+        const int off = m_doc->tree.nodes[idx].offset;
+        insertNodeAbove(idx, kind,
+                        QStringLiteral("field_%1").arg(off, 4, 16, QChar('0')));
+        return true;
+    };
+    for (int i = 0; i < hex64Count; ++i)
+        if (!insertBlock(NodeKind::Hex64)) break;
+    for (int i = 0; i < remainBytes; ++i)
+        if (!insertBlock(NodeKind::Hex8)) break;
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+}
+
+void RcxController::deleteSelection() {
+    // Member rows never delete anything; an array-element row stands for
+    // its whole Array and a footer `}` row for its container — exactly what
+    // the Delete key did before the ribbon existed (it decoded every selId
+    // to its base node). The footer is the only selectable row a root class
+    // composes (its header is the command row).
+    const QVector<uint64_t> ids = orderedSelectedIds(SF_ArrayElemAsArray | SF_FooterAsContainer);
+    if (ids.isEmpty()) {
+        emit statusHint(QStringLiteral("Delete: select a field first"));
+        return;
+    }
+    // A lone selected root struct: the Delete key removed it before the
+    // ribbon existed (plain removeNode); keep that reachable but take the
+    // dedicated path, which also clears every refId that points at the
+    // class and re-targets the view root — a plain Remove would leave
+    // typed pointers dangling.
+    if (ids.size() == 1) {
+        const int idx = m_doc->tree.indexOfId(ids.first());
+        if (idx >= 0 && m_doc->tree.nodes[idx].parentId == 0) {
+            if (m_doc->tree.nodes[idx].kind == NodeKind::Struct)
+                deleteRootStruct(ids.first());
+            else
+                removeNode(idx);
+            return;
+        }
+    }
+    QVector<int> indices;
+    for (uint64_t id : ids) {
+        int idx = m_doc->tree.indexOfId(id);
+        if (idx >= 0) indices.append(idx);
+    }
+    if (indices.size() > 1)
+        batchRemoveNodes(indices);
+    else if (indices.size() == 1)
+        removeNode(indices.first());
+}
+
+void RcxController::duplicateSelection() {
+    const QVector<uint64_t> ids = orderedSelectedIds(SF_SkipRoots | SF_SkipContainers);
+    if (ids.isEmpty()) {
+        emit statusHint(QStringLiteral("Duplicate: select a field (classes and arrays can't be duplicated)"));
+        return;
+    }
+    if (ids.size() == 1) {
+        duplicateNode(m_doc->tree.indexOfId(ids.first()));
+        return;
+    }
+    // Ascending offset: each duplicate lands right after its source and
+    // shifts the rest down, so the copies interleave (a, a_copy, b, b_copy).
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Duplicate %1 nodes").arg(ids.size()));
+    for (uint64_t id : ids) {
+        int idx = m_doc->tree.indexOfId(id);
+        if (idx >= 0) duplicateNode(idx);
+    }
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+}
+
+bool RcxController::fillSelectionBytes(ByteFill fill) {
+    if (!m_doc->provider) return false;
+    if (!m_doc->provider->isWritable() || m_readOnlyOverride) {
+        emit statusHint(QStringLiteral("Target is read-only"));
+        return false;
+    }
+    auto region = regionFromCurrentSelection(primaryEditor());
+    if (!region) {
+        emit statusHint(QStringLiteral("Fill: select bytes or fields first"));
+        return false;
+    }
+    const uint64_t lo = region->first;
+    const int n = static_cast<int>(region->second - region->first);
+    if (n <= 0 || n > 65536) {
+        if (n > 65536)
+            emit statusHint(QStringLiteral("Fill: selection too large (max 64 KiB)"));
+        return false;
+    }
+    QByteArray oldBytes = m_doc->provider->isReadable(lo, n)
+        ? m_doc->provider->readBytes(lo, n)
+        : QByteArray(n, '\0');
+    QByteArray newBytes(n, fill == ByteFill::FF ? char(0xFF) : '\0');
+    if (fill == ByteFill::Random) {
+        auto* rng = QRandomGenerator::global();
+        for (int i = 0; i < n; ++i)
+            newBytes[i] = static_cast<char>(rng->bounded(256));
+    }
+    // User edit — exclude from value history (see m_userEditRanges).
+    m_userEditRanges.append({lo, lo + static_cast<uint64_t>(n)});
+    m_doc->undoStack.push(new RcxCommand(this,
+        cmd::WriteBytes{lo, oldBytes, newBytes}));
+    const char* what = fill == ByteFill::Zero ? "Zero-filled"
+                     : fill == ByteFill::FF   ? "FF-filled" : "Randomized";
+    emit statusHint(QStringLiteral("%1 %2 byte%3 at 0x%4")
+        .arg(QLatin1String(what)).arg(n).arg(n == 1 ? "" : "s").arg(lo, 0, 16));
+    return true;
+}
+
+void RcxController::toggleBigEndianSelection() {
+    // isEndianSwappable (controller.h) is the single source of truth shared
+    // with the context menu's "Big endian" item and the ribbon predicate.
+    QVector<uint64_t> ids;
+    for (uint64_t id : orderedSelectedIds(SF_SkipContainers)) {
+        int idx = m_doc->tree.indexOfId(id);
+        if (idx >= 0 && isEndianSwappable(m_doc->tree.nodes[idx].kind)) ids.append(id);
+    }
+    if (ids.isEmpty()) {
+        emit statusHint(QStringLiteral("Swap: select a 16/32/64-bit field first"));
+        return;
+    }
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    if (ids.size() > 1)
+        m_doc->undoStack.beginMacro(QStringLiteral("Toggle big endian on %1 nodes").arg(ids.size()));
+    for (uint64_t id : ids) {
+        int idx = m_doc->tree.indexOfId(id);
+        if (idx < 0) continue;
+        const bool cur = m_doc->tree.nodes[idx].bigEndian;
+        m_doc->undoStack.push(new RcxCommand(this, cmd::ToggleBigEndian{id, cur, !cur}));
+    }
+    if (ids.size() > 1)
+        m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+}
+
+bool RcxController::makeArrayFromSelection() {
+    const QVector<uint64_t> ids = orderedSelectedIds(SF_SkipRoots | SF_SkipContainers);
+    if (ids.isEmpty()) {
+        emit statusHint(QStringLiteral("Array: select a field first"));
+        return false;
+    }
+    auto& tree = m_doc->tree;
+
+    // Validate the shape: every node the same non-string kind, the same
+    // parent, and byte-contiguous in offset order (strings have a strLen
+    // footprint that sizeForKind can't express as an element).
+    const int firstIdx = tree.indexOfId(ids.first());
+    const NodeKind kind = tree.nodes[firstIdx].kind;
+    const uint64_t parentId = tree.nodes[firstIdx].parentId;
+    if (isStringKind(kind)) {
+        emit statusHint(QStringLiteral("Array: strings can't be array elements"));
+        return false;
+    }
+    int lastEnd = tree.nodes[firstIdx].offset;
+    for (uint64_t id : ids) {
+        const Node& n = tree.nodes[tree.indexOfId(id)];
+        if (n.kind != kind || n.parentId != parentId || n.offset != lastEnd) {
+            emit statusHint(QStringLiteral(
+                "Array: select one field, or contiguous fields of the same type"));
+            return false;
+        }
+        lastEnd = n.offset + n.byteSize();
+    }
+
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    if (ids.size() == 1) {
+        // One leaf → Array[1] of its own kind, same footprint.
+        m_doc->undoStack.beginMacro(QStringLiteral("Change to array"));
+    } else {
+        // N leaves → drop 2..N (raw Remove, no offset shift — the array
+        // re-occupies exactly their bytes, like joinHexNodes) and retype
+        // the first to Array[N].
+        m_doc->undoStack.beginMacro(QStringLiteral("Group %1 into array").arg(ids.size()));
+        for (int j = ids.size() - 1; j >= 1; --j) {
+            int idx = tree.indexOfId(ids[j]);
+            if (idx < 0) continue;
+            QVector<Node> subtree;
+            subtree.append(tree.nodes[idx]);
+            m_doc->undoStack.push(new RcxCommand(this,
+                cmd::Remove{ids[j], subtree, {}}));
+        }
+    }
+    int idx = tree.indexOfId(ids.first());
+    if (idx >= 0) changeNodeKind(idx, NodeKind::Array);
+    idx = tree.indexOfId(ids.first());
+    if (idx >= 0) {
+        const Node& n = tree.nodes[idx];
+        m_doc->undoStack.push(new RcxCommand(this,
+            cmd::ChangeArrayMeta{ids.first(), n.elementKind, kind,
+                                 n.arrayLen, static_cast<int>(ids.size())}));
+    }
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+    return true;
+}
+
+void RcxController::convertSelectionToTypedPointers() {
+    QVector<uint64_t> eligible;
+    for (uint64_t id : orderedSelectedIds(SF_SkipRoots | SF_SkipContainers)) {
+        const Node& n = m_doc->tree.nodes[m_doc->tree.indexOfId(id)];
+        const int sz = n.byteSize();
+        if ((sz == 4 || sz == 8) && n.refId == 0) eligible.append(id);
+    }
+    if (eligible.isEmpty()) {
+        emit statusHint(QStringLiteral("Ptr→Class: select a 4- or 8-byte field first"));
+        return;
+    }
+    if (eligible.size() == 1) {
+        convertToTypedPointer(eligible.first());
+        return;
+    }
+    const bool wasSuppressed = m_suppressRefresh;
+    m_suppressRefresh = true;
+    m_doc->undoStack.beginMacro(QStringLiteral("Change %1 fields to ptr*").arg(eligible.size()));
+    for (uint64_t id : eligible)
+        convertToTypedPointer(id);   // nest-safe: honours the suppress flag
+    m_doc->undoStack.endMacro();
+    m_suppressRefresh = wasSuppressed;
+    if (!m_suppressRefresh) refresh();
+}
+
+void RcxController::commentSelection(RcxEditor* editor) {
+    if (!m_showComments) return;
+    if (!editor) editor = primaryEditor();
+    QSet<uint64_t> ids = m_selIds;
+    // Strip footer/array/member bits to get real node IDs
+    QSet<uint64_t> nodeIds;
+    for (uint64_t id : ids) {
+        uint64_t nid = baseNodeIdFromSelId(id);
+        if (m_doc->tree.indexOfId(nid) >= 0)
+            nodeIds.insert(nid);
+    }
+
+    if (nodeIds.size() <= 1) {
+        if (!editor) return;
+        // Single selection (or empty): find the selected node's first line and edit inline
+        uint64_t targetId = nodeIds.isEmpty() ? 0 : *nodeIds.begin();
+        if (targetId == 0) {
+            // Nothing selected — use cursor position
+            editor->beginInlineEdit(EditTarget::Comment);
+            return;
+        }
+        // Find the display line for this node
+        for (int i = 0; i < m_lastResult.meta.size(); i++) {
+            const auto& lm = m_lastResult.meta[i];
+            if (lm.nodeId == targetId && lm.lineKind == LineKind::Field
+                && !lm.isContinuation && !lm.isMemberLine) {
+                editor->beginInlineEdit(EditTarget::Comment, i);
+                return;
+            }
+        }
+        // Fallback: try cursor position
+        editor->beginInlineEdit(EditTarget::Comment);
+    } else {
+        // Multi-selection: prompt for comment text and apply to all
+        // Gather existing comment from first selected node as default
+        QString existingComment;
+        for (uint64_t nid : nodeIds) {
+            int idx = m_doc->tree.indexOfId(nid);
+            if (idx >= 0 && !m_doc->tree.nodes[idx].comment.isEmpty()) {
+                existingComment = m_doc->tree.nodes[idx].comment;
+                break;
+            }
+        }
+        bool ok = false;
+        QString text = showCommentDialog(
+            qobject_cast<QWidget*>(parent()),
+            QStringLiteral("Comment %1 nodes").arg(nodeIds.size()),
+            existingComment, &ok);
+        if (!ok) return;
+        QString comment = text.trimmed();
+
+        m_suppressRefresh = true;
+        m_doc->undoStack.beginMacro(
+            QStringLiteral("Comment %1 nodes").arg(nodeIds.size()));
+        for (uint64_t nid : nodeIds) {
+            int idx = m_doc->tree.indexOfId(nid);
+            if (idx < 0) continue;
+            const Node& node = m_doc->tree.nodes[idx];
+            if (node.comment != comment) {
+                m_doc->undoStack.push(new RcxCommand(this,
+                    cmd::ChangeComment{nid, node.comment, comment}));
+            }
+        }
+        m_doc->undoStack.endMacro();
+        m_suppressRefresh = false;
+        refresh();
+    }
 }
 
 void RcxController::handleNodeClick(RcxEditor* source, int line,

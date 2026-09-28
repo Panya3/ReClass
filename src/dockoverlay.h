@@ -1,4 +1,5 @@
 #pragma once
+#include <QToolBar>
 #include "themes/theme.h"
 #include <QWidget>
 #include <QDockWidget>
@@ -79,6 +80,10 @@ public:
     }
 
     DropZone activeZone() const { return m_activeZone; }
+    // The dockable area (window minus title/menu bar, top toolbars and the
+    // status bar) -- what beginDrag() hit-tests against. Exposed for tests
+    // and the Ctrl+Click inspector.
+    QRect dropContentRect() const { return contentRect(); }
     QDockWidget* draggedDock() const { return m_draggedDock; }
     QDockWidget* hoveredDock() const { return m_hoveredDock; }
 
@@ -182,6 +187,10 @@ private:
             if (tb->isVisible()) top = qMax(top, tb->geometry().bottom() + 1);
         if (auto* mb = m_mainWindow->menuWidget())
             if (mb->isVisible()) top = qMax(top, mb->geometry().bottom() + 1);
+        // ... and any top toolbar (the ribbon host) below the menu widget.
+        for (auto* tb : m_mainWindow->findChildren<QToolBar*>())
+            if (tb->isVisible() && m_mainWindow->toolBarArea(tb) == Qt::TopToolBarArea)
+                top = qMax(top, tb->geometry().bottom() + 1);
         if (top > 0) r.setTop(top);
         // Skip past the status bar at the bottom.
         if (auto* sb = m_mainWindow->statusBar())

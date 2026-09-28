@@ -22,6 +22,26 @@ class HexToolbarPopup;
 struct TypeEntry;
 enum class TypePopupMode;
 
+// Kinds whose value the formatter byte-swaps when Node::bigEndian is set
+// (format.cpp readValueImpl): every multi-byte hex / integer / float. The
+// 8-bit kinds, Bool, pointers, strings, vectors and containers are never
+// swapped, so "Big endian" / the ribbon's Swap must not offer them. Listed
+// explicitly on purpose — a `k >= Int16 && k <= UInt128` range test
+// silently included UInt8 (the enum runs Int8..Int128, UInt8..UInt128).
+// Single source of truth for the context menu item, toggleBigEndianSelection
+// and RibbonActions' predicate.
+inline constexpr bool isEndianSwappable(NodeKind k) {
+    switch (k) {
+    case NodeKind::Hex16:   case NodeKind::Hex32:   case NodeKind::Hex64:   case NodeKind::Hex128:
+    case NodeKind::Int16:   case NodeKind::Int32:   case NodeKind::Int64:   case NodeKind::Int128:
+    case NodeKind::UInt16:  case NodeKind::UInt32:  case NodeKind::UInt64:  case NodeKind::UInt128:
+    case NodeKind::Float16: case NodeKind::Float:   case NodeKind::Double:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // ── Document ──
 
 // Autosave shadow path for a real project file. Repeated autosave rounds
@@ -311,8 +331,84 @@ public:
     void editBitfieldValue(uint64_t nodeId, int memberIdx);
     void showContextMenu(RcxEditor* editor, int line, int nodeIdx, int subLine, const QPoint& globalPos);
     void batchRemoveNodes(const QVector<int>& nodeIndices);
+    // Change the kind of every listed node in ONE undo macro, applied in
+    // ascending offset order (QSet iteration order is hash order — never
+    // let it leak into a user-visible mutation sequence). Restores m_selIds.
     void batchChangeKind(const QVector<int>& nodeIndices, NodeKind newKind);
     void deleteRootStruct(uint64_t structId);
+
+    // ── Selection-level operations ──
+    // Public entry points shared by the editor's key handlers, the ribbon
+    // (RibbonActions), menus and MCP. Each is a complete user-level op:
+    // one undo step (macro where several commands are pushed), refresh
+    // suppressed for the duration, ids re-resolved to indices inside loops
+    // (pad insertion / removal shifts indices), ordered work sorted by
+    // offset. Every method reads m_selIds through baseNodeIdFromSelId /
+    // selKindOf so footer / member / array-element rows are classified
+    // consistently.
+    //
+    // The quick-type-change rule (Space / 1-5 / P / F / S / U keys and the
+    // ribbon Type panel): multi-selection → batchChangeKind over every
+    // selected node; single hex → smaller hex → changeNodeKind (pads the
+    // freed bytes); hex → bigger hex → joinHexNodes (consumes following
+    // hex siblings); anything else → changeNodeKind. Emits nodeSelected so
+    // the status bar picks up the new type.
+    void applyQuickTypeChange(int nodeIdx, NodeKind kind);
+    // Retype the selected leaf nodes (plain rows only; footer / member /
+    // array-element rows, root structs and containers are skipped). One
+    // node → applyQuickTypeChange; several → batchChangeKind in offset order.
+    void retypeSelection(NodeKind kind);
+    // Append `byteCount` raw bytes to the end of a container: Array → grow
+    // arrayLen; embedded struct with refId → redirect to the referenced
+    // root class; Struct → byteCount/8 × Hex64 + byteCount%8 × Hex8 in one
+    // macro "Append N bytes". targetId 0 = the view root, else the first
+    // root struct. Enums and bitfields take members, not raw bytes — those
+    // targets are refused with a statusHint (the footer "+10" pill grows an
+    // enum via appendEnumMembersRequested instead). Body of the footer
+    // "+10h/+100h/+1000h" pills.
+    void appendBytes(uint64_t targetId, int byteCount);
+    // Insert `byteCount` raw bytes ABOVE `anchorNodeId` (byteCount/8 × Hex64
+    // then the remainder as Hex8, ascending, each landing at the anchor's
+    // CURRENT offset so the anchor and everything below it shift down by
+    // byteCount in total). One macro "Insert N bytes above <name>". No-op
+    // for roots (nothing to shift) and unknown ids.
+    void insertBytesAbove(uint64_t anchorNodeId, int byteCount);
+    // Delete the selected nodes. Member rows never delete anything; an
+    // array-element row stands for its whole Array and a footer `}` row for
+    // its container — a root class has no other selectable row, and the
+    // Delete key removed a root selected that way before the ribbon existed.
+    // A LONE root goes through deleteRootStruct (clears refIds that point at
+    // it, re-targets the view root); otherwise several → batchRemoveNodes
+    // (one macro), one → removeNode. Nothing deletable → statusHint.
+    void deleteSelection();
+    // Duplicate every selected leaf in ONE macro "Duplicate N nodes"
+    // (duplicateNode per node, ascending offset). Containers can't be
+    // duplicated (duplicateNode refuses them); nothing eligible → statusHint.
+    void duplicateSelection();
+    // Overwrite the bytes of the current region — the active byte selection,
+    // else the span of the selected nodes (regionFromCurrentSelection) — with
+    // a constant / random pattern via one cmd::WriteBytes (undoable; kept
+    // out of value history like every user edit). Returns false when the
+    // provider is read-only, no region is selected, or the region exceeds
+    // 64 KiB.
+    enum class ByteFill { Zero, FF, Random };
+    bool fillSelectionBytes(ByteFill fill);
+    // Flip the display-side big-endian flag of every selected scalar
+    // (Hex16+, Int16+, UInt16+, Float16/Float/Double) in one macro.
+    void toggleBigEndianSelection();
+    // Turn the selection into an Array node. One leaf → Array[1] of its
+    // kind (macro "Change to array"); N contiguous same-kind siblings →
+    // remove 2..N and retype the first to Array[N] (macro "Group N into
+    // array"). Returns false (with a statusHint) when the selection is not
+    // one of those shapes.
+    bool makeArrayFromSelection();
+    // convertToTypedPointer for every selected 4/8-byte leaf that has no
+    // refId yet — one macro "Change to ptr*" when several.
+    void convertSelectionToTypedPointers();
+    // The ';' key: edit the selected node's comment inline (single / empty
+    // selection) or prompt once and apply to all (multi-selection, one
+    // macro). No-op while comments are hidden (setShowComments(false)).
+    void commentSelection(RcxEditor* editor);
     void groupIntoUnion(const QSet<uint64_t>& nodeIds);
     void dissolveUnion(uint64_t unionId);
     // Absorb a union's siblings whose start offset now falls inside the
@@ -656,6 +752,24 @@ private:
     bool     m_cycleMacroOpen = false;
 
     void connectEditor(RcxEditor* editor);
+    // The single-node half of applyQuickTypeChange (hex shrink → pads, hex
+    // grow → joinHexNodes, else changeNodeKind; emits nodeSelected).
+    // retypeSelection calls this directly for a lone leaf so a stray footer /
+    // array-element row in m_selIds can never re-route it into the batch path.
+    void quickTypeChangeSingle(int nodeIdx, NodeKind kind);
+    // m_selIds decoded to existing base node ids, deduped, ascending by
+    // root-relative offset (ties by id). Only PLAIN rows contribute by
+    // default; SF_ArrayElemAsArray lets an array-element row stand for its
+    // Array node; SF_FooterAsContainer lets a footer `}` row stand for its
+    // container (the ONLY selectable row a root class has — its header is
+    // the command row); SF_SkipRoots drops parentId == 0 nodes;
+    // SF_SkipContainers drops Struct / Array nodes. Member rows never
+    // contribute.
+    enum SelFilter : unsigned {
+        SF_None = 0, SF_ArrayElemAsArray = 1, SF_SkipRoots = 2, SF_SkipContainers = 4,
+        SF_FooterAsContainer = 8
+    };
+    QVector<uint64_t> orderedSelectedIds(unsigned flags) const;
     // Lift doc->pendingSavedSources (populated by RcxDocument::load
     // from the .rcx's "savedSources" array) into m_savedSources and
     // auto-activate the first one. Called once from the constructor.

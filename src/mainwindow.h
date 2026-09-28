@@ -10,6 +10,9 @@
 #include "session.h"
 #include "names/name_provider.h"
 namespace rcx { class SymbolDownloader; class DockOverlay; class DockDragDetector; class RcxTooltip; class UnifiedSymbolPanel; }
+namespace rcx { class RibbonBar; class RibbonActions; }
+class QToolBar;
+class QActionGroup;
 #include <QMainWindow>
 #include <QLabel>
 #include <QSplitter>
@@ -141,6 +144,7 @@ public:
     // Test/screenshot helpers — let the headless --screenshot path reach
     // into the scanner dock so we can capture the panel for visual review.
     QDockWidget*  scannerDock()  const { return m_scannerDock; }
+    RibbonBar*    ribbon()       const { return m_ribbon; }
     ScannerPanel* scannerPanel() const { return m_scannerPanel; }
 
     // Project Lifecycle API
@@ -224,6 +228,33 @@ private:
     bool            m_presentationMode = false;
     QAction*        m_actPresentationMode = nullptr;
     QMenu*          m_sourceMenu = nullptr;
+    QMenu*          m_exportMenu = nullptr;
+
+    // ── Ribbon (ReClassEx-style Home | Modify strip above the doc tabs) ──
+    RibbonBar*      m_ribbon        = nullptr;
+    QToolBar*       m_ribbonHost    = nullptr;   // QMainWindow layout slot only
+    RibbonActions*  m_ribbonActions = nullptr;
+    QAction*        m_actShowRibbon = nullptr;
+    QActionGroup*   m_ribbonLabelGroup = nullptr;
+    // Menu actions the ribbon's Home tab reuses (captured in createMenus so
+    // the ribbon and the menus share one object -> one shortcut, no double-fire).
+    QAction*        m_actNewClass  = nullptr;
+    QAction*        m_actNewStruct = nullptr;
+    QAction*        m_actNewEnum   = nullptr;
+    QAction*        m_actOpen      = nullptr;
+    QAction*        m_actSave      = nullptr;
+    QAction*        m_actClose     = nullptr;
+    QAction*        m_actRefresh   = nullptr;
+    QAction*        m_actGoto      = nullptr;
+    QAction*        m_actBreakClass = nullptr;
+    QAction*        m_actConsole   = nullptr;
+    QAction*        m_actScanner   = nullptr;
+    QAction*        m_actSymbols   = nullptr;
+    QAction*        m_actBookmarks = nullptr;
+    QAction*        m_actRtti      = nullptr;
+    QAction*        m_actSplit     = nullptr;
+    QAction*        m_actCodeView  = nullptr;   // ribbon-only: setViewMode(VM_Rendered)
+    QAction*        m_actBothView  = nullptr;   // ribbon-only: setViewMode(VM_Both)
     QMenu*          m_recentFilesMenu = nullptr;
     QTimer*         m_autosaveTimer   = nullptr;
 
@@ -309,6 +340,8 @@ private:
     // visibilityChanged recursion when a dock is tabified on becoming visible.
     bool m_placingSidebar = false;
     void createStatusBar();
+    void createRibbon();
+    void syncRibbonController();
     void showPluginsDialog();
     void populateSourceMenu();
     void addRecentFile(const QString& path);

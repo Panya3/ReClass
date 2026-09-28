@@ -57,6 +57,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
+#include "ribbon.h"
+#include "ribbon_actions.h"
 #include <QTableWidget>
 #include <QHeaderView>
 #include <QVBoxLayout>
@@ -536,6 +538,12 @@ public:
         if (metric == PM_DockWidgetTitleMargin)
             return 0;
         if (metric == PM_DockWidgetTitleBarButtonMargin)
+            return 0;
+        // The ribbon host toolbar is a pure layout slot -- no Fusion chrome.
+        if (w && w->objectName() == QLatin1String("RibbonHost")
+            && (metric == PM_ToolBarFrameWidth || metric == PM_ToolBarItemMargin
+                || metric == PM_ToolBarItemSpacing || metric == PM_ToolBarHandleExtent
+                || metric == PM_ToolBarSeparatorExtent || metric == PM_ToolBarExtensionExtent))
             return 0;
         return QProxyStyle::pixelMetric(metric, opt, w);
     }
@@ -1181,6 +1189,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
         m_titleBar->finalizeMenuBar();
     }
     { PROFILE_SCOPE("MainWindow::createStatusBar");     createStatusBar();     }
+    { PROFILE_SCOPE("MainWindow::createRibbon");        createRibbon();        }
 
     // Autosave timer — writes a shadow copy of every modified doc that has
     // a known filePath, so a crash mid-edit doesn't lose work. Untitled docs
@@ -1366,16 +1375,16 @@ void MainWindow::applyMenuBarTitleCase(bool titleCase) {
 void MainWindow::createMenus() {
     // File
     auto* file = m_menuBar->addMenu("&File");
-    Qt5Qt6AddAction(file, "New &Class",  QKeySequence::New, QIcon(), this, &MainWindow::newClass);
-    Qt5Qt6AddAction(file, "New &Struct", QKeySequence(Qt::CTRL | Qt::Key_T), QIcon(), this, &MainWindow::newStruct);
-    Qt5Qt6AddAction(file, "New &Enum",   QKeySequence(Qt::CTRL | Qt::Key_E), QIcon(), this, &MainWindow::newEnum);
-    Qt5Qt6AddAction(file, "&Open...", QKeySequence::Open, makeIcon(":/vsicons/folder-opened.svg"), this, &MainWindow::openFile);
+    m_actNewClass = Qt5Qt6AddAction(file, "New &Class",  QKeySequence::New, QIcon(), this, &MainWindow::newClass);
+    m_actNewStruct = Qt5Qt6AddAction(file, "New &Struct", QKeySequence(Qt::CTRL | Qt::Key_T), QIcon(), this, &MainWindow::newStruct);
+    m_actNewEnum = Qt5Qt6AddAction(file, "New &Enum",   QKeySequence(Qt::CTRL | Qt::Key_E), QIcon(), this, &MainWindow::newEnum);
+    m_actOpen = Qt5Qt6AddAction(file, "&Open...", QKeySequence::Open, makeIcon(":/vsicons/folder-opened.svg"), this, &MainWindow::openFile);
     m_recentFilesMenu = file->addMenu("Recent &Files");
     updateRecentFilesMenu();
     Qt5Qt6AddAction(file, "&Welcome Screen", QKeySequence::UnknownKey,
                     makeIcon(":/vsicons/home.svg"), this, &MainWindow::showStartPage);
     file->addSeparator();
-    Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
+    m_actSave = Qt5Qt6AddAction(file, "&Save", QKeySequence::Save, makeIcon(":/vsicons/save.svg"), this, &MainWindow::saveFile);
     Qt5Qt6AddAction(file, "Save &As...", QKeySequence::SaveAs, makeIcon(":/vsicons/save-as.svg"), this, &MainWindow::saveFileAs);
     file->addSeparator();
     auto* importMenu = file->addMenu("&Import");
@@ -1383,6 +1392,7 @@ void MainWindow::createMenus() {
     Qt5Qt6AddAction(importMenu, "ReClass XML / .NET (.&rcnet)...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importReclassXml);
     Qt5Qt6AddAction(importMenu, "&PDB...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::importPdb);
     auto* exportMenu = file->addMenu("E&xport");
+    m_exportMenu = exportMenu;
     Qt5Qt6AddAction(exportMenu, "&C++ Header...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportCpp);
     Qt5Qt6AddAction(exportMenu, "&Rust Structs...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportRust);
     Qt5Qt6AddAction(exportMenu, "#&define Offsets...", QKeySequence::UnknownKey, QIcon(), this, &MainWindow::exportDefines);
@@ -1406,7 +1416,7 @@ void MainWindow::createMenus() {
         }
     }
     file->addSeparator();
-    Qt5Qt6AddAction(file, "&Close Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
+    m_actClose = Qt5Qt6AddAction(file, "&Close Project", QKeySequence(Qt::CTRL | Qt::Key_W), QIcon(), this, &MainWindow::closeFile);
     file->addSeparator();
 #ifdef _WIN32
     {
@@ -1468,7 +1478,7 @@ void MainWindow::createMenus() {
     // Break the current selection (byte range, or selected nodes) off into a
     // new embedded class — the same op as the node menu's "Break Class", but
     // reachable from the menu bar. Auto-detects bytes vs node selection.
-    Qt5Qt6AddAction(edit, "Break into &Class",
+    m_actBreakClass = Qt5Qt6AddAction(edit, "Break into &Class",
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B),
                     makeIcon(":/vsicons/symbol-structure.svg"), this, [this]() {
         auto* c = activeController();
@@ -1513,6 +1523,7 @@ void MainWindow::createMenus() {
     // is GUI-subsystem (no console by default) — see rcxSetConsoleVisible.
     {
         auto* actConsole = view->addAction(QStringLiteral("Show &Console"));
+        m_actConsole = actConsole;
         actConsole->setCheckable(true);
         actConsole->setChecked(
             QSettings("REECLASS", "REECLASS").value("showConsole", false).toBool());
@@ -1752,6 +1763,42 @@ void MainWindow::createMenus() {
                 if (pane.editor) pane.editor->setValuePopupsEnabled(checked);
     });
 
+    // ── Ribbon (ReClassEx-style Home | Modify strip above the doc tabs) ──
+    view->addSeparator();
+    m_actShowRibbon = view->addAction("&Ribbon");
+    m_actShowRibbon->setToolTip(QStringLiteral(
+        "Show the Home | Modify ribbon above the document tabs"));
+    m_actShowRibbon->setCheckable(true);
+    m_actShowRibbon->setChecked(settings.value("showRibbon", true).toBool());
+    connect(m_actShowRibbon, &QAction::triggered, this, [this](bool checked) {
+        QSettings("REECLASS", "REECLASS").setValue("showRibbon", checked);
+        if (m_ribbonHost) m_ribbonHost->setVisible(checked);
+    });
+    {
+        auto* labelsMenu = view->addMenu("Ribbon &Labels");
+        m_ribbonLabelGroup = new QActionGroup(this);
+        m_ribbonLabelGroup->setExclusive(true);
+        const int savedMode =
+            settings.value("ribbonLabels", int(RibbonBar::LabelMode::Auto)).toInt();
+        struct { const char* text; RibbonBar::LabelMode mode; } modes[] = {
+            {"&All labels", RibbonBar::LabelMode::All},
+            {"A&uto",       RibbonBar::LabelMode::Auto},
+            {"&Icons only", RibbonBar::LabelMode::IconsOnly},
+        };
+        for (const auto& m : modes) {
+            auto* a = labelsMenu->addAction(QString::fromLatin1(m.text));
+            a->setCheckable(true);
+            a->setData(int(m.mode));
+            a->setChecked(int(m.mode) == savedMode);
+            m_ribbonLabelGroup->addAction(a);
+        }
+        connect(m_ribbonLabelGroup, &QActionGroup::triggered, this, [this](QAction* a) {
+            const int mode = a->data().toInt();
+            QSettings("REECLASS", "REECLASS").setValue("ribbonLabels", mode);
+            if (m_ribbon) m_ribbon->setLabelMode(RibbonBar::LabelMode(mode));
+        });
+    }
+
     // Minimap: narrow read-only Scintilla mirror on the right of each editor.
     // Off by default — adds visual noise on short structs, but useful on
     // 10k+ line composed views (kernel PTE dumps, generated SDKs).
@@ -1775,6 +1822,7 @@ void MainWindow::createMenus() {
 
     {
         auto* actRefresh = view->addAction("&Refresh");
+        m_actRefresh = actRefresh;
         actRefresh->setShortcut(QKeySequence(Qt::Key_F5));
         connect(actRefresh, &QAction::triggered, this, [this]() {
             auto* ctrl = activeController();
@@ -1783,6 +1831,7 @@ void MainWindow::createMenus() {
     }
     {
         auto* actGoTo = view->addAction("&Go to Address...");
+        m_actGoto = actGoTo;
         actGoTo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
         connect(actGoTo, &QAction::triggered, this, &MainWindow::showGotoAddressDialog);
     }
@@ -1794,7 +1843,7 @@ void MainWindow::createMenus() {
     }
 
     view->addSeparator();
-    Qt5Qt6AddAction(view, "Split View &Below",
+    m_actSplit = Qt5Qt6AddAction(view, "Split View &Below",
                     QKeySequence(Qt::CTRL | Qt::Key_Backslash),
                     makeIcon(":/vsicons/split-vertical.svg"), this,
                     &MainWindow::splitView);
@@ -1831,6 +1880,7 @@ void MainWindow::createMenus() {
             }
         });
         view->addAction(scanAct);
+        m_actScanner = scanAct;
     }
     {
         // Symbols/Modules dock is built lazily (createSymbolsDock cost
@@ -1858,10 +1908,14 @@ void MainWindow::createMenus() {
             else m_symbolsDock->hide();
         });
         view->addAction(symAct);
+        m_actSymbols = symAct;
     }
     if (m_bookmarksDock) {
         auto* bmAct = m_bookmarksDock->toggleViewAction();
-        bmAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B));
+        m_actBookmarks = bmAct;
+        // Ctrl+Shift+B belongs to Edit > Break into Class; the same sequence here
+        // made Qt report an ambiguous shortcut and fire NEITHER.
+        bmAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_K));
         view->addAction(bmAct);
     }
 
@@ -1883,7 +1937,7 @@ void MainWindow::createMenus() {
 
     // Tools
     auto* tools = m_menuBar->addMenu("&Tools");
-    Qt5Qt6AddAction(tools, "&RTTI Browser",
+    m_actRtti = Qt5Qt6AddAction(tools, "&RTTI Browser",
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R), QIcon(), this, [this]() {
         // Drill-down for the user-selected hex/pointer field. The compose
         // pipeline already auto-detects RTTI inline as a hint; this opens
@@ -5168,16 +5222,7 @@ void MainWindow::removeNode() {
     if (!ctrl) return;
     auto* primary = activePaneEditor();
     if (primary && primary->isEditing()) return;
-    QSet<uint64_t> ids = ctrl->selectedIds();
-    QVector<int> indices;
-    for (uint64_t id : ids) {
-        int idx = ctrl->document()->tree.indexOfId(baseNodeIdFromSelId(id));
-        if (idx >= 0) indices.append(idx);
-    }
-    if (indices.size() > 1)
-        ctrl->batchRemoveNodes(indices);
-    else if (indices.size() == 1)
-        ctrl->removeNode(indices.first());
+    ctrl->deleteSelection();   // same path as the Delete key and the ribbon
 }
 
 void MainWindow::changeNodeType() {
@@ -5216,6 +5261,8 @@ void MainWindow::splitView() {
     if (tab->splitter)
         tab->splitter->setOrientation(Qt::Vertical);
     tab->panes.append(createSplitPane(*tab));
+    // The new pane's editor must feed the ribbon's inline-edit tracking too.
+    if (m_ribbonActions) m_ribbonActions->setActiveController(tab->ctrl);
 }
 
 void MainWindow::unsplitView() {
@@ -5225,6 +5272,7 @@ void MainWindow::unsplitView() {
     tab->ctrl->removeSplitEditor(pane.editor);
     pane.tabWidget->deleteLater();
     tab->activePaneIdx = qBound(0, tab->activePaneIdx, tab->panes.size() - 1);
+    if (m_ribbonActions) m_ribbonActions->setActiveController(tab->ctrl);
 }
 
 void MainWindow::previewBothSplit() {
@@ -5713,13 +5761,17 @@ void MainWindow::applyTheme(const Theme& theme) {
         "QMainWindow::separator { width: 4px; height: 4px; background: %1; }"
         "QMainWindow::separator:hover { background: %2; }"
         "QDockWidget { border: none; margin: 0px; padding: 0px; }"
-        "QDockWidget > QWidget { border: none; margin: 0px; padding: 0px; }")
+        "QDockWidget > QWidget { border: none; margin: 0px; padding: 0px; }"
+        // The ribbon host is a bare layout slot: no Fusion toolbar chrome.
+        "QToolBar#RibbonHost { border: none; margin: 0px; padding: 0px; spacing: 0px; background: transparent; }")
         .arg(theme.background.name(), theme.hover.name()));
 
     // Custom title bar — applied AFTER setStyleSheet() because the MainWindow
     // stylesheet re-resolves descendant palettes and would reset the QMenuBar palette.
     if (m_titleBar)
         m_titleBar->applyTheme(theme);
+    if (m_ribbon)
+        m_ribbon->applyTheme(theme);
 
     for (auto* tabBar : findChildren<QTabBar*>()) {
         // Only style tab bars owned directly by this QMainWindow (dock tabs),
@@ -6223,6 +6275,7 @@ void MainWindow::updateEmptyWorkspaceVisibility() {
 }
 
 void MainWindow::updateWindowTitle() {
+    syncRibbonController();
 #ifdef __APPLE__
     setWindowTitle(QStringLiteral("REECLASS"));
 #else
@@ -6242,6 +6295,117 @@ void MainWindow::updateWindowTitle() {
     // the user can see which source the next scan will run against.
     updateScannerTitle();
     updateSourceChip();
+}
+
+// ── Ribbon ──────────────────────────────────────────────────────────────
+// ReClassEx-style Home | Modify strip. The RibbonBar is one custom-painted
+// widget; the QToolBar host exists only to claim the QMainWindow layout slot
+// between the title/menu bar and the doc tabs (MenuBarStyle + the QSS rule in
+// applyTheme strip its Fusion chrome). Every button is a QAction: the Modify
+// tab + Undo/Redo come from RibbonActions (which resolves the active
+// controller at trigger time and tracks its signals for enabled-state), the
+// Home tab reuses the menu actions captured in createMenus().
+void MainWindow::createRibbon() {
+    QSettings s("REECLASS", "REECLASS");
+
+    m_ribbon = new RibbonBar(this);
+    m_ribbon->setLabelMode(RibbonBar::LabelMode(
+        s.value("ribbonLabels", int(RibbonBar::LabelMode::Auto)).toInt()));
+    m_ribbon->setCurrentTab(s.value("ribbonTab", QStringLiteral("modify")).toString());
+    m_ribbon->setMinimized(s.value("ribbonMinimized", false).toBool());
+    connect(m_ribbon, &RibbonBar::currentTabChanged, this, [](const QString& id) {
+        QSettings("REECLASS", "REECLASS").setValue("ribbonTab", id);
+    });
+    connect(m_ribbon, &RibbonBar::minimizedChanged, this, [](bool on) {
+        QSettings("REECLASS", "REECLASS").setValue("ribbonMinimized", on);
+    });
+
+    m_ribbonHost = new QToolBar(QStringLiteral("Ribbon"), this);
+    m_ribbonHost->setObjectName(QStringLiteral("RibbonHost"));
+    m_ribbonHost->setMovable(false);
+    m_ribbonHost->setFloatable(false);
+    m_ribbonHost->setAllowedAreas(Qt::TopToolBarArea);
+    m_ribbonHost->setContextMenuPolicy(Qt::PreventContextMenu);
+    m_ribbonHost->setFocusPolicy(Qt::NoFocus);
+    m_ribbonHost->addWidget(m_ribbon);
+    addToolBar(Qt::TopToolBarArea, m_ribbonHost);
+    // Qt's default createPopupMenu() would list the host's own toggle action
+    // (bypassing View > Ribbon and the showRibbon setting) - keep it out.
+    m_ribbonHost->toggleViewAction()->setVisible(false);
+    m_ribbonHost->setVisible(s.value("showRibbon", true).toBool());
+#ifdef __APPLE__
+    setUnifiedTitleAndToolBarOnMac(false);   // would swallow the ribbon into the native title bar
+#endif
+
+    m_ribbonActions = new RibbonActions(
+        [this]() -> RcxController* { return activeController(); },
+        [this]() -> RcxEditor* { return activePaneEditor(); },
+        this);
+    connect(m_ribbonActions, &RibbonActions::statusHint, this,
+            [this](const QString& text) { setAppStatus(text); });
+    for (const QString& id : m_ribbonActions->ids())
+        m_ribbon->setAction(id, m_ribbonActions->action(id));
+
+    // Home tab: same QAction objects as the menus. A missing action (e.g. the
+    // console toggle off Windows) hides its button.
+    auto bind = [this](const char* id, QAction* act) {
+        if (act) m_ribbon->setAction(QLatin1String(id), act);
+        else if (QAction* own = m_ribbon->action(QLatin1String(id))) own->setVisible(false);
+    };
+    bind("home.project.newclass",  m_actNewClass);
+    bind("home.project.open",      m_actOpen);
+    bind("home.project.save",      m_actSave);
+    bind("home.project.newstruct", m_actNewStruct);
+    bind("home.project.newenum",   m_actNewEnum);
+    bind("home.project.close",     m_actClose);
+    bind("home.process.refresh",   m_actRefresh);
+    bind("home.process.goto",      m_actGoto);
+    bind("home.code.split",        m_actSplit);
+    bind("home.tools.scanner",     m_actScanner);
+    bind("home.tools.symbols",     m_actSymbols);
+    bind("home.tools.bookmarks",   m_actBookmarks);
+    bind("home.tools.console",     m_actConsole);
+    bind("home.tools.rtti",        m_actRtti);
+
+    // Drop-downs anchored under their buttons: Attach -> Data Source menu,
+    // Generate -> Export menu.
+    auto popupUnder = [this](const char* id, QMenu* menu) {
+        if (!menu) return;
+        const QRect r = m_ribbon->itemRect(QLatin1String(id));
+        const QPoint at = r.isNull() ? QCursor::pos()
+                                     : m_ribbon->mapToGlobal(r.bottomLeft() + QPoint(0, 1));
+        menu->popup(at);
+    };
+    if (QAction* a = m_ribbon->action(QStringLiteral("home.process.attach")))
+        connect(a, &QAction::triggered, this,
+                [this, popupUnder]() { popupUnder("home.process.attach", m_sourceMenu); });
+    if (QAction* a = m_ribbon->action(QStringLiteral("home.code.generate")))
+        connect(a, &QAction::triggered, this,
+                [this, popupUnder]() { popupUnder("home.code.generate", m_exportMenu); });
+
+    // View-mode buttons have no menu equivalent today.
+    m_actCodeView = new QAction(QStringLiteral("Code"), this);
+    m_actCodeView->setToolTip(QStringLiteral("Show the generated C++ for the active class"));
+    connect(m_actCodeView, &QAction::triggered, this, [this]() { setViewMode(VM_Rendered); });
+    m_actBothView = new QAction(QStringLiteral("Both"), this);
+    m_actBothView->setToolTip(QStringLiteral("Structure and generated code side by side"));
+    connect(m_actBothView, &QAction::triggered, this, [this]() { setViewMode(VM_Both); });
+    bind("home.code.codeview", m_actCodeView);
+    bind("home.code.bothview", m_actBothView);
+
+    syncRibbonController();
+}
+
+// Point the ribbon's enabled-state tracking at the active tab's controller.
+// Reached from every tab-switch path through updateWindowTitle().
+void MainWindow::syncRibbonController() {
+    if (!m_ribbonActions) return;
+    RcxController* c = activeController();
+    if (m_ribbonActions->activeController() != c)
+        m_ribbonActions->setActiveController(c);
+    const bool hasTab = (c != nullptr);
+    if (m_actCodeView) m_actCodeView->setEnabled(hasTab);
+    if (m_actBothView) m_actBothView->setEnabled(hasTab);
 }
 
 void MainWindow::setActiveDocDock(QDockWidget* dock) {
@@ -11081,6 +11245,9 @@ static QStringList themeKeysForRegion(const QString& region) {
         {"dockTabBar",         {"background", "text", "textDim", "hover", "border", "indHoverSpan"}},
         {"statusBar",          {"background", "textDim", "textMuted", "border"}},
         {"menuBar",            {"background", "text", "hover", "border"}},
+        {"ribbon",             {"background", "text", "textDim", "hover", "selected", "border",
+                                "indHoverSpan", "markerPtr", "syntaxKeyword", "indHintGreen",
+                                "syntaxString", "syntaxType"}},
         {"scanner",            {"background", "text", "textDim", "border"}},
         {"symbols.tree",       {"background", "text", "textDim", "hover", "selected"}},
         {"mainWindow.border",  {"border", "borderFocused"}},
@@ -11347,6 +11514,20 @@ MainWindow::InspectionResult MainWindow::inspectAt(QWidget* widget, QPoint local
     }
 
     // ── Title bar ──
+    // ── Ribbon ──
+    if (m_ribbon && (widget == m_ribbon || m_ribbon->isAncestorOf(widget))) {
+        r.region = QStringLiteral("ribbon");
+        const QString item = m_ribbon->itemIdAt(
+            m_ribbon->mapFromGlobal(widget->mapToGlobal(localPos)));
+        r.description = item.isEmpty()
+            ? QStringLiteral("Ribbon (%1 tab)").arg(m_ribbon->currentTab())
+            : QStringLiteral("Ribbon button: %1").arg(item);
+        r.properties[QStringLiteral("tab")] = m_ribbon->currentTab();
+        r.properties[QStringLiteral("labelMode")] = int(m_ribbon->labelMode());
+        r.themeColors = themeColorsForKeys(themeKeysForRegion(r.region));
+        return r;
+    }
+
     if (m_titleBar && m_titleBar->isAncestorOf(widget)) {
         r.region = QStringLiteral("menuBar");
         r.description = QStringLiteral("Title bar / menu bar");
@@ -11652,6 +11833,23 @@ int main(int argc, char* argv[]) {
                         px = window.grab();
                     }
                     px.save(ssPath);
+                    // RCX_RIBBON_DEBUG=1: dump the live ribbon geometry to stderr
+                    // (chrome layout is only observable in the real window).
+                    if (qEnvironmentVariableIsSet("RCX_RIBBON_DEBUG")) {
+                        if (auto* rb = window.ribbon()) {
+                            const QRect hr = rb->parentWidget() ? rb->parentWidget()->geometry() : QRect();
+                            fprintf(stderr,
+                                    "ribbon: win=%dx%d host=%d,%d %dx%d ribbon=%d,%d %dx%d natural=%d hint=%dx%d tab=%s overflow=%s font=%s/%d dpr=%.2f\n",
+                                    window.width(), window.height(),
+                                    hr.x(), hr.y(), hr.width(), hr.height(),
+                                    rb->x(), rb->y(), rb->width(), rb->height(),
+                                    rb->naturalWidth(), rb->sizeHint().width(), rb->sizeHint().height(),
+                                    qPrintable(rb->currentTab()),
+                                    qPrintable(rb->overflowedPanelIds().join(',')),
+                                    qPrintable(rb->font().family()), rb->font().pointSize(),
+                                    rb->devicePixelRatioF());
+                        }
+                    }
                     // `--profile --screenshot`: emit the init-path timings we
                     // recorded (no-op if profiling wasn't enabled).
                     if (rcx::Profiler::instance().isEnabled())
