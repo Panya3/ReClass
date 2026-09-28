@@ -258,6 +258,10 @@ void RibbonBar::setLabelMode(LabelMode mode) {
     m_labelMode = mode;
     markLayoutDirty();
     updateGeometry();
+    // Relayout moves every item, so whatever was hovered is no longer under
+    // the cursor and its published tooltip is stale.
+    m_hoverId.clear();
+    refreshToolTip();
     update();
     emit labelModeChanged(int(mode));
 }
@@ -267,6 +271,7 @@ void RibbonBar::setCurrentTab(const QString& tabId) {
     m_currentTab = tabId;
     m_hoverId.clear();
     m_pressedId.clear();
+    refreshToolTip();   // the hovered item is gone — so is its text
     markLayoutDirty();
     updateGeometry();
     update();
@@ -758,8 +763,12 @@ void RibbonBar::updateHover(QPoint pos) {
     }
     if (id != m_hoverId) {
         m_hoverId = id;
+        // Publish the new item's text and stop. NO dismiss here: once a tip
+        // is up Qt re-arms its wake-up at ~20 ms, so dismissing on every
+        // hovered-item change strobed the tooltip as the cursor crossed a row
+        // of buttons. The bridge notices the republished text on the next
+        // MouseMove and repositions itself.
         refreshToolTip();
-        dismissRcxTooltip();
         update();
     }
 }

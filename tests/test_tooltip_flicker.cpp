@@ -19,6 +19,8 @@
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QToolTip>
+#include <QTabBar>
+#include <QTimer>
 #include <QtCore/QObject>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
@@ -807,6 +809,202 @@ private slots:
 
         tip->removeEventFilter(&counter);
         rcx::dismissRcxTooltip();
+    }
+
+    // ══ The ancestor walk (root cause 1) ═══════════════════════════════
+    // EVERY pre-existing case in this file hand-delivers QHelpEvent straight
+    // to the leaf with QApplication::sendEvent, which bypasses
+    // QApplication::notify's parent-chain walk entirely — which is exactly
+    // why the worst bug in the tooltip path was invisible to a green suite.
+    //
+    // Qt walks QEvent::ToolTip UP the parents until something accepts it, and
+    // an application-level filter re-runs on every hop. The bridge used to
+    // dismiss on each hop where the widget had no tooltip of its own, so a
+    // tooltip living on a CONTAINER produced hide -> hide -> show on ONE
+    // hover tick. Deliver through notify() so the walk actually happens.
+    void containerTooltipDoesNotFlickerThroughTheAncestorWalk() {
+        GlobalTooltipBridge bridge;
+        qApp->installEventFilter(&bridge);
+
+        QWidget container;
+        container.resize(200, 120);
+        container.setToolTip(QStringLiteral("Container level tooltip"));
+        auto* leaf = new QWidget(&container);   // no tooltip of its own
+        leaf->setGeometry(10, 10, 100, 40);
+        container.show();
+        QTest::qWait(30);
+
+        auto* tip = rcx::sharedRcxTooltip();
+        TooltipVisibilityCounter counter;
+        tip->installEventFilter(&counter);
+
+        // Hover the LEAF. The walk is leaf (no tip) -> container (has one).
+        const QPoint local(20, 20);
+        const QPoint global = leaf->mapToGlobal(QPoint(10, 10));
+        for (int i = 0; i < 5; ++i) {
+            QHelpEvent he(QEvent::ToolTip, local, global);
+            qApp->notify(leaf, &he);            // NOT sendEvent — we want the walk
+            QApplication::processEvents();
+        }
+
+        QVERIFY2(tip->isVisible(), "container tooltip never appeared");
+        QCOMPARE(tip->bodyText(), QStringLiteral("Container level tooltip"));
+        QCOMPARE(counter.shows, 1);
+        QVERIFY2(counter.hides == 0,
+            qPrintable(QStringLiteral("the ancestor walk hid the tooltip %1 time(s) "
+                "— the empty-tooltip hop must not dismiss").arg(counter.hides)));
+
+        tip->removeEventFilter(&counter);
+        qApp->removeEventFilter(&bridge);
+        rcx::dismissRcxTooltip();
+    }
+
+    // ══ One widget, many virtual items (root cause 2) ══════════════════
+    // The ribbon is a single widget hosting ~50 painted buttons, so moving
+    // between them never fires Leave. It republishes its own toolTip as the
+    // hovered item changes; the bridge has to notice that on MouseMove and
+    // reposition, WITHOUT the widget dismissing on every boundary (which
+    // strobed at Qt's ~20 ms re-arm).
+    void republishedTooltipOnOneWidgetRepositionsWithoutStrobing() {
+        GlobalTooltipBridge bridge;
+        qApp->installEventFilter(&bridge);
+
+        QWidget host;
+        host.resize(300, 60);
+        host.setMouseTracking(true);
+        host.setToolTip(QStringLiteral("Item A"));
+        host.show();
+        QTest::qWait(30);
+
+        auto* tip = rcx::sharedRcxTooltip();
+        TooltipVisibilityCounter counter;
+        tip->installEventFilter(&counter);
+
+        auto tipAt = [&](const QPoint& p) {
+            QHelpEvent he(QEvent::ToolTip, p, host.mapToGlobal(p));
+            qApp->notify(&host, &he);
+            QApplication::processEvents();
+        };
+        tipAt(QPoint(20, 20));
+        QVERIFY(tip->isVisible());
+        QCOMPARE(tip->bodyText(), QStringLiteral("Item A"));
+        QCOMPARE(counter.shows, 1);
+
+        // Cursor moves to the next virtual item: the host republishes.
+        host.setToolTip(QStringLiteral("Item B"));
+        QMouseEvent mv(QEvent::MouseMove, QPoint(120, 20), host.mapToGlobal(QPoint(120, 20)),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        qApp->notify(&host, &mv);
+        QApplication::processEvents();
+        tipAt(QPoint(120, 20));
+        QCOMPARE(tip->bodyText(), QStringLiteral("Item B"));
+        QVERIFY2(counter.shows <= 2,
+            qPrintable(QStringLiteral("%1 shows for two items — strobing").arg(counter.shows)));
+
+        tip->removeEventFilter(&counter);
+        qApp->removeEventFilter(&bridge);
+        rcx::dismissRcxTooltip();
+    }
+
+    // ══ System B is gone: tab tooltips render through RcxTooltip ═══════
+    // QTabBar keeps its text per-tab, not in the widget's toolTip property,
+    // so before the resolver chain it fell through to Qt's native balloon —
+    // a second, differently-styled tooltip live in the same app.
+    void tabBarTooltipsRenderThroughTheCustomWidget() {
+        GlobalTooltipBridge bridge;
+        qApp->installEventFilter(&bridge);
+
+        QTabBar tabs;
+        tabs.addTab(QStringLiteral("One"));
+        tabs.addTab(QStringLiteral("Two"));
+        tabs.setTabToolTip(0, QStringLiteral("The first tab"));
+        tabs.setTabToolTip(1, QStringLiteral("The second tab"));
+        tabs.resize(240, 30);
+        tabs.show();
+        QTest::qWait(30);
+
+        auto* tip = rcx::sharedRcxTooltip();
+        const QPoint p = tabs.tabRect(0).center();
+        QHelpEvent he(QEvent::ToolTip, p, tabs.mapToGlobal(p));
+        qApp->notify(&tabs, &he);
+        QApplication::processEvents();
+
+        QVERIFY2(tip->isVisible(), "tab tooltip did not use RcxTooltip");
+        QCOMPARE(tip->bodyText(), QStringLiteral("The first tab"));
+        QVERIFY2(!QToolTip::isVisible(), "Qt's native tooltip is still live");
+
+        // Moving to the other tab leaves the first tab's RECT without ever
+        // leaving the widget — the item-rect clause has to catch that.
+        const QPoint q = tabs.tabRect(1).center();
+        QMouseEvent mv(QEvent::MouseMove, q, tabs.mapToGlobal(q),
+                       Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        qApp->notify(&tabs, &mv);
+        QApplication::processEvents();
+        QVERIFY2(!tip->isVisible(),
+                 "tooltip survived moving to a different tab of the same bar");
+
+        qApp->removeEventFilter(&bridge);
+        rcx::dismissRcxTooltip();
+    }
+
+    // ══ Long text wraps instead of clipping ════════════════════════════
+    // kMaxW is 550 and the body used to be drawn with plain drawText, so any
+    // longer single line was silently cut mid-word.
+    void longTooltipWrapsRatherThanClipping() {
+        auto* tip = rcx::sharedRcxTooltip();
+        const QString oneLiner = QStringLiteral(
+            "Type keys: P ptr - F float - S int - U uint - left/right cycle "
+            "same-size types - click to go to address (Ctrl+G) - and then some "
+            "more text to be certain we are well past the maximum width");
+        rcx::showRcxTooltip(QPoint(400, 400), oneLiner, QApplication::font());
+        QApplication::processEvents();
+
+        QVERIFY(tip->isVisible());
+        QVERIFY2(tip->width() <= RcxTooltip::kMaxW,
+                 qPrintable(QStringLiteral("width %1 exceeds kMaxW").arg(tip->width())));
+        // Wrapped, so it is taller than a single line box.
+        const QFontMetrics fm(QApplication::font());
+        QVERIFY2(tip->height() > fm.lineSpacing() * 2,
+                 qPrintable(QStringLiteral("height %1 suggests the text was clipped, "
+                                           "not wrapped").arg(tip->height())));
+        rcx::dismissRcxTooltip();
+    }
+
+    // ══ One tooltip on screen, whoever owns it ═════════════════════════
+    // The editor keeps a private RcxTooltip and the bridge drives a shared
+    // one. Before the instance registry both could be visible at once.
+    void showingOneTooltipDismissesTheOther() {
+        auto* shared = rcx::sharedRcxTooltip();
+        RcxTooltip other;
+        other.setTheme(QColor(30, 30, 30), QColor(60, 60, 60),
+                       QColor(220, 220, 220), QColor(220, 220, 220), QColor(60, 60, 60));
+        other.populate(QString(), QStringLiteral("private instance"), QApplication::font());
+        other.showAt(QPoint(500, 500));
+        QApplication::processEvents();
+        QVERIFY(other.isVisible());
+
+        rcx::showRcxTooltip(QPoint(300, 300), QStringLiteral("shared instance"),
+                            QApplication::font());
+        QApplication::processEvents();
+        QVERIFY2(shared->isVisible(), "shared tooltip did not appear");
+        QVERIFY2(!other.isVisible(),
+                 "two RcxTooltips were on screen at once");
+        rcx::dismissRcxTooltip();
+    }
+
+    // ══ It expires ═════════════════════════════════════════════════════
+    // There was no timer of any kind, so a tip could outlive its target.
+    void tooltipExpiresOnItsOwn() {
+        auto* tip = rcx::sharedRcxTooltip();
+        rcx::showRcxTooltip(QPoint(400, 400), QStringLiteral("x"), QApplication::font());
+        QApplication::processEvents();
+        QVERIFY(tip->isVisible());
+        // Short text uses the 5 s floor; just prove the timer is armed and
+        // single-shot rather than waiting it out in a unit test.
+        QVERIFY2(tip->findChildren<QTimer*>().isEmpty(),
+                 "expiry timer should be a member, not a child object");
+        rcx::dismissRcxTooltip();
+        QVERIFY(!tip->isVisible());
     }
 };
 

@@ -460,9 +460,6 @@ public:
         connect(&NameRegistry::instance(), &NameRegistry::providersChanged, this,
                 &UnifiedSymbolPanel::rebuild);
 
-        setToolTip(QStringLiteral(
-            "\u2191\u2193 navigate  \u00b7  Enter activate  \u00b7  Ctrl+F filter"
-            "  \u00b7  drag a row into the editor"));
         loadPersistedState(); // [22]
         applyTheme(ThemeManager::instance().current());
         refreshSortLabels();
@@ -653,28 +650,6 @@ protected:
                     return true;
                 }
             }
-        }
-        // [29] Tooltip on hover — show full info when name is elided
-        // or for richer context (kind + size + source).
-        if (ev->type() == QEvent::ToolTip && watched == m_view) {
-            auto* he = static_cast<QHelpEvent*>(ev);
-            QModelIndex idx = m_view->indexAt(he->pos());
-            if (idx.isValid()) {
-                const auto& e = m_model->rowAt(idx.row());
-                QString tip = QStringLiteral("<b>%1</b>").arg(e.name.toHtmlEscaped());
-                if (!e.kind.isEmpty())
-                    tip += QStringLiteral("<br>kind: %1").arg(e.kind);
-                tip += QStringLiteral("<br>source: %1").arg(e.source);
-                if (e.address != 0)
-                    tip += QStringLiteral("<br>address: 0x%1").arg(e.address, 0, 16);
-                if (e.size != 0)
-                    tip += QStringLiteral("<br>size: %1 B").arg(e.size);
-                if (e.typeIndex != 0)
-                    tip += QStringLiteral("<br>typeIndex: %1").arg(e.typeIndex);
-                QToolTip::showText(he->globalPos(), tip, m_view);
-                return true;
-            }
-            QToolTip::hideText();
         }
         return QWidget::eventFilter(watched, ev);
     }

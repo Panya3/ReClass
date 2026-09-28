@@ -723,12 +723,10 @@ ScannerPanel::ScannerPanel(QWidget* parent)
     // Drag-out support — dropping onto the editor adds the address as a node.
     m_resultTable->setDragEnabled(true);
     m_resultTable->setDragDropMode(QAbstractItemView::DragOnly);
-    // [iter 69] Tooltip on the table itself advertises the (otherwise
-    // hidden) drag-to-editor affordance. Shown when the user hovers any
-    // empty area of the table — Qt routes table-level tooltips here.
-    m_resultTable->setToolTip(QStringLiteral(
-        "Double-click to edit • drag a row into the editor to add a node • "
-        "right-click for batch actions"));
+    // NO tooltip on the table. It was unreachable: eventFilter swallows
+    // QEvent::ToolTip on this table's viewport, which ends Qt's parent-chain
+    // walk before it can reach the table itself. The two edits cancelled each
+    // other out for as long as both existed.
     // Alternating row colors disabled — the banding fights the address
     // delegate's dim/bright two-tone scheme and makes the table look noisy.
     m_resultTable->setAlternatingRowColors(false);

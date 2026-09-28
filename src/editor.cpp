@@ -8298,20 +8298,15 @@ void RcxEditor::applyHoverCursor() {
                 }
                 if (!tipTitle.isEmpty()) {
                     if (!m_arrowTooltip) {
+                        // No onMouseMove hook: RcxTooltip sets
+                        // WA_TransparentForMouseEvents in its ctor, so the
+                        // callback this used to install could never fire.
                         m_arrowTooltip = new RcxTooltip(this);
-                        static_cast<RcxTooltip*>(m_arrowTooltip)->onMouseMove =
-                            [this](QMouseEvent* e) {
-                            QPoint gp = e->globalPosition().toPoint();
-                            QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
-                            m_lastHoverPos = vp;
-                            m_hoverInside = m_sci->viewport()->rect().contains(vp);
-                            applyHoverCursor();
-                        };
                     }
                     auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
                     const auto& theme = ThemeManager::instance().current();
                     tip->setTheme(theme.backgroundAlt, theme.border,
-                                  theme.text, theme.textDim, theme.border);
+                                  theme.text, theme.text, theme.border);
                     tip->populate(tipTitle, tipBody, editorFont());
                     // Anchor at center of the hovered span, bottom edge of line
                     long posA = posFromCol(m_sci, 0, span.start);
@@ -8350,20 +8345,15 @@ void RcxEditor::applyHoverCursor() {
                 if (resolvedSpanFor(line, t, span, &lineText)
                     && h.col >= span.start && h.col < span.end) {
                     if (!m_arrowTooltip) {
+                        // No onMouseMove hook: RcxTooltip sets
+                        // WA_TransparentForMouseEvents in its ctor, so the
+                        // callback this used to install could never fire.
                         m_arrowTooltip = new RcxTooltip(this);
-                        static_cast<RcxTooltip*>(m_arrowTooltip)->onMouseMove =
-                            [this](QMouseEvent* e) {
-                            QPoint gp = e->globalPosition().toPoint();
-                            QPoint vp = m_sci->viewport()->mapFromGlobal(gp);
-                            m_lastHoverPos = vp;
-                            m_hoverInside = m_sci->viewport()->rect().contains(vp);
-                            applyHoverCursor();
-                        };
                     }
                     auto* tip = static_cast<RcxTooltip*>(m_arrowTooltip);
                     const auto& theme = ThemeManager::instance().current();
                     tip->setTheme(theme.backgroundAlt, theme.border,
-                                  theme.text, theme.textDim, theme.border);
+                                  theme.text, theme.text, theme.border);
                     tip->populate(QStringLiteral("Open in new tab"),
                                   QStringLiteral("Ctrl+Click — open this type\nin a new editor tab"),
                                   editorFont());

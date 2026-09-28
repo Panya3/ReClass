@@ -5,7 +5,8 @@
 #include <QScreen>
 #include <QApplication>
 #include <QMouseEvent>
-#include <functional>
+#include <QTimer>
+#include <QList>
 #include "themes/thememanager.h"
 
 namespace rcx {
@@ -25,15 +26,6 @@ namespace rcx {
 //   tip->showAt(QPoint(midX, lineBottom));  // arrow tip at this point
 //   tip->dismiss();
 
-// Rich text span for per-segment coloring in tooltip body
-struct TipSpan {
-    QString text;
-    QColor  color;  // invalid = use default body color
-    bool    bold = false;
-    bool    keyCap = false;  // draw as outlined keyboard key
-};
-using TipLine = QVector<TipSpan>;
-
 class RcxTooltip : public QWidget {
 public:
     static constexpr int kArrowH = 8;
@@ -42,8 +34,6 @@ public:
     static constexpr int kPad    = 10;
     static constexpr int kGap    = 4;
     static constexpr int kMaxW   = 550;
-
-    std::function<void(QMouseEvent*)> onMouseMove;
 
     explicit RcxTooltip(QWidget* parent = nullptr)
         : QWidget(parent, Qt::ToolTip | Qt::FramelessWindowHint)
@@ -69,7 +59,40 @@ public:
         // its hover state.
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setMouseTracking(true);
+
+        // ONE tooltip on screen at a time, whoever owns it. The editor keeps
+        // a private instance and the bridge drives a shared one; before this
+        // registry both could be up simultaneously, because neither knew the
+        // other existed.
+        liveTips().append(this);
+
+        // Qt's tooltips self-expire; this one had no timer at all, so a tip
+        // could outlive its target (dock closed, list scrolled, window
+        // switched) and sit on screen forever. Duration scales with length
+        // the way QTipLabel's does: long text gets longer to read.
+        m_expiry.setSingleShot(true);
+        QObject::connect(&m_expiry, &QTimer::timeout, this, [this]() { dismiss(); });
     }
+
+    ~RcxTooltip() override { liveTips().removeAll(this); }
+
+    // Every RcxTooltip alive in the process, in construction order.
+    static QList<RcxTooltip*>& liveTips() {
+        static QList<RcxTooltip*> s_all;
+        return s_all;
+    }
+    // Hide every other tooltip. Called from showAt, so no call site has to
+    // remember to do it.
+    static void dismissOthers(RcxTooltip* keep) {
+        for (RcxTooltip* t : liveTips())
+            if (t != keep && t->isVisible()) t->hide();
+    }
+
+    // What is ACTUALLY on screen — the bridge's idempotence guard used to
+    // trust its own cached string, so another owner repopulating the shared
+    // instance went unnoticed and a button could show the type chooser's text.
+    QString bodyText()  const { return m_body; }
+    QString titleText() const { return m_title; }
 
     void setTheme(const QColor& bg, const QColor& border,
                   const QColor& title, const QColor& body, const QColor& sep) {
@@ -80,30 +103,11 @@ public:
     void populate(const QString& title, const QString& body, const QFont& font) {
         if (title == m_title && body == m_body && isVisible()) return;
         m_title = title; m_body = body;
-        m_lines = body.split('\n');
-        m_richLines.clear();
         m_font = font;
         m_font.setPointSizeF(font.pointSizeF() * 0.9);
         m_bold = m_font; m_bold.setBold(true);
         recalc();
     }
-
-//TODO-DELETE(RcxTooltip::populateRich)     void populateRich(const QString& title, const QVector<TipLine>& richBody, const QFont& font) {
-//        m_title = title;
-//        m_richLines = richBody;
-//        m_body.clear();
-//        m_lines.clear();
-//        // Build plain lines for width calculation
-//        for (const auto& rl : richBody) {
-//            QString plain;
-//            for (const auto& s : rl) plain += s.text;
-//            m_lines.append(plain);
-//        }
-//        m_font = font;
-//        m_font.setPointSizeF(font.pointSizeF() * 0.9);
-//        m_bold = m_font; m_bold.setBold(true);
-//        recalc();
-//    }
 
     // `anchor`: global screen point where the arrow tip touches.
     // Typically the center-bottom of the hovered span.
@@ -129,11 +133,13 @@ public:
                        w - kRadius - kArrowW/2 - 1);
         setFixedSize(w, h);
         move(x, y);
+        dismissOthers(this);
         if (!isVisible()) show();
+        m_expiry.start(expiryMs());
         update();
     }
 
-    void dismiss() { if (isVisible()) hide(); }
+    void dismiss() { m_expiry.stop(); if (isVisible()) hide(); }
 
 protected:
     void paintEvent(QPaintEvent*) override {
@@ -187,141 +193,80 @@ protected:
             cy += 1 + kGap;
         }
         p.setFont(m_font); p.setPen(m_bodyCol);
-        if (!m_richLines.isEmpty()) {
-            QFont boldBody = m_font; boldBody.setBold(true);
-            QFont keyFont = m_font;
-            // Keycap label sits at 70% of body font — smaller than the
-            // value text it sits next to. The previous 80% looked
-            // chunky against compact body interps.
-            keyFont.setPointSizeF(m_font.pointSizeF() * 0.70);
-            QFontMetrics kfm(keyFont);
-            // Tight inner padding: +4 px (was +10). Outer +2 around
-            // the cap is implicit from the line-height max() below.
-            int keyH = kfm.height() + 4;
-            int keyRowH = qMax((int)bf.lineSpacing(), keyH + 2);
-            int textRowH = bf.lineSpacing();
-            for (int li = 0; li < m_richLines.size(); li++) {
-                // Per-line height — text-only rows stay compact; rows
-                // that contain a keycap span use the taller keyRowH.
-                // Lets us stack 4 keycap rows + a text interp row
-                // without blowing every line up to keycap height.
-                bool lineHasKey = false;
-                for (const auto& s : m_richLines[li])
-                    if (s.keyCap) { lineHasKey = true; break; }
-                int lineH = lineHasKey ? keyRowH : textRowH;
-                qreal cx = kPad;
-                for (const auto& span : m_richLines[li]) {
-                    QColor col = span.color.isValid() ? span.color : m_bodyCol;
-                    if (span.keyCap) {
-                        // Draw keyboard key: rounded rect with centered symbol.
-                        // Width is uniform across the tooltip (m_maxKeyW set
-                        // by recalc) so a column of caps lines up and the
-                        // action labels that follow start at the same x.
-                        int kw = m_maxKeyW > 0 ? m_maxKeyW
-                                               : qMax(kfm.horizontalAdvance(span.text) + 8, keyH);
-                        qreal ky = cy + (lineH - keyH) / 2.0;
-                        QRectF kr(cx, ky, kw, keyH);
-                        // Subtle fill for the key face
-                        QColor keyBg = m_bg.lighter(130);
-                        p.setPen(QPen(col.darker(120), 1.0));
-                        p.setBrush(keyBg);
-                        p.drawRoundedRect(kr, 3, 3);
-                        // Key label
-                        p.setFont(keyFont);
-                        p.setPen(col);
-                        p.drawText(kr, Qt::AlignCenter, span.text);
-                        cx += kw + 4;  // gap after key
-                    } else {
-                        p.setFont(span.bold ? boldBody : m_font);
-                        p.setPen(col);
-                        QFontMetrics sfm(span.bold ? boldBody : m_font);
-                        // Vertically center text in the line
-                        qreal textY = cy + (lineH - sfm.height()) / 2.0 + sfm.ascent();
-                        p.drawText(QPointF(cx, textY), span.text);
-                        cx += sfm.horizontalAdvance(span.text);
-                    }
-                }
-                cy += lineH;
-            }
-        } else {
-            for (const auto& l : m_lines) {
-                p.drawText(QPointF(kPad, cy + bf.ascent()), l);
-                cy += bf.lineSpacing();
-            }
+        for (const auto& l : m_lines) {
+            p.drawText(QPointF(kPad, cy + bf.ascent()), l);
+            cy += bf.lineSpacing();
         }
     }
 
-    void mouseMoveEvent(QMouseEvent* e) override {
-        if (onMouseMove) onMouseMove(e); else QWidget::mouseMoveEvent(e);
+private:
+    // Mirrors QTipLabel: a base dwell plus reading time for long text.
+    int expiryMs() const {
+        const int n = m_body.size() + m_title.size();
+        return qBound(5000, 5000 + 40 * qMax(0, n - 60), 20000);
     }
 
-private:
     static QRect screenAt(const QPoint& pt) {
         auto* s = QApplication::screenAt(pt);
         return s ? s->availableGeometry() : QRect(0, 0, 1920, 1080);
     }
 
+    // Wrap one logical line to `avail` px, breaking on spaces and falling
+    // back to a hard character break for an unbroken run (a long path, a
+    // mangled symbol). Returns at least one piece so an empty line still
+    // occupies a row.
+    QStringList wrapLine(const QString& line, int avail, const QFontMetrics& fm) const {
+        QStringList out;
+        if (fm.horizontalAdvance(line) <= avail || avail <= 0) { out << line; return out; }
+        QString cur;
+        const QStringList words = line.split(QLatin1Char(' '));
+        for (const QString& w : words) {
+            const QString cand = cur.isEmpty() ? w : cur + QLatin1Char(' ') + w;
+            if (fm.horizontalAdvance(cand) <= avail) { cur = cand; continue; }
+            if (!cur.isEmpty()) { out << cur; cur.clear(); }
+            // A single word wider than the line: hard-break it.
+            QString piece = w;
+            while (fm.horizontalAdvance(piece) > avail && piece.size() > 1) {
+                int n = piece.size();
+                while (n > 1 && fm.horizontalAdvance(piece.left(n)) > avail) --n;
+                out << piece.left(n);
+                piece = piece.mid(n);
+            }
+            cur = piece;
+        }
+        if (!cur.isEmpty()) out << cur;
+        if (out.isEmpty()) out << QString();
+        return out;
+    }
+
     void recalc() {
         QFontMetrics tf(m_bold), bf(m_font);
-        QFont keyFont = m_font;
-        // Keep these in sync with the draw path above (0.70 scale,
-        // +4 inner padding). Changes here without matching draw-side
-        // changes will mis-size the tooltip rectangle.
-        keyFont.setPointSizeF(m_font.pointSizeF() * 0.70);
-        QFontMetrics kfm(keyFont);
-        int keyH = kfm.height() + 4;
-        int keyRowH = qMax((int)bf.lineSpacing(), keyH + 2);
-        int textRowH = bf.lineSpacing();
+        const int textRowH = bf.lineSpacing();
+        const int avail = kMaxW - 2 * kPad;
+
+        // WRAP, don't clip. The body used to be drawn with plain drawText at
+        // a width clamped to kMaxW, so any tooltip longer than ~550 px was
+        // silently cut mid-word — several shipped strings are well over it.
+        m_lines.clear();
+        for (const QString& raw : m_body.split(QChar::LineFeed))
+            m_lines += wrapLine(raw, avail, bf);
+
         int maxW = m_title.isEmpty() ? 0 : tf.horizontalAdvance(m_title);
-        int totalLinesH = 0;
-        // Pass 1: find the widest keycap. Every keycap in the
-        // tooltip then renders at this width so columns line up.
-        m_maxKeyW = 0;
-        for (const auto& rl : m_richLines) {
-            for (const auto& s : rl) {
-                if (!s.keyCap) continue;
-                int tw = kfm.horizontalAdvance(s.text);
-                m_maxKeyW = qMax(m_maxKeyW, qMax(tw + 8, keyH));
-            }
-        }
-        if (!m_richLines.isEmpty()) {
-            for (const auto& rl : m_richLines) {
-                int lineW = 0;
-                bool lineHasKey = false;
-                for (const auto& s : rl) {
-                    if (s.keyCap) {
-                        lineHasKey = true;
-                        lineW += m_maxKeyW + 4;
-                    } else {
-                        QFontMetrics sfm(s.bold ? tf : bf);
-                        lineW += sfm.horizontalAdvance(s.text);
-                    }
-                }
-                maxW = qMax(maxW, lineW);
-                totalLinesH += lineHasKey ? keyRowH : textRowH;
-            }
-        } else {
-            for (const auto& l : m_lines) maxW = qMax(maxW, bf.horizontalAdvance(l));
-            totalLinesH = m_lines.size() * textRowH;
-        }
+        for (const auto& l : m_lines) maxW = qMax(maxW, bf.horizontalAdvance(l));
+
         m_bw = qMin(maxW + 2 * kPad, kMaxW);
         m_bh = kPad + (m_title.isEmpty() ? 0 : tf.height() + kGap + 1 + kGap)
-             + totalLinesH + kPad;
+             + m_lines.size() * textRowH + kPad;
     }
 
     QString m_title, m_body;
     QStringList m_lines;
-    QVector<TipLine> m_richLines;
     QFont m_font, m_bold;
     QColor m_bg{30, 30, 30}, m_border{60, 60, 60};
     QColor m_titleCol{220, 220, 220}, m_bodyCol{180, 180, 180}, m_sepCol{60, 60, 60};
     bool m_up = true;
     int m_ax = 0, m_bw = 0, m_bh = 0;
-    // Widest keycap across all rich lines, computed by recalc() and
-    // applied to every keycap by the draw path so columns of caps
-    // (Ctrl+C / Ctrl+V / Del / Enter) line up and the action labels
-    // that follow them start at the same x position.
-    int m_maxKeyW = 0;
+    QTimer m_expiry;
 };
 
 // Shared process-wide tooltip. The global QEvent::ToolTip bridge (set up
@@ -346,8 +291,11 @@ inline void showRcxTooltip(const QPoint& globalAnchor,
                             const QFont& font) {
     auto* tip = sharedRcxTooltip();
     const auto& theme = ThemeManager::instance().current();
+    // Body in theme.text, not textDim: this widget replaced Qt's native
+    // tooltip, whose stylesheet used theme.text, so a dimmer body was one of
+    // the tells that made the two systems look like different widgets.
     tip->setTheme(theme.backgroundAlt, theme.border,
-                  theme.text, theme.textDim, theme.border);
+                  theme.text, theme.text, theme.border);
     tip->populate(QString(), text, font);
     tip->showAt(globalAnchor);
 }

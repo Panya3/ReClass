@@ -725,6 +725,17 @@ if(BUILD_TESTING)
     target_link_libraries(ribbon_render PRIVATE
         ${QT}::Widgets ${QT}::Svg)
 
+    # Render harness for rcx::RcxTooltip. Tooltips are separate top-level
+    # windows, so MainWindow::grab() never contains them — this grabs the
+    # tooltip widget itself. Renders short / multi-line / titled / long-wrapping
+    # cases into one contact sheet.
+    #   tooltip_render <out.png> [themeJsonPath|themeName]
+    add_executable(tooltip_render EXCLUDE_FROM_ALL tools/tooltip_render.cpp
+        src/themes/theme.cpp src/themes/thememanager.cpp)
+    target_include_directories(tooltip_render PRIVATE src)
+    target_compile_definitions(tooltip_render PRIVATE RCX_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+    target_link_libraries(tooltip_render PRIVATE ${QT}::Widgets ${QT}::Svg)
+
     # Offscreen render harness for the RcxEditor — grabs the structure view
     # to a PNG so a multi-row byte selection (grey M_SELECTED rows + accent
     # IND_BYTE_SEL digits coexisting) can be verified deterministically, and

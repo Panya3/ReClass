@@ -133,11 +133,12 @@ signals:
     void goToAddress(uint64_t address);
 
 protected:
-    // All tooltips in the scanner are suppressed — they flickered and fought
-    // with the hover UI. Swallowing QEvent::ToolTip for the whole subtree
-    // kills them at the source, so no setToolTip call site (static, dynamic,
-    // or item-view) can surface one. Installed on this + every descendant
-    // widget at the end of the constructor.
+    // Swallows QEvent::ToolTip on the RESULT TABLE'S VIEWPORT only, to stop
+    // Qt's automatic elided-cell tooltips in a dense grid. Everything else in
+    // the scanner (buttons, checkboxes, combos) keeps its tooltip and renders
+    // through the app-wide RcxTooltip bridge. An earlier version of this
+    // comment claimed whole-subtree suppression, which the code has never
+    // done — the filter is installed on one viewport.
     bool eventFilter(QObject* obj, QEvent* event) override;
 
 private slots:

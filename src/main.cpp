@@ -6615,7 +6615,11 @@ void MainWindow::updateScannerTitle() {
         "Active source: %1")
         .arg(sourceName.isEmpty() ? QStringLiteral("(none)") : sourceName);
     m_scanDockTitle->setToolTip(tip);
-    if (m_scannerDock) m_scannerDock->setToolTip(tip);
+    // NOT on the QDockWidget itself. A container-level tooltip is a catch-all:
+    // every child of the scanner without its own tooltip lets the event walk
+    // up to the dock, so hovering any dead space popped this four-line
+    // paragraph. The title label is the thing the text is about.
+    if (m_scannerDock) m_scannerDock->setToolTip(QString());
 }
 
 void MainWindow::updateSourceChip() {
