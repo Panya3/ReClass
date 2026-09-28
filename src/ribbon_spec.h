@@ -315,8 +315,8 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
             // The panel's entry point, and the most consequential thing a
             // selection can become: a class sized exactly to it. Large, so
             // size matches how much it matters.
-            RibbonItemSpec brk = codicon("type.class", "Extract Class",
-                                         "Extract the selected bytes / fields into a new embedded class (Ctrl+Shift+B)",
+            RibbonItemSpec brk = codicon("type.class", "Carve",
+                                         "Carve the selected bytes / fields out into a new embedded class (Ctrl+Shift+B)",
                                          "selection", GF::Pointer, SZ::Large);
             brk.data = int(NodeKind::Struct);
             brk.keepLabel = true;      // words in EVERY label mode
@@ -328,7 +328,7 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
             RibbonItemSpec del = codicon("sel.delete", "Delete",
                                          "Delete the selected fields (Delete)", "close");
             del.destructive = true;
-            del.columnBreakBefore = true;   // starts the small column beside Extract Class
+            del.columnBreakBefore = true;   // starts the small column beside Carve
             sel.items.append(del);
             sel.items.append(codicon("sel.duplicate", "Duplicate",
                                      "Duplicate the selected fields below themselves (Ctrl+D)", "clippy"));

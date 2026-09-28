@@ -712,9 +712,9 @@ void RcxController::addByteSubmenu(QMenu& menu, RcxEditor* editor) {
     // Headline byte-selection action — promoted to the very top of the menu
     // (above the "Selected bytes ▸" submenu) so breaking a byte range into a
     // new class is always one click away whenever bytes are selected, not
-    // buried. Mirrors the node menu's top-level "Extract Class".
+    // buried. Mirrors the node menu's top-level "Carve".
     menu.addAction(QIcon(QStringLiteral(":/vsicons/symbol-structure.svg")),
-                   tr("Extract Class"), [this, editor]() {
+                   tr("Carve"), [this, editor]() {
         auto r = editor->byteSelectionRange();
         extractByteSelectionToNewClass(r.first, r.second);
     });
@@ -2791,7 +2791,7 @@ RcxController::regionFromCurrentSelection(RcxEditor* editor) const {
         // field of the view frame. A union member (reparented to offset 0) or an
         // inline-struct field would resolve to the wrong bytes — the exact case
         // extractByteSelectionToNewClass mangles. The context-menu break paths
-        // pre-check each node, but the menu-bar / Ctrl+Shift+B "Extract Class"
+        // pre-check each node, but the menu-bar / Ctrl+Shift+B "Carve"
         // action calls this directly, so guard at the shared chokepoint: refuse
         // the whole region if any contributing node is nested. (Byte selections
         // returned above are root-relative and unaffected.)
@@ -5045,7 +5045,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // byte selection — addByteSubmenu already added the top-level action in
         // that case. regionFromCurrentSelection unions the selected rows' spans.
         if (!editor || !editor->hasByteSelection()) {
-            menu.addAction(icon("symbol-structure.svg"), "Extract Class", [this, editor]() {
+            menu.addAction(icon("symbol-structure.svg"), "Carve", [this, editor]() {
                 // Refuse if any selected row is inside an embedded class (its
                 // offset is relative to that class's def → wrong region).
                 for (uint64_t sid : m_selIds) {
@@ -5624,7 +5624,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         // ── New Class / Ptr to New Class (promoted near top) ──
         if (node.kind != NodeKind::Struct && node.kind != NodeKind::Array) {
             int nodeSz = node.byteSize();
-            // "Extract Class" — extract the active selection (byte range or
+            // "Carve" — extract the active selection (byte range or
             // selected nodes), or failing that this node's own bytes, off
             // into a new embedded class sized EXACTLY to the region, moving
             // any fully-contained structs/typed fields in intact. Replaces
@@ -5635,7 +5635,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
             // node-level duplicate; keep it for the no-byte-selection cases
             // (the clicked node's own span, or multi-node selections).
             if (!editor || !editor->hasByteSelection())
-            menu.addAction(icon("symbol-structure.svg"), "Extract Class", [this, editor, nodeId]() {
+            menu.addAction(icon("symbol-structure.svg"), "Carve", [this, editor, nodeId]() {
                 int ni = m_doc->tree.indexOfId(nodeId);
                 if (ni < 0) return;
                 // A field shown INSIDE an embedded class stores its offset

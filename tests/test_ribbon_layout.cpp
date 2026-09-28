@@ -399,7 +399,7 @@ void TestRibbonLayout::labelModes() {
     // DELIBERATE CHANGE (was `!itemLabelShown("type.array")`): the three
     // Structure commands are `keepLabel` — "words in every mode" — so they are
     // deliberately NOT part of the wordless sweep. A bare list-selection glyph
-    // does not say "Extract Class".
+    // does not say "Carve".
     if (!bar.overflowedPanelIds().contains(QStringLiteral("selected")))
         QVERIFY(bar.itemLabelShown(QStringLiteral("type.array")));
     // DELIBERATE CHANGE (was `<= 1`): keeping the Structure words costs ~48 px
@@ -797,14 +797,14 @@ void TestRibbonLayout::flatMetrics() {
     // DELIBERATE CHANGE (was 16 + 6, the icon-only cell): Structure is
     // keepLabel, so even in IconsOnly its three items carry words and the
     // column takes the widest of them.
-    // Extract Class is the panel's LARGE cell now, so the small reshape column
+    // Carve is the panel's LARGE cell now, so the small reshape column
     // takes its widest remaining keepLabel item, "Ptr → Class".
     QCOMPARE(bar.itemRect(QStringLiteral("type.array")).width(),
              3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Ptr → Class")) + 6);
     // type.class is the Large entry point, so it is sized by the Large rule
     // (clamp(label + 8, 48, 112)), NOT by the small reshape column beside it.
     QCOMPARE(bar.itemRect(QStringLiteral("type.class")).width(),
-             qBound(48, fm.horizontalAdvance(QStringLiteral("Extract Class")) + 8, 112));
+             qBound(48, fm.horizontalAdvance(QStringLiteral("Carve")) + 8, 112));
     QVERIFY(bar.itemRect(QStringLiteral("type.class")).height()
             > bar.itemRect(QStringLiteral("type.array")).height());
     QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).height(), qMax(18, fm.height() + 1));
@@ -1352,7 +1352,7 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
 
 // P1 #18: "gives the three restructuring commands words in every mode".
 // keepLabel, not the ordinary labelDrop treatment — a bare list-selection
-// glyph does not say "Extract Class".
+// glyph does not say "Carve".
 void TestRibbonLayout::structureKeepsItsWordsEverywhere() {
     RibbonBar bar;
     bar.applyTheme(m_dark);

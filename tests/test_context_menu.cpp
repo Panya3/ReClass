@@ -942,7 +942,7 @@ private slots:
         Q_UNUSED(t);
     }
 
-    // The byte-selection "Extract Class" must sit at the TOP of the context
+    // The byte-selection "Carve" must sit at the TOP of the context
     // menu (a plain top-level action), NOT inside the "Selected bytes ▸"
     // submenu. User-directed placement — pin it so a future menu reshuffle
     // can't re-bury it.
@@ -958,11 +958,11 @@ private slots:
         const auto actions = menu.actions();
         QVERIFY(!actions.isEmpty());
 
-        // First item is a real (non-submenu) "Extract Class" action.
+        // First item is a real (non-submenu) "Carve" action.
         QAction* first = actions.first();
         QVERIFY2(first->menu() == nullptr,
                  "top menu item must be a plain action, not a submenu");
-        QVERIFY2(first->text().contains(QStringLiteral("Extract Class")),
+        QVERIFY2(first->text().contains(QStringLiteral("Carve")),
                  qPrintable(QStringLiteral("top action was: ") + first->text()));
 
         // The "Selected bytes ▸" submenu still exists but no longer carries a
@@ -979,7 +979,7 @@ private slots:
         Q_UNUSED(t);
     }
 
-    // nodeInView guards "Extract Class" from mangling the wrong field: a field
+    // nodeInView guards "Carve" from mangling the wrong field: a field
     // shown INSIDE an embedded class belongs to that class's own definition
     // (parent chain doesn't reach the view root), so it must read out-of-view.
     void testNodeInView_EmbeddedFieldOutOfView() {
@@ -995,7 +995,7 @@ private slots:
         Q_UNUSED(t);
     }
 
-    // The multi-node "Extract Class" action unions the selected rows' spans
+    // The multi-node "Carve" action unions the selected rows' spans
     // via regionFromCurrentSelection (no byte selection). Pins that path.
     void testRegionFromSelection_MultiNodeUnion() {
         m_doc->tree.nodes.clear();
@@ -1080,7 +1080,7 @@ private slots:
                  "a direct view-frame field still yields a breakable region");
     }
 
-    // B-plan §7: the byte-selection "Extract Class" path is NOT guarded by
+    // B-plan §7: the byte-selection "Carve" path is NOT guarded by
     // isDirectViewFrameChild, but it is also NOT a corruption hazard. A byte
     // selection arrives as ROOT-relative addresses, so a partial selection
     // inside a nested inline struct straddles that struct's boundary in the

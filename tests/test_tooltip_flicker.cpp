@@ -933,15 +933,23 @@ private slots:
         QCOMPARE(tip->bodyText(), QStringLiteral("The first tab"));
         QVERIFY2(!QToolTip::isVisible(), "Qt's native tooltip is still live");
 
-        // Moving to the other tab leaves the first tab's RECT without ever
-        // leaving the widget — the item-rect clause has to catch that.
+        // Moving to the other tab never leaves the WIDGET — one QTabBar hosts
+        // both tabs — so the resolver has to notice the item changed. It
+        // updates IN PLACE: new text, same window, no Hide/Show pair, because
+        // a hide here is exactly the flash the user reported.
+        TooltipVisibilityCounter counter;
+        tip->installEventFilter(&counter);
         const QPoint q = tabs.tabRect(1).center();
         QMouseEvent mv(QEvent::MouseMove, q, tabs.mapToGlobal(q),
                        Qt::NoButton, Qt::NoButton, Qt::NoModifier);
         qApp->notify(&tabs, &mv);
         QApplication::processEvents();
-        QVERIFY2(!tip->isVisible(),
-                 "tooltip survived moving to a different tab of the same bar");
+        QVERIFY2(tip->isVisible(), "tooltip vanished moving between tabs");
+        QCOMPARE(tip->bodyText(), QStringLiteral("The second tab"));
+        QVERIFY2(counter.hides == 0,
+                 qPrintable(QStringLiteral("moving between tabs flashed (%1 hides)")
+                            .arg(counter.hides)));
+        tip->removeEventFilter(&counter);
 
         qApp->removeEventFilter(&bridge);
         rcx::dismissRcxTooltip();
@@ -1005,6 +1013,116 @@ private slots:
                  "expiry timer should be a member, not a child object");
         rcx::dismissRcxTooltip();
         QVERIFY(!tip->isVisible());
+    }
+
+    // ══ REPRO: "auto flash really fast when i move mouse around the target" ══
+    // Qt re-fires QEvent::ToolTip every ~20 ms while the mouse is MOVING (once
+    // a tip is up it re-arms toolTipWakeUp at 20 ms, not 700). So a real hover
+    // is a stream of interleaved MouseMove + ToolTip. Any path that hides
+    // between two of those ticks reads as a strobe.
+    void jitteringInsideTheTargetDoesNotStrobe() {
+        GlobalTooltipBridge bridge;
+        qApp->installEventFilter(&bridge);
+
+        QWidget host;
+        host.resize(300, 120);
+        host.setMouseTracking(true);
+        auto* btn = new QPushButton(QStringLiteral("Hit me"), &host);
+        btn->setGeometry(40, 30, 160, 40);
+        btn->setToolTip(QStringLiteral("Does the thing (Ctrl+T)"));
+        host.show();
+        QTest::qWait(30);
+
+        auto* tip = rcx::sharedRcxTooltip();
+        TooltipVisibilityCounter counter;
+        tip->installEventFilter(&counter);
+
+        // Park the real cursor inside the button: the bridge reads
+        // QCursor::pos() to decide whether the pointer is still on target.
+        const QPoint centre = btn->mapToGlobal(btn->rect().center());
+        QCursor::setPos(centre);
+        QTest::qWait(20);
+
+        auto tick = [&](const QPoint& localInBtn) {
+            const QPoint g = btn->mapToGlobal(localInBtn);
+            QMouseEvent mv(QEvent::MouseMove, localInBtn, g,
+                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            qApp->notify(btn, &mv);
+            QHelpEvent he(QEvent::ToolTip, localInBtn, g);
+            qApp->notify(btn, &he);
+            QApplication::processEvents();
+        };
+
+        tick(btn->rect().center());
+        QVERIFY2(tip->isVisible(), "tooltip never appeared on the button");
+        QCOMPARE(counter.shows, 1);
+
+        // Wander around INSIDE the button, the way a hand does.
+        for (int i = 0; i < 20; ++i) {
+            const QPoint p(btn->rect().center() + QPoint((i % 5) - 2, (i % 3) - 1));
+            QCursor::setPos(btn->mapToGlobal(p));
+            tick(p);
+        }
+
+        QVERIFY2(tip->isVisible(), "tooltip vanished while the cursor stayed on target");
+        QVERIFY2(counter.hides == 0,
+            qPrintable(QStringLiteral("STROBE: %1 hides while the cursor never left "
+                "the button (%2 shows)").arg(counter.hides).arg(counter.shows)));
+        QCOMPARE(counter.shows, 1);
+
+        tip->removeEventFilter(&counter);
+        qApp->removeEventFilter(&bridge);
+        rcx::dismissRcxTooltip();
+    }
+
+    // Same stream, but the cursor wanders off the button onto its parent (which
+    // has no tooltip). That must hide ONCE and stay hidden, not oscillate.
+    void leavingTheTargetHidesOnceAndStays() {
+        GlobalTooltipBridge bridge;
+        qApp->installEventFilter(&bridge);
+
+        QWidget host;
+        host.resize(300, 120);
+        auto* btn = new QPushButton(QStringLiteral("Hit me"), &host);
+        btn->setGeometry(40, 30, 160, 40);
+        btn->setToolTip(QStringLiteral("Does the thing"));
+        host.show();
+        QTest::qWait(30);
+
+        auto* tip = rcx::sharedRcxTooltip();
+        QCursor::setPos(btn->mapToGlobal(btn->rect().center()));
+        QTest::qWait(20);
+        {
+            const QPoint c = btn->rect().center();
+            QHelpEvent he(QEvent::ToolTip, c, btn->mapToGlobal(c));
+            qApp->notify(btn, &he);
+            QApplication::processEvents();
+        }
+        QVERIFY(tip->isVisible());
+
+        TooltipVisibilityCounter counter;
+        tip->installEventFilter(&counter);
+
+        // Off the button, into bare host area, and keep moving there.
+        for (int i = 0; i < 15; ++i) {
+            const QPoint hp(240, 100 + (i % 3));
+            QCursor::setPos(host.mapToGlobal(hp));
+            QMouseEvent mv(QEvent::MouseMove, hp, host.mapToGlobal(hp),
+                           Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            qApp->notify(&host, &mv);
+            QHelpEvent he(QEvent::ToolTip, hp, host.mapToGlobal(hp));
+            qApp->notify(&host, &he);
+            QApplication::processEvents();
+        }
+        QVERIFY2(!tip->isVisible(), "tooltip survived leaving its target");
+        QVERIFY2(counter.hides == 1,
+            qPrintable(QStringLiteral("expected one clean hide, got %1").arg(counter.hides)));
+        QVERIFY2(counter.shows == 0,
+            qPrintable(QStringLiteral("re-showed %1 time(s) off-target").arg(counter.shows)));
+
+        tip->removeEventFilter(&counter);
+        qApp->removeEventFilter(&bridge);
+        rcx::dismissRcxTooltip();
     }
 };
 

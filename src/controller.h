@@ -285,7 +285,7 @@ public:
     // current selection: the active byte selection if one exists on `editor`,
     // otherwise the combined offset span of the selected nodes (m_selIds).
     // Returns nullopt when nothing usable is selected. Shared by the node
-    // "Extract Class" action, shared by the node menu, the Edit menu and the ribbon.
+    // "Carve" action, shared by the node menu, the Edit menu and the ribbon.
     std::optional<QPair<uint64_t, uint64_t>>
     regionFromCurrentSelection(RcxEditor* editor) const;
     // True if nodeId is a field of the viewed class (its ancestor chain reaches

@@ -1522,16 +1522,16 @@ void MainWindow::createMenus() {
                     &MainWindow::showFindFieldDialog);
     edit->addSeparator();
     // Break the current selection (byte range, or selected nodes) off into a
-    // new embedded class — the same op as the node menu's "Extract Class", but
+    // new embedded class — the same op as the node menu's "Carve", but
     // reachable from the menu bar. Auto-detects bytes vs node selection.
-    m_actBreakClass = Qt5Qt6AddAction(edit, "E&xtract Class",
+    m_actBreakClass = Qt5Qt6AddAction(edit, "&Carve",
                     QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_B),
                     makeIcon(":/vsicons/symbol-structure.svg"), this, [this]() {
         auto* c = activeController();
         if (!c) return;
         auto region = c->regionFromCurrentSelection(c->primaryEditor());
         if (!region) {
-            setAppStatus(QStringLiteral("Extract Class: select bytes or fields first"));
+            setAppStatus(QStringLiteral("Carve: select bytes or fields first"));
             return;
         }
         c->extractByteSelectionToNewClass(region->first, region->second);
@@ -1992,7 +1992,7 @@ void MainWindow::createMenus() {
     if (m_bookmarksDock) {
         auto* bmAct = m_bookmarksDock->toggleViewAction();
         m_actBookmarks = bmAct;
-        // Ctrl+Shift+B belongs to Edit > Extract Class; the same sequence here
+        // Ctrl+Shift+B belongs to Edit > Carve; the same sequence here
         // made Qt report an ambiguous shortcut and fire NEITHER.
         bmAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_K));
         view->addAction(bmAct);

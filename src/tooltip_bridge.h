@@ -33,6 +33,13 @@ namespace rcx {
 // idempotence guard could not help because its own state had been cleared two
 // hops earlier in the same delivery. Nothing in the ToolTip path hides
 // anything now; the mouse decides, which is what Qt itself does.
+//
+// ── Why there is no WindowDeactivate clause ───────────────────────────────
+// Showing a Qt::ToolTip window can deactivate the window underneath it even
+// with WA_ShowWithoutActivating, so dismissing on WindowDeactivate meant the
+// tooltip's own appearance dismissed it — measured, twice per hover, in
+// tests/test_tooltip_flicker.cpp. Leave, the mouse-follow below, QEvent::Hide
+// and RcxTooltip's expiry timer cover every real "user went away" case.
 class GlobalTooltipBridge : public QObject {
     // No Q_OBJECT — the bridge has no signals/slots, only an eventFilter
     // override, and skipping the macro lets it live in a header-only file
@@ -124,28 +131,39 @@ protected:
             return true;   // suppress Qt's native tooltip widget
         }
 
-        // ── Dismissal ────────────────────────────────────────────────────
+        // ── Follow the mouse ─────────────────────────────────────────────
+        // The tooltip is UPDATED IN PLACE here, never hidden-then-reshown.
+        // That distinction is the whole fix for "it flashes really fast when I
+        // move the mouse around": Qt re-arms its tooltip wake-up at ~20 ms
+        // once a tip is up, so a real hover is a 20 ms stream of interleaved
+        // MouseMove + ToolTip. Anything that hides between two ticks strobes.
+        // showAt() only calls show() when the widget is hidden, so
+        // repopulating a visible tip emits no Hide/Show pair at all.
         if (t == QEvent::MouseMove) {
-            if (m_target && sharedRcxTooltip()->isVisible()) {
-                const QPoint gp = QCursor::pos();
-                const QPoint local = m_target->mapFromGlobal(gp);
-                const bool leftWidget = !m_target->rect().contains(local);
-                // Left the ITEM the tip belongs to, even without leaving the
-                // widget. This is the ribbon and the tab bar: one widget,
-                // many virtual buttons, so Leave never fires between them.
-                const bool leftItem = !m_itemRect.isNull()
-                                   && !m_itemRect.contains(local);
-                // The widget republished different text under us — the ribbon
-                // does this as the hovered item changes.
-                const bool textChanged = m_itemRect.isNull()
-                                      && m_target->toolTip() != m_lastText;
-                if (leftWidget || leftItem || textChanged) clear();
+            auto* tip = sharedRcxTooltip();
+            if (!m_target || !tip->isVisible()) return false;
+            // The EVENT's position, not QCursor::pos(). The OS cursor is a
+            // different source of truth: it lags, it clamps to the physical
+            // screen, and it disagrees with the widget geometry whenever the
+            // window is not where the compositor thinks. Reading it here made
+            // "cursor left the widget" fire while the pointer was sitting
+            // still in the middle of a button.
+            const QPoint g = static_cast<QMouseEvent*>(e)->globalPosition().toPoint();
+            const QPoint local = m_target->mapFromGlobal(g);
+            if (!m_target->rect().contains(local)) { clear(); return false; }
+            const Resolved r = resolve(m_target, local);
+            if (!r.ok()) { clear(); return false; }
+            if (r.text != m_lastText) {
+                // Moved to a different virtual item of the same widget (a
+                // ribbon button, a tab, a list row). Re-anchor and repaint;
+                // the window stays mapped throughout.
+                m_lastText = r.text;
+                m_itemRect = r.rect;
+                showRcxTooltip(g, r.text, m_target->font());
             }
-        } else if (t == QEvent::WindowDeactivate) {
-            // Scoped: an unrelated window losing activation must not kill a
-            // tip that belongs to the window still under the cursor.
-            if (!m_target || obj == m_target->window()) clear();
-        } else if (t == QEvent::MouseButtonPress || t == QEvent::Wheel
+            return false;
+        }
+        if (t == QEvent::MouseButtonPress || t == QEvent::Wheel
                    || t == QEvent::KeyPress) {
             clear();
         } else if (t == QEvent::Leave) {
