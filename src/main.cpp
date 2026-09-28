@@ -1945,6 +1945,37 @@ void MainWindow::createMenus() {
         connect(actGoTo, &QAction::triggered, this, &MainWindow::showGotoAddressDialog);
     }
     {
+        // The address bar's navigation, reachable from the menu for
+        // discoverability. The shortcuts are shown as hints only: the keys
+        // are handled inside RcxEditor (they must not fire during an inline
+        // edit), so binding them here as well would double-dispatch.
+        m_actNavBack    = view->addAction("&Back	Alt+Left");
+        m_actNavForward = view->addAction("For&ward	Alt+Right");
+        m_actNavUp      = view->addAction("&Up One Level	Alt+Up");
+        m_actNavPath    = view->addAction("Edit Pat&h	Alt+D");
+        connect(m_actNavBack, &QAction::triggered, this, [this]() {
+            if (auto* c = activeController()) c->goBack(activePaneEditor());
+        });
+        connect(m_actNavForward, &QAction::triggered, this, [this]() {
+            if (auto* c = activeController()) c->goForward(activePaneEditor());
+        });
+        connect(m_actNavUp, &QAction::triggered, this, [this]() {
+            if (auto* c = activeController()) c->goUp(activePaneEditor());
+        });
+        connect(m_actNavPath, &QAction::triggered, this, [this]() {
+            if (auto* ed = activePaneEditor()) ed->beginAddressBarPathEdit();
+        });
+        // Enabled state is read from the active controller when the menu
+        // opens; the bar's own cells track historyChanged live.
+        connect(view, &QMenu::aboutToShow, this, [this]() {
+            auto* c = activeController();
+            m_actNavBack->setEnabled(c && c->canGoBack());
+            m_actNavForward->setEnabled(c && c->canGoForward());
+            m_actNavUp->setEnabled(c && c->canGoUp());
+            m_actNavPath->setEnabled(activePaneEditor() != nullptr);
+        });
+    }
+    {
         auto* actCmdPalette = view->addAction("Command &Palette...");
         actCmdPalette->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_K));
         connect(actCmdPalette, &QAction::triggered, this,
@@ -6531,9 +6562,19 @@ void MainWindow::createRibbon() {
                                      : m_ribbon->mapToGlobal(r.bottomLeft() + QPoint(0, 1));
         menu->popup(at);
     };
+    // Source opens the same chooser the address bar's chip opens (one source
+    // picker, not a menu here and a popup there); the plain Data Source menu
+    // is the fallback when no document pane exists to host the popup.
     if (QAction* a = m_ribbon->action(QStringLiteral("home.source.attach")))
-        connect(a, &QAction::triggered, this,
-                [this, popupUnder]() { popupUnder("home.source.attach", m_sourceMenu); });
+        connect(a, &QAction::triggered, this, [this, popupUnder]() {
+            auto* ctrl = activeController();
+            auto* ed = activePaneEditor();
+            if (!ctrl || !ed) { popupUnder("home.source.attach", m_sourceMenu); return; }
+            const QRect r = m_ribbon->itemRect(QStringLiteral("home.source.attach"));
+            const QPoint at = r.isNull() ? QCursor::pos()
+                                         : m_ribbon->mapToGlobal(r.bottomLeft() + QPoint(0, 1));
+            ctrl->openSourceChooser(ed, at);
+        });
     // "Code" does NOT open a save dialog (File ▸ Export still does that). It
     // switches the active pane to its Code view and picks the scope, which is
     // what people actually reach for: read the generated struct, for this class
