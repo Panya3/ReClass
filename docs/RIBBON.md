@@ -13,7 +13,7 @@ first-run tab; a persisted `ribbonTab` still wins.
   +8  +2048 │ ⤵8  ⤵2048 │        ⧉ Duplicate FFF ⌸ Ptr → Class │ H32 I32 U32 I8 │ F  V3    │ FN* WSTR
   +64       │ ⤵64       │ Extract ≡ Comment   ??? [] Array     │ H16 I16 U16 U8 │ B  V4    │
             │           │  Class                              │                │          │
-     Add    │   Insert  │              Selection              │ Hex: Int: UInt: Byte: Float: Ptr: Str:
+     Add    │   Insert  │              Selection              │ 64: 32: 16: 8: Float: Ptr: Str: Other:
  ──────────────────────────────────────────────────────────────────────────────────────────────────────
 ```
 
@@ -40,26 +40,26 @@ body.
 
 ## Layout
 
-**Home** (natural ≈ 868 px — fits a 1080-logical window with room to spare):
+**Home** — panel order **File · Source · Class · View** (natural ≈ 852 px at 1080). Source precedes Class because the session's true first click is choosing what memory to look at: the start page already preloads a class, and `project_new` self-attaches to a scratch buffer.
 
 | Panel | Large | Small column |
 |---|---|---|
 | **File** (neverHide) | Open, Save | **Export ▾** (pops the Export menu), Close |
 | **Class** (neverHide) | **New Class** (teal) | New Struct, New Enum (teal) |
 | **Source** | **Source ▾** (pops the Data Source menu) | Refresh, Go to Address |
-| **Panels** | Scanner, Symbols (checkable = dock visible) | Bookmarks, Console, Split Below |
+| **View** (id `panels`) | Scanner · Symbols · RTTI (one column — all three open a window onto the current target) ‖ Bookmarks · Console · Split Below (the workspace column). All **Small**: Scanner and Symbols were Large until 2026-09-06, which gave the tab's most expendable panel a third of its emphasis for two plain dock toggles. Caption is "View", not "Panels", because Split Below and Console open no panel — the caption was the defect, not the items. |
 
 The three "creates a type" buttons carry the editor's class colour; every other
 Home icon is `GF::Plain`. Size is the hierarchy, hue appears once.
 
-**Modify** (natural ≈ 1053 px; hide order Selection → Insert → Add,
+**Modify** — panel order **Add · Insert · Type · Selection** (natural ≈ 910 px at 1080). Type moved left of Selection: it is the panel clicked hundreds of times per class, and with Add/Insert permanently icon-only its origin is now the same at every width. Hide order Selection → Insert → Add,
 Type `neverHide`):
 
 | Panel | Contents |
 |---|---|
 | **Add** / **Insert** | 4 · 8 · 64 ‖ 1024 · 2048. The strip shows the count alone (`shortLabel`); the `QAction` keeps "Add 4". |
 | **Selection** (id `selected`) | **Carve** (LARGE, teal — the panel's entry point) ‖ Delete (red) · Duplicate · Comment ‖ `000` `FFF` `???` (icon-only) ‖ **Big endian** (checkable) · Ptr → Class · Array. One panel, ordered by what the button does: entry point · edit in place · fill · reshape. The separate **Structure** panel was merged in on 2026-09-06 — it split one question ("I selected some bytes, now what?") across two captions. **RTTI moved OUT** to Home ▸ Panels: it opens a browser window rather than changing the selection. |
-| **Type** (`glyphLabels`) | `Hex:` H64 H32 H16 ‖ `Int:` I64 I32 I16 ‖ `UInt:` U64 U32 U16 ‖ `Byte:` H8 I8 U8 ‖ `Float:` D F B · V2 V3 V4 · M4 ‖ `Ptr:` PTR FN* ‖ `Str:` STR WSTR ‖ **Custom…** (`keepLabel`) |
+| **Type** | **SIZE-major**: columns are widths, rows are readings — `64:` `32:` `16:` `8:` each holding Hex over Int over UInt, then `Float:` (D F ‖ V2 V3 V4 ‖ M4), `Ptr:`, `Str:`, `Other:` (Bool, Custom…). Kind-major made row 1 read "H64 I64 U64 H8" — the row's meaning broke at the fourth column — and disagreed with the keyboard, where 1-4 pick a WIDTH and S/U/F reinterpret at the existing size. Cheaper too: `64:` fits its column free where `Byte:` inflated one by 13 px. |
 
 ## Action ids
 
@@ -89,7 +89,7 @@ All logical px at 10 pt JetBrains Mono (`fm.height()` 17); "device" = physical p
 | Tab row | `fm.height()+8` = **25**; `background` (the ribbon's own header, *not* `menuBarColor` — that belongs to the title strip alone); one `border` hairline on its last device row. Tabs from `x = kGutter`, `advance + 2·16` wide, `kTabGap = 8` apart — deliberately airier than the strip gutter, they read as words rather than buttons. Text inactive `textDim` / hover `text` / active `text`; **active = 2 device rows of `textDim` on the tab's bottom edge — NEUTRAL, not the accent**. Three stacked tab rows all underlined in purple made the accent meaningless; these tabs switch which *toolbar* you see (navigation, not selection), so the word carries the state and the rule only anchors it. No fill, no box, in any state. |
 | Collapse chevron | 22 × tabRowH at `width() − 6 − 22`. `chevron-up.svg` expanded / `chevron-down.svg` minimized; rest `textDim`, hover `hover` fill + `text` — painted exactly like the `…` item. Hit-tested before the tabs; tooltip "Collapse/Expand the ribbon (Ctrl+F1)". |
 | Body | `background`; padTop 2 + 3 rows × `rowH = max(18, fm.height()+1)` + caption **12** + hairline 1 = **69** → **94** total (minimized: 26). |
-| Panels | width = max(columns, caption + 2), columns centred when the caption wins. `kPanelGap 13`; **one 1-device-px `border` divider at `A.right()+7`**, 2 px clear of both hairlines; none before the first panel; one before the `…` item. `‖` family separators: rows only, `kSepGap 7`; `kColGap 3`. Caption: 9 pt, `textDim` through the ladder, centred in the 12-px rect. A panel with `groupCaption` items draws one caption per column group instead, widening the group's last column when the caption needs it. A group spans from its first column's left edge to its **last column's right edge** (an `endsCaptionGroup` column terminates the run). |
+| Panels | width = max(columns, caption + 2), columns centred when the caption wins. `kPanelGap 14`; **one 1-device-px `border` divider at `A.right()+8`** (= 1 + kPanelGap/2; `rect.right()` is inclusive), 2 px clear of both hairlines; none before the first panel; one before the `…` item. `‖` family separators: rows only, `kSepGap 7`; `kColGap 2`. Family separators are painted a step SOFTER than panel dividers (border blended 35 % toward the ribbon ground, floored through the caption contrast ladder): Modify draws 3 dividers and up to 8 separators, and at one ink they were peer rules that hid the panel boundaries. Caption: 9 pt, `textDim` through the ladder, centred in the 12-px rect. A panel with `groupCaption` items draws one caption per column group instead, widening the group's last column when the caption needs it. A group spans from its first column's left edge to its **last column's right edge** (an `endsCaptionGroup` column terminates the run). |
 | Small item | `colW × 18`; icon cell 16 tall, **width per icon kind** (`ribbonIconCellWidth`: TypeGlyph / FillSquares = `8·max(2, len)` → 16 / 24 / 32, unlabelled Add/Insert = 32, else 16) at `(x+3, y+1)`; label from `x+3+cell+4` to `right−6`; width `3 + cell + 4 + text + 6`, icon-only `cell + 6`, `+10` for a `menu` ▾. |
 | Large item | `clamp(text + 8, 48, 80)` (`+10` for a ▾) wide, 54 tall; **icon centred in rows 1–2, label on row 3** — the same line as the third small button of the neighbouring column. Every Large column of a panel takes the panel's widest Large width. Label `ElideRight`. |
 | Pixel glyphs | **one scale per DPR**: `s = ceil(1.6·dpr)` → 2 / 2 / 3 / 4 at 100 / 125 / 150 / 200 %. QMenu / QAction icons use the square 16×16 path (`wide = false`). |
@@ -97,7 +97,7 @@ All logical px at 10 pt JetBrains Mono (`fm.height()` 17); "device" = physical p
 | States | paint order: opacity → fill → icon + label → underline. **Rest: `text`** for Plain icons and labels — the ribbon is the actionable surface, and dimming it at rest put the toolbar below the document in the hierarchy. Hover: `hover` fill only (the ink does not change). Pressed: `button` fill (`selected` when `button == background`). Checked: `indHoverSpan` + 2 device rows underline. Disabled: `setOpacity(0.40)` of the *same* ink before anything (never `textDim × 0.4`, which lands under 2 : 1). `RibbonItemSpec::destructive` (Delete): the icon is `markerPtr` in every state, the label turns red only under the pointer. |
 | Tones | `ribbonToneColour` is a **ladder**: the asked-for tone → `textDim` → `text`, first at ≥ 3 : 1 wins. (The old cliff jumped straight to `text`, and vs.json's `textMuted` misses the guard by 0.02 — captions rendered at full label brightness.) Purple appears only on the checked state — the active *tab* is neutral `textDim`, so the ribbon spends the accent budget once, not twice; red only on Delete. |
 | Families | Hex = `text`; **Signed and Unsigned both `syntaxNumber`** (the I / U letter carries the sign, which frees `markerPtr` to mean only "destructive"); Float = `syntaxKeyword`; Text = `syntaxString`; Pointer = `syntaxType`; Bits = `syntaxNumber`; Plain = `text`/the state tone. Pixel-text rasterisers demand **4.5 : 1** (`kRibbonPixelInkContrast`); Codicons keep 3.0. |
-| Compaction | stage 1 (Auto only) drops labels by `labelDrop`, higher first, equal values together: Modify Add 20 · Insert 20 · Selection 10; Home Panels 30 · Source 10 · File 0 · Class 0. A `glyphLabels` panel is glyph-only in **every** mode, so "All labels" is an honest promise; `keepLabel` items (Custom…, and the three reshape commands) keep their word regardless — so at 760 px Modify gives up the Selection panel to the `…` menu rather than showing mute glyphs; at the 1080-px window nothing hides. Stage 2 hides by `hideOrder` (lower first, `neverHide` respected): Modify Selection 0 · Insert 10 · Add 20 (Type never); Home Panels 0 · Source 20 (File, Class never). Hidden panels sit behind a single middle-row 22×18 `…` item. |
+| Compaction | stage 1 (Auto only) drops labels by `labelDrop`, higher first, equal values together: Modify **Selection 10 only** (Add / Insert are icon-only in every mode, and `glyphLabels` Type is skipped); Home View 30 · Source 10 · File 0 · Class 0. A `glyphLabels` panel is glyph-only in **every** mode, so "All labels" is an honest promise; `keepLabel` items (Custom…, and the three reshape commands) keep their word regardless — so at 760 px Modify gives up the Selection panel to the `…` menu rather than showing mute glyphs; at the 1080-px window nothing hides. Stage 2 hides by `hideOrder` (lower first, `neverHide` respected): Modify Selection 0 · Insert 10 · Add 20 (Type never); Home View 0 · Source 20 (File, Class never). Hidden panels sit behind a single middle-row 22×18 `…` item. |
 
 ## `RibbonItemSpec` fields
 

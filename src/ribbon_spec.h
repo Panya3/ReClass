@@ -150,6 +150,13 @@ inline RibbonItemSpec ribbonBytesItem(const char* prefix, RibbonIconSpec::Kind k
         : QStringLiteral("Insert %1 bytes above the selected field").arg(n);
     it.size = RibbonItemSize::Small;
     it.icon = {kind, QString::number(n), GlyphFamily::Plain};
+    // Icon-only in EVERY label mode. The unlabelled cell is 32 px wide and
+    // renders "+64" itself in the 5x7 pixel font (ribbon_icons.h), so a
+    // chrome-font "64" beside it said the same thing twice for 29 px a
+    // column. The QAction keeps "Add 64" for menus, the overflow list and
+    // the tooltip. Auto mode already dropped these words below 934 px --
+    // this just makes the state the user usually sees the only state.
+    it.iconOnly = true;
     it.columnBreakBefore = brk;
     it.data = n;
     return it;
@@ -205,6 +212,22 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         file.items[2].menu = true;   // Export ▾
         tab.panels.append(file);
 
+        RibbonPanelSpec src;
+        src.id = QStringLiteral("source");
+        src.caption = QStringLiteral("Source");
+        src.labelDrop = 10;
+        src.hideOrder = 20;
+        src.items = {
+            codicon("home.source.attach", "Source", "Attach to a process or open a data source",
+                    "plug", GF::Plain, SZ::Large),
+            codicon("home.source.refresh", "Refresh", "Refresh the memory view (F5)",
+                    "refresh", GF::Plain, SZ::Small, true),
+            codicon("home.source.goto", "Set as Base Address",
+                    "Set the base address this class is read from (Ctrl+G)", "symbol-numeric"),
+        };
+        src.items[0].menu = true;    // Source ▾
+        tab.panels.append(src);
+
         RibbonPanelSpec cls;
         cls.id = QStringLiteral("class");
         cls.caption = QStringLiteral("Class");
@@ -219,45 +242,33 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         };
         tab.panels.append(cls);
 
-        RibbonPanelSpec src;
-        src.id = QStringLiteral("source");
-        src.caption = QStringLiteral("Source");
-        src.labelDrop = 10;
-        src.hideOrder = 20;
-        src.items = {
-            codicon("home.source.attach", "Source", "Attach to a process or open a data source",
-                    "plug", GF::Plain, SZ::Large),
-            codicon("home.source.refresh", "Refresh", "Refresh the memory view (F5)",
-                    "refresh", GF::Plain, SZ::Small, true),
-            codicon("home.source.goto", "Go to Address", "Go to an address (Ctrl+G)", "symbol-numeric"),
-        };
-        src.items[0].menu = true;    // Source ▾
-        tab.panels.append(src);
-
         RibbonPanelSpec panels;
         panels.id = QStringLiteral("panels");
-        panels.caption = QStringLiteral("Panels");
+        // "View", not "Panels": Split Below and Console open no panel, and
+        // renaming the caption is cheaper and truer than evicting working
+        // affordances to satisfy the old one.
+        panels.caption = QStringLiteral("View");
         panels.labelDrop = 30;   // first labels to go …
         panels.hideOrder = 0;    // … and the first panel to hide
+        // Two clean columns of three. RTTI joins Scanner and Symbols because
+        // all three open a window onto the CURRENT target; Bookmarks, Console
+        // and Split Below are the workspace column.
         panels.items = {
-            codicon("home.panels.scanner", "Scanner", "Open the memory scanner (Ctrl+Shift+F)",
-                    "search", GF::Plain, SZ::Large),
-            codicon("home.panels.symbols", "Symbols", "Open the symbol browser (Ctrl+Shift+Y)",
-                    "symbol-key", GF::Plain, SZ::Large),
-            codicon("home.panels.bookmarks", "Bookmarks", "Open the bookmarks (Ctrl+Shift+K)",
-                    "bookmark", GF::Plain, SZ::Small, true),
-            codicon("home.panels.console", "Console", "Show the console", "console"),
+            codicon("home.panels.scanner", "Scanner", "Open the memory scanner (Ctrl+Shift+F)", "search"),
+            codicon("home.panels.symbols", "Symbols", "Open the symbol browser (Ctrl+Shift+Y)", "symbol-key"),
             // RTTI opens a browser WINDOW (class hierarchy + vtable behind the
-            // selected pointer), which is what every other button in this panel
-            // does. It sat in Modify ▸ Selection until 2026-09-06, where it was
-            // the only item that opened something rather than changing the
-            // selection — "wtf is the RTTI field for even?". RibbonActions keeps
-            // owning the id so it keeps its enabled predicate (one pointer-sized
-            // field selected); MainWindow triggers the Tools action.
+            // selected pointer). It sat in Modify ▸ Selection until 2026-09-06,
+            // where it was the only item that opened something rather than
+            // changing the selection — "wtf is the RTTI field for even?".
+            // RibbonActions keeps owning the id so it keeps its enabled
+            // predicate; MainWindow triggers the Tools action.
             codicon("home.panels.rtti", "RTTI",
                     "RTTI Browser: class hierarchy behind the selected pointer (Ctrl+Shift+R)",
                     "symbol-interface"),
-            codicon("home.panels.split", "Split Below", "Split the editor below (Ctrl+\\)", "split-vertical"),
+            codicon("home.panels.bookmarks", "Bookmarks", "Open the bookmarks (Ctrl+Shift+K)",
+                    "bookmark", GF::Plain, SZ::Small, true),
+            codicon("home.panels.console", "Console", "Show the console", "console"),
+            codicon("home.panels.split", "Split Below", "Split the editor below (Ctrl+\)", "split-vertical"),
         };
         tab.panels.append(panels);
 
@@ -306,6 +317,71 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         // captions. RTTI moved OUT to Home ▸ Panels: it opens a browser window
         // rather than changing the selection, so it belongs with Scanner and
         // Symbols, not among edit commands.
+        RibbonPanelSpec type;
+        type.id = QStringLiteral("type");
+        type.caption = QStringLiteral("Type");
+        type.labelDrop = 30;
+        type.neverHide = true;
+        type.glyphLabels = true;   // the glyphs ARE the labels, in every mode
+        // SIZE-MAJOR, not kind-major. Columns are WIDTHS, rows are readings:
+        // 64 / 32 / 16 / 8, each column Hex over Int over UInt. Kind-major
+        // made row 1 read "H64 I64 U64 H8" — the row's meaning broke at the
+        // fourth column — and it disagreed with the keyboard, where 1-4 pick a
+        // WIDTH and S/U/F reinterpret at the existing size. This layout is that
+        // grammar made visible. It is also cheaper: "64:" fits its column free,
+        // where "UInt:" inflated one by 3 px and "Byte:" by 13.
+        type.items = {
+            glyph("type.hex64", "Hex 64", "Change to hex64 — 8 raw bytes (key 4)", "H64", GF::Hex, NodeKind::Hex64, false, false, "64:"),
+            glyph("type.int64", "Int 64", "Change to int64_t — signed 8-byte integer (S on an 8-byte field)", "I64", GF::Signed, NodeKind::Int64),
+            glyph("type.uint64", "UInt 64", "Change to uint64_t — unsigned 8-byte integer (U on an 8-byte field)", "U64", GF::Unsigned, NodeKind::UInt64),
+
+            glyph("type.hex32", "Hex 32", "Change to hex32 — 4 raw bytes (key 3)", "H32", GF::Hex, NodeKind::Hex32, true, false, "32:"),
+            glyph("type.int32", "Int 32", "Change to int32_t — signed 4-byte integer (S on a 4-byte field)", "I32", GF::Signed, NodeKind::Int32),
+            glyph("type.uint32", "UInt 32", "Change to uint32_t — unsigned 4-byte integer (U on a 4-byte field)", "U32", GF::Unsigned, NodeKind::UInt32),
+
+            glyph("type.hex16", "Hex 16", "Change to hex16 — 2 raw bytes (key 2)", "H16", GF::Hex, NodeKind::Hex16, true, false, "16:"),
+            glyph("type.int16", "Int 16", "Change to int16_t — signed 2-byte integer (S on a 2-byte field)", "I16", GF::Signed, NodeKind::Int16),
+            glyph("type.uint16", "UInt 16", "Change to uint16_t — unsigned 2-byte integer (U on a 2-byte field)", "U16", GF::Unsigned, NodeKind::UInt16),
+
+            glyph("type.hex8", "Hex 8", "Change to hex8 — 1 raw byte (key 1)", "H8", GF::Hex, NodeKind::Hex8, true, false, "8:"),
+            glyph("type.int8", "Int 8", "Change to int8_t — signed byte (S on a 1-byte field)", "I8", GF::Signed, NodeKind::Int8),
+            glyph("type.uint8", "UInt 8", "Change to uint8_t — unsigned byte (U on a 1-byte field)", "U8", GF::Unsigned, NodeKind::UInt8),
+
+            // One `‖` opens the float group; the columns inside it are plain
+            // `|` breaks. Four hairlines through one 4x3 grid contradicted the
+            // grid, and the rule after D/F/B made "Float:" read as the caption
+            // for V2/V3/V4 rather than for the whole group.
+            glyph("type.double", "Double", "Change to double — 8-byte float (F on an 8-byte field)", "D", GF::Float, NodeKind::Double, true, true, "Float:"),
+            glyph("type.float", "Float", "Change to float — 4-byte float (F on a 4-byte field)", "F", GF::Float, NodeKind::Float),
+
+            glyph("type.vec2", "Vec 2", "Change to vec2 — 2 floats, 8 bytes", "V2", GF::Float, NodeKind::Vec2, true),
+            glyph("type.vec3", "Vec 3", "Change to vec3 — 3 floats, 12 bytes", "V3", GF::Float, NodeKind::Vec3),
+            glyph("type.vec4", "Vec 4", "Change to vec4 — 4 floats, 16 bytes", "V4", GF::Float, NodeKind::Vec4),
+
+            glyph("type.mat4x4", "Mat 4x4", "Change to mat4x4 — 16 floats, 64 bytes", "M4", GF::Float, NodeKind::Mat4x4, true),
+
+            glyph("type.pointer", "Pointer", "Change to ptr64 — 8-byte pointer (P key)", "PTR", GF::Pointer, NodeKind::Pointer64, true, true, "Ptr:"),
+            glyph("type.funcptr", "Func Ptr", "Change to fnptr64 — 8-byte function pointer", "FN*", GF::Pointer, NodeKind::FuncPtr64),
+
+            glyph("type.utf8", "Str", "Change to str — ASCII / UTF-8 text", "STR", GF::Text, NodeKind::UTF8, true, true, "Str:"),
+            glyph("type.utf16", "WStr", "Change to wstr — UTF-16 text", "WSTR", GF::Text, NodeKind::UTF16),
+
+            // Bool is a 1-byte flag, not a float. Under "Float:" the caption
+            // stated something false about the button beneath it.
+            glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool, true, true, "Other:"),
+        };
+        {
+            RibbonItemSpec custom = codicon("type.custom", "Custom…",
+                                            "Any type by name: opens the inline type editor",
+                                            "symbol-misc", GF::Plain, SZ::Small);
+            custom.keepLabel = true;   // a word, not a glyph — it survives the drop
+            // Shares the "Other:" column with Bool now, so it no longer has to
+            // close "Str:" with a separator of its own.
+            type.items.append(custom);
+        }
+        tab.panels.append(type);
+
+
         RibbonPanelSpec sel;
         sel.id = QStringLiteral("selected");
         sel.caption = QStringLiteral("Selection");
@@ -379,60 +455,6 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
             sel.items.append(arr);
         }
         tab.panels.append(sel);
-
-        RibbonPanelSpec type;
-        type.id = QStringLiteral("type");
-        type.caption = QStringLiteral("Type");
-        type.labelDrop = 30;
-        type.neverHide = true;
-        type.glyphLabels = true;   // the glyphs ARE the labels, in every mode
-        type.items = {
-            glyph("type.hex64", "Hex 64", "Change to hex64 — 8 raw bytes (key 4)", "H64", GF::Hex, NodeKind::Hex64, false, false, "Hex:"),
-            glyph("type.hex32", "Hex 32", "Change to hex32 — 4 raw bytes (key 3)", "H32", GF::Hex, NodeKind::Hex32),
-            glyph("type.hex16", "Hex 16", "Change to hex16 — 2 raw bytes (key 2)", "H16", GF::Hex, NodeKind::Hex16),
-
-            glyph("type.int64", "Int 64", "Change to int64_t — signed 8-byte integer (S on an 8-byte field)", "I64", GF::Signed, NodeKind::Int64, true, true, "Int:"),
-            glyph("type.int32", "Int 32", "Change to int32_t — signed 4-byte integer (S on a 4-byte field)", "I32", GF::Signed, NodeKind::Int32),
-            glyph("type.int16", "Int 16", "Change to int16_t — signed 2-byte integer (S on a 2-byte field)", "I16", GF::Signed, NodeKind::Int16),
-
-            glyph("type.uint64", "UInt 64", "Change to uint64_t — unsigned 8-byte integer (U on an 8-byte field)", "U64", GF::Unsigned, NodeKind::UInt64, true, true, "UInt:"),
-            glyph("type.uint32", "UInt 32", "Change to uint32_t — unsigned 4-byte integer (U on a 4-byte field)", "U32", GF::Unsigned, NodeKind::UInt32),
-            glyph("type.uint16", "UInt 16", "Change to uint16_t — unsigned 2-byte integer (U on a 2-byte field)", "U16", GF::Unsigned, NodeKind::UInt16),
-
-            // The three 1-byte kinds live together: "how wide" beats "which
-            // sign" when the answer is always one byte.
-            glyph("type.hex8", "Hex 8", "Change to hex8 — 1 raw byte (key 1)", "H8", GF::Hex, NodeKind::Hex8, true, true, "Byte:"),
-            glyph("type.int8", "Int 8", "Change to int8_t — signed byte (S on a 1-byte field)", "I8", GF::Signed, NodeKind::Int8),
-            glyph("type.uint8", "UInt 8", "Change to uint8_t — unsigned byte (U on a 1-byte field)", "U8", GF::Unsigned, NodeKind::UInt8),
-
-            glyph("type.double", "Double", "Change to double — 8-byte float (F on an 8-byte field)", "D", GF::Float, NodeKind::Double, true, true, "Float:"),
-            glyph("type.float", "Float", "Change to float — 4-byte float (F on a 4-byte field)", "F", GF::Float, NodeKind::Float),
-            glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool),
-
-            glyph("type.vec2", "Vec 2", "Change to vec2 — 2 floats, 8 bytes", "V2", GF::Float, NodeKind::Vec2, true, true),
-            glyph("type.vec3", "Vec 3", "Change to vec3 — 3 floats, 12 bytes", "V3", GF::Float, NodeKind::Vec3),
-            glyph("type.vec4", "Vec 4", "Change to vec4 — 4 floats, 16 bytes", "V4", GF::Float, NodeKind::Vec4),
-
-            glyph("type.mat4x4", "Mat 4x4", "Change to mat4x4 — 16 floats, 64 bytes", "M4", GF::Float, NodeKind::Mat4x4, true),
-
-            glyph("type.pointer", "Pointer", "Change to ptr64 — 8-byte pointer (P key)", "PTR", GF::Pointer, NodeKind::Pointer64, true, true, "Ptr:"),
-            glyph("type.funcptr", "Func Ptr", "Change to fnptr64 — 8-byte function pointer", "FN*", GF::Pointer, NodeKind::FuncPtr64),
-
-            glyph("type.utf8", "Str", "Change to str — ASCII / UTF-8 text", "STR", GF::Text, NodeKind::UTF8, true, true, "Str:"),
-            glyph("type.utf16", "WStr", "Change to wstr — UTF-16 text", "WSTR", GF::Text, NodeKind::UTF16),
-        };
-        {
-            RibbonItemSpec custom = codicon("type.custom", "Custom…",
-                                            "Any type by name: opens the inline type editor",
-                                            "symbol-misc", GF::Plain, SZ::Small, false, true);
-            custom.keepLabel = true;   // a word, not a glyph — it survives the drop
-            // Custom… belongs to no type family: it closes "Str:" so that
-            // caption sits over STR/WSTR and not over this button.
-            custom.endsCaptionGroup = true;
-            type.items.append(custom);
-        }
-        tab.panels.append(type);
-
 
         tabs.append(tab);
     }

@@ -6193,7 +6193,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
     QMenu* copyMenu = menu.addMenu(icon("clippy.svg"), "Copy");
     if (hasNode) {
         uint64_t copyNodeId = m_doc->tree.nodes[nodeIdx].id;
-        copyMenu->addAction(icon("link.svg"), "Copy &Address\tCtrl+C", [this, copyNodeId]() {
+        copyMenu->addAction(icon("link.svg"), "Copy &Address\tCtrl+Shift+C", [this, copyNodeId]() {
             int ni = m_doc->tree.indexOfId(copyNodeId);
             if (ni < 0) return;
             int64_t off = m_doc->tree.computeOffset(ni);
@@ -6211,7 +6211,7 @@ void RcxController::showContextMenu(RcxEditor* editor, int line, int nodeIdx,
         });
         copyMenu->addSeparator();
     }
-    copyMenu->addAction("Copy Line\tCtrl+X", [editor, line]() {
+    copyMenu->addAction("Copy Line", [editor, line]() {
         auto* sci = editor->scintilla();
         int len = (int)sci->SendScintilla(QsciScintillaBase::SCI_LINELENGTH, (unsigned long)line);
         if (len > 0) {

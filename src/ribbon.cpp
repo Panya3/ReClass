@@ -47,15 +47,25 @@ Theme fallbackTheme() {
 // (title label, breadcrumb, status) — one left edge down the whole app.
 constexpr int kLeftMargin   = kGutter;
 constexpr int kRightMargin  = 6;
-// Between panels, with the 1-device-px divider centred in the gap. Tightened
-// from 13/7 when the 5×7 font widened the Type cells: the gap is dead space,
-// the labels are not, and at 13 the Modify tab overflowed 1080 and dropped
-// the Add / Insert words.
-// FORK, 10→9: this machine's JetBrains Mono advances a hair wider than
-// upstream's (see the kColGap note), and 4 panel gaps × 1px closes the
-// remaining ~3px of the bothTabsFitTheUserWindow overflow.
-constexpr int kPanelGap     = 9;
-constexpr int kDividerInset = 5;
+// Between panels, with the 1-device-px divider CENTRED in the gap.
+// 14/8, not 10/5: the panel divider is the only pre-attentive "a new group
+// starts here" cue on the strip, and at a 10-px gap it read as one more
+// hairline among the family separators inside the Type panel. The inset is
+// 1 + kPanelGap/2 because rect.right() is inclusive, which puts the ink
+// 0.4 px off true centre instead of the 4.4 px it sat at before.
+// Affordable only because Add / Insert went icon-only in the same pass; an
+// earlier attempt at 13 overflowed 1080 and silently dropped their words.
+// Blend `a` toward `b` by k (0 = a, 1 = b). Used to de-rank the family
+// separators against the panel dividers without inventing a theme token.
+static QColor blendToward(const QColor& a, const QColor& b, qreal k) {
+    return QColor::fromRgbF(a.redF()   + (b.redF()   - a.redF())   * k,
+                            a.greenF() + (b.greenF() - a.greenF()) * k,
+                            a.blueF()  + (b.blueF()  - a.blueF())  * k,
+                            a.alphaF());
+}
+
+constexpr int kPanelGap     = 14;
+constexpr int kDividerInset = 8;
 // `|` between columns INSIDE a panel. 2, not 3: the columns already have
 // their own cell padding, and at 3 the Modify tab had one pixel of slack
 // at 1080 once "Break Class" became "Extract Class" — one metric nudge
@@ -297,7 +307,9 @@ RibbonBar::Metrics RibbonBar::metrics() const {
     m.tabRowH  = fm.height() + 8;              // 25 at 10 pt (4 px of air above/below)
     m.rowH     = qMax(18, fm.height() + 1);    // 18
     m.captionH = 12;                           // 9 pt caption; glyphs overhang the rect
-    m.captionGap = 4;                          // air between the last item row and the caption
+    // 7, not 4: the clear space under row 3 must EXCEED the 7.8 px between
+    // item rows, or the caption band reads as a fourth row of buttons.
+    m.captionGap = 7;
     m.padTop   = 2;
     // padTop + 3 rows + captionGap + caption + body bottom hairline -> 73; 98 with
     // the tab row. The gap is why the captions no longer sit right on the third
@@ -978,9 +990,16 @@ void RibbonBar::paintBody(QPainter& p, const Metrics& m) {
     // never end up as bright as the labels it captions.
     const QColor captionTone = ribbonToneColour(t.textDim, t, t.background);
     for (const LaidPanel& lp : m_layout.panels) {
-        // `||` family separators span the rows only.
+        // `||` family separators span the rows only, and are painted SOFTER
+        // than the panel dividers. Modify draws 3 dividers and up to 8 family
+        // separators; at one ink they were eleven peer rules and the panel
+        // boundaries stopped being findable. Blended toward the ribbon ground
+        // but floored through the same contrast ladder the captions use, so a
+        // theme whose border already sits near the background cannot erase it.
+        const QColor sepTone = ribbonToneColour(
+            blendToward(t.border, t.background, 0.35), t, t.background);
         for (int sx : lp.separatorXs)
-            fillLeftDeviceColOfRect(p, QRectF(sx, itemsTop + 3, 1, itemsH - 6), t.border);
+            fillLeftDeviceColOfRect(p, QRectF(sx, itemsTop + 3, 1, itemsH - 6), sepTone);
         p.setFont(captionFont());
         p.setPen(captionTone);
         if (!lp.groupCaptions.isEmpty()) {
@@ -1112,7 +1131,16 @@ void RibbonBar::paintItem(QPainter& p, const LaidItem& li, const Metrics& m) {
                                   cellR.width() - (3 + cellW + 4) - 6, r.height());
             p.drawText(labelRect, Qt::AlignLeft | Qt::AlignVCenter, ribbonStripLabel(*spec));
         } else {
-            drawPixmapSnapped(p, QPointF(cellR.left() + (cellR.width() - cellW) / 2, iconY), pm);
+            // Centred in its own cell normally — but LEFT-aligned when the
+            // column is widened by a labelled neighbour. "Other:" holds the
+            // Bool glyph over "Custom…"; centred, the 22-px "B" floated in the
+            // middle of an 84-px column above a left-aligned word, and its
+            // hover fill was an 84-px band for a 22-px mark.
+            const bool widenedByALabel = cellR.width() > cellW + 12;
+            const qreal x = widenedByALabel
+                ? cellR.left() + 3
+                : cellR.left() + (cellR.width() - cellW) / 2.0;
+            drawPixmapSnapped(p, QPointF(x, iconY), pm);
         }
     }
     if (checked) fillBottomDeviceRowsOfRect(p, r, kUnderlineRows, t.indHoverSpan);

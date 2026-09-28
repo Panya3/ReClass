@@ -1909,7 +1909,7 @@ void MainWindow::createMenus() {
         });
     }
     {
-        auto* actGoTo = view->addAction("&Go to Address...");
+        auto* actGoTo = view->addAction("Set as &Base Address...");
         m_actGoto = actGoTo;
         actGoTo->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
         connect(actGoTo, &QAction::triggered, this, &MainWindow::showGotoAddressDialog);
