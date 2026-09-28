@@ -313,9 +313,6 @@ private:
     // emits, so a mirror revealed mid-session still gets its content from the
     // forced refresh.
     QString           m_lastEmittedText;
-    // Line currently carrying the footer-pill hover fill (-1 = none), so the
-    // fill and its tooltip can be cleared without a doc-wide sweep.
-    int               m_pillHoverLine = -1;
 
     // ── Toggle: absolute vs relative offset margin
     bool m_relativeOffsets = true;

@@ -1702,7 +1702,8 @@ static constexpr int IND_ZERO       = 10;  // theme.textMuted over the ASCII pre
                                            // (which is inside the type-column span),
                                            // below IND_HOVER_SPAN so hover still wins.
 static constexpr int IND_HOVER_SPAN = 11;  // Blue text on hover (link-like)
-static constexpr int IND_CMD_PILL   = 12;  // Rounded chip behind command row spans
+// Slot 12 is free: it held the footer-pill outline until the boxes were
+// removed (2026-09-06). Slot 30 (the pill hover box) went with it.
 static constexpr int IND_HEAT_COLD    = 13; // Heatmap level 1 (changed once)
 static constexpr int IND_CLASS_NAME   = 14; // Teal text for root class name
 static constexpr int IND_HINT_GREEN   = 15; // Green text for hint/comment text
@@ -1760,23 +1761,6 @@ static constexpr int IND_EDITABLE     = 29; // INDIC_HIDDEN bookkeeping span mar
                                             // so its slot number carries no precedence
                                             // meaning — it lives up here to leave the low
                                             // slots free for the tone ladder.
-static constexpr int IND_PILL_HOVER   = 30; // STRAIGHTBOX behind the footer pill the cursor
-                                            // is on: theme.textDim, alpha 40 fill + alpha 255
-                                            // outline, so the pill's edge brightens and its
-                                            // interior lifts one step. NEITHER band token works
-                                            // here — hovering a pill necessarily hovers its
-                                            // row (band = theme.hover) and a footer row is
-                                            // selectable (band = theme.selected), so either
-                                            // fill would be pixel-identical to its surroundings
-                                            // on exactly the row it must appear on, and
-                                            // theme.selected would additionally make a hovered
-                                            // pill read as a selected row. Above IND_CMD_PILL
-                                            // (12) so the brighter hover edge replaces the
-                                            // resting theme.border edge instead of hiding under
-                                            // it. Deliberately not IND_CHIP_HOVER either: that
-                                            // slot is cleared and repainted wholesale from the
-                                            // tail-chip bookkeeping, so sharing it would have
-                                            // the two passes wipe each other.
 static constexpr int IND_UNREADABLE   = 28; // Strike-through (INDIC_STRIKE) in theme.markerError
 static constexpr int IND_OVERLAP      = 29; // Full-row warning band (STRAIGHTBOX) on fields whose
                                             // offset overlaps a sibling (duplicate offset or size
@@ -2217,47 +2201,10 @@ void RcxEditor::setupScintilla() {
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_HOVER_SPAN, 17 /*INDIC_TEXTFORE*/);
 
-    // Footer pill outline (+1 / +10h / … / Trim / Top). Despite the name this
-    // indicator is only ever filled by the footer pass. Outline-only at rest —
-    // alpha 0, outline 255 in theme.border — so the pills match the validated
-    // dialog-button idiom (square, no fill, one hairline) instead of reading as
-    // six filled blobs competing with the data above them.
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
-                         IND_CMD_PILL, 8 /*INDIC_STRAIGHTBOX*/);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
-                         IND_CMD_PILL, (long)0);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETOUTLINEALPHA,
-                         IND_CMD_PILL, (long)255);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
-                         IND_CMD_PILL, (long)1);
-
-    // Footer pill hover — the button that lights up under the cursor.
-    // Own slot (not IND_CHIP_HOVER, which the tail-chip pass owns end to end).
-    // Painted in theme.textDim: a light WASH (alpha 40) inside the box plus a
-    // SOLID edge (outline alpha 255), so hovering brightens the pill's border
-    // and lifts its interior one step off whatever band the row carries.
-    // A band token cannot do that job — the pill's own row is already
-    // painted theme.hover, and a footer row is selectable, so a theme.hover or
-    // theme.selected fill goes invisible on exactly the row it has to appear
-    // on (and theme.selected would additionally make a hovered pill read as a
-    // selected row). textDim is a foreground token: it reads as a lift over
-    // every band in every dark theme, as a darkening on the light theme, and
-    // never collides with the row-band language.
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
-                         IND_PILL_HOVER, 8 /*INDIC_STRAIGHTBOX*/);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
-                         IND_PILL_HOVER, (long)40);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETOUTLINEALPHA,
-                         IND_PILL_HOVER, (long)255);
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETUNDER,
-                         IND_PILL_HOVER, (long)1);
-
     // Tail-chip pill background — STRAIGHTBOX styled to match the footer
     // buttons (+1, +10h, Trim, Top) so chips and footer affordances read
-    // as the same kind of "pill button". Same alpha/outline as IND_CMD_PILL
-    // → identical fill saturation and edge weight. The earlier high-
-    // outline-alpha look made chips read as outlined badges (different
-    // visual language from the footer); matching them unifies the UI.
+    // as the same kind of "pill button". The footer pills themselves are
+    // outline-free now, so this is the only place the idiom survives.
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETSTYLE,
                          IND_CHIP_BG, 8 /*INDIC_STRAIGHTBOX*/);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETALPHA,
@@ -2515,13 +2462,6 @@ void RcxEditor::applyTheme(const Theme& theme) {
                          IND_TREE_CONN, theme.textMuted);
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HOVER_SPAN, theme.indHoverSpan);
-    // Pill outline, not pill fill (alpha 0 / outline 255 above).
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_CMD_PILL, theme.border);
-    // One step above the row hover band it is painted over (see the slot's
-    // comment for why theme.hover reads as no fill at all here).
-    m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
-                         IND_PILL_HOVER, theme.textDim);
     // Heatmap colors
     m_sci->SendScintilla(QsciScintillaBase::SCI_INDICSETFORE,
                          IND_HEAT_COLD, theme.indHeatCold);
@@ -2994,11 +2934,11 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         PROFILE_SCOPE("applyDocument.clearIndicators");
         long docLen = m_sci->SendScintilla(QsciScintillaBase::SCI_GETLENGTH);
         for (int ind : {IND_HEX_BYTE, IND_HEX_DIM, IND_HEX_TYPE, IND_ZERO,
-                        IND_HOVER_SPAN, IND_CMD_PILL,
+                        IND_HOVER_SPAN,
                         IND_HEAT_COLD, IND_CLASS_NAME, IND_HINT_GREEN,
                         IND_LOCAL_OFF, IND_HEAT_WARM, IND_HEAT_HOT,
                         IND_TYPE_HINT, IND_RTTI_HINT, IND_CHIP_BG,
-                        IND_CHIP_HOVER, IND_CHIP_PRESSED, IND_PILL_HOVER,
+                        IND_CHIP_HOVER, IND_CHIP_PRESSED,
                         IND_TREE_CONN, IND_BYTE_SEL, IND_EDIT_BOUNDS,
                         IND_UNREADABLE, IND_OVERLAP}) {
             m_sci->SendScintilla(QsciScintillaBase::SCI_SETINDICATORCURRENT, (long)ind);
@@ -3010,10 +2950,6 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
         m_chipHoverStartCol = -1;
         m_chipHoverEndCol   = -1;
         m_chipPressed       = false;
-        // Same for the footer pill: IND_PILL_HOVER was just cleared
-        // document-wide, so the cached line must not outlive it (on a
-        // document that shrank it would point past the end).
-        m_pillHoverLine     = -1;
     }
 
     // Marker/margin work stays narrowed — that's where the real cost
@@ -3054,14 +2990,12 @@ void RcxEditor::applyDocument(const ComposeResult& result) {
 
     applyCommandRowPills();
 
-    // Footer pill outlines — full-doc (indicators forced full-pass). One span
-    // list, shared with the tone pass, the hover paint and the click handler,
-    // so a pill can never be outlined where it isn't clickable.
-    for (int i = 0; i < result.meta.size(); i++) {
-        if (result.meta[i].lineKind != LineKind::Footer) continue;
-        for (const FooterPill& p : footerPillsIn(lineTexts[i]))
-            fillIndicatorCols(IND_CMD_PILL, i, p.textStart, p.textStart + p.textLen);
-    }
+    // NO footer-pill outline. The boxes round +1 / +10h / +100h were tried and
+    // rejected (user, 2026-09-06: "i dont like the outline box"): six outlined
+    // chips on the last line of every class read as a toolbar bolted to the
+    // document. The pills are still clickable and still get the type tone from
+    // the pass above, so they read as controls inside furniture; the hover
+    // underline is what confirms one is live.
 
     // Per-chip indicator coloring: Enum / TypeHint / Rtti / Comment all
     // emitted into lm.chips by compose.cpp (one source of truth for spans).
@@ -3486,8 +3420,7 @@ void RcxEditor::applyHexDimming(const QVector<LineMeta>& meta,
                 fillIndicatorCols(IND_HEX_DIM, i, cursor, ft.size());
                 // …and give the glyphs themselves the type tone, so a pill
                 // reads as a control sitting in furniture rather than as more
-                // furniture. The outline (IND_CMD_PILL) is painted in
-                // applyDocument's footer pass from the same span list.
+                // furniture. No outline: the pills carry tone only.
                 for (const FooterPill& p : pills)
                     fillIndicatorCols(IND_HEX_TYPE, i, p.textStart,
                                       p.textStart + p.textLen);
@@ -7823,6 +7756,10 @@ QVector<RcxEditor::FooterPill> RcxEditor::footerPillsIn(const QString& ft) {
 
 // One label per pill — the same words the tooltip shows and the same verb the
 // command it triggers uses elsewhere in the UI.
+// DORMANT: the footer pills carry no tooltip since 2026-09-06 (it collided
+// with the value-preview popups on the rows above). Kept because the user
+// asked for the tooltip to go "for now" and this is where the per-pill
+// wording lives; wire it back into applyHoverCursor to restore it.
 QString RcxEditor::footerPillTooltip(const FooterPill& p) {
     switch (p.action) {
     case FooterPill::Action::AddField:        return QObject::tr("Append one field");
@@ -8005,14 +7942,6 @@ void RcxEditor::applyHoverCursor() {
         clearIndicatorLine(IND_HOVER_SPAN, ln);
     m_hoverSpanLines.clear();
 
-    // Footer-pill hover fill + its tooltip live on the same clear cycle as the
-    // hover underline: both are repainted below when the pointer is still on a
-    // pill, so clearing unconditionally here cannot leave a stale one behind.
-    if (m_pillHoverLine >= 0) {
-        clearIndicatorLine(IND_PILL_HOVER, m_pillHoverLine);
-        m_pillHoverLine = -1;
-        if (m_sci->viewport()) m_sci->viewport()->setToolTip(QString());
-    }
 
     // Lock cursor to Arrow during drag-selection (prevents flicker)
     if (m_dragStarted) {
@@ -8218,19 +8147,11 @@ void RcxEditor::applyHoverCursor() {
             fillIndicatorCols(IND_HOVER_SPAN, h.line,
                               pill.textStart, pill.textStart + pill.textLen);
             m_hoverSpanLines.append(h.line);
-            // Light the box (theme.textDim wash + solid edge, UNDER — see the
-            // IND_PILL_HOVER slot comment for why neither row band can be used
-            // here) so a hovered pill reads like every other hovered button in
-            // the app; the purple text above stays as the "this is a link"
-            // half of the cue.
-            fillIndicatorCols(IND_PILL_HOVER, h.line,
-                              pill.textStart, pill.textStart + pill.textLen);
-            m_pillHoverLine = h.line;
-            // The editor viewport has no dwell-tooltip path of its own, so the
-            // affordance bridge sets the viewport tooltip directly. Cleared at
-            // the top of the next applyHoverCursor.
-            if (m_sci->viewport())
-                m_sci->viewport()->setToolTip(footerPillTooltip(pill));
+            // The hover cue is the purple text + underline filled just above,
+            // and nothing else. The box that used to light up here was the
+            // same outline the user rejected at rest, and the viewport tooltip
+            // that came with it collided with the value-preview popups on the
+            // rows immediately above. Removed together, deliberately.
         }
     }
 

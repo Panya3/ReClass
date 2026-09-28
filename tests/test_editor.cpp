@@ -59,8 +59,6 @@ static constexpr int kIndHexType   = 8;   // textDim  — hex type column + name
 static constexpr int kIndHexDim    = 9;   // textFaint — furniture only
 static constexpr int kIndZero      = 10;  // textMuted — ASCII column + 00 bytes
 static constexpr int kIndHoverSpan = 11;
-static constexpr int kIndCmdPill   = 12;  // footer pill outline
-static constexpr int kIndPillHover = 30;  // footer pill hover fill
 
 // Is indicator `ind` set on the character at (line, col)?
 static bool indAt(QsciScintilla* sci, int ind, int line, int col) {
@@ -4413,9 +4411,10 @@ private slots:
         const int plus10 = ft.indexOf(QStringLiteral("+10h"));
         QVERIFY(plus10 > 0);
 
-        // Rest state: outlined, painted at the type tone, NOT faint — while
-        // the "};" and the "// 0x… (…)" comment around it stay furniture.
-        QVERIFY2(indAt(sci, kIndCmdPill, line, plus10), "pill has no outline");
+        // Rest state: NO box of any kind (the outline was removed 2026-09-06 —
+        // six outlined chips on every class footer read as a toolbar bolted to
+        // the document). The pill is tone alone: the type tone on the glyphs,
+        // while the "};" and the "// 0x… (…)" comment around it stay furniture.
         QVERIFY2(indAt(sci, kIndHexType, line, plus10),
                  "pill glyphs are not painted at the type tone");
         QVERIFY2(!indAt(sci, kIndHexDim, line, plus10),
@@ -4428,74 +4427,38 @@ private slots:
         if (comment > 0)
             QVERIFY2(indAt(sci, kIndHexDim, line, comment),
                      "the byte-count comment stopped being furniture");
-        QVERIFY2(!indAt(sci, kIndPillHover, line, plus10),
-                 "pill is filled at rest");
 
-        // Hover: the outlined box fills, the glyphs go purple, and the
-        // viewport carries the pill's one label.
+        // Hover: the glyphs take the link tone, and that is the WHOLE cue.
         scrollLineIntoView(sci, line);
         sendMouseMove(sci->viewport(), colToViewport(sci, line, plus10 + 1));
         QApplication::processEvents();
-        QVERIFY2(indAt(sci, kIndPillHover, line, plus10),
-                 "hovered pill did not fill");
         QVERIFY2(indAt(sci, kIndHoverSpan, line, plus10),
                  "hovered pill did not take the link tone");
-        QVERIFY2(indAt(sci, kIndCmdPill, line, plus10),
-                 "hovering a pill destroyed its outline — it reads as a solid "
-                 "block instead of the same box, now lit");
-        // The hover cue may not BE a row band: the pill's own row already
-        // carries theme.hover, and a footer row is selectable, so either band
-        // token would be invisible on exactly the row it must appear on —
-        // and theme.selected would make a hovered pill read as a selected row.
-        {
-            const auto& th = rcx::ThemeManager::instance().current();
-            const long f = sci->SendScintilla(QsciScintillaBase::SCI_INDICGETFORE,
-                                              (unsigned long)kIndPillHover);
-            const QColor fill((int)(f & 0xFF), (int)((f >> 8) & 0xFF),
-                              (int)((f >> 16) & 0xFF));
-            QVERIFY2(fill.name() != th.hover.name(),
-                     "pill hover fill is the row hover band (invisible on the "
-                     "row it appears on)");
-            QVERIFY2(fill.name() != th.selected.name(),
-                     "pill hover fill is the row selection band (collides with "
-                     "the selected-row state)");
-        }
-        QCOMPARE(sci->viewport()->toolTip(),
-                 QStringLiteral("Append 16 bytes (0x10)"));
 
-        // Leaving clears both the fill and the tooltip.
+        // Leaving clears it.
         sendMouseMove(sci->viewport(), colToViewport(sci, line, brace));
         QApplication::processEvents();
-        QVERIFY2(!indAt(sci, kIndPillHover, line, plus10),
-                 "pill fill survived the pointer leaving");
-        QVERIFY(sci->viewport()->toolTip().isEmpty());
+        QVERIFY2(!indAt(sci, kIndHoverSpan, line, plus10),
+                 "hover tone survived the pointer leaving");
     }
 
-    // Every pill on a footer resolves through one span list, so the outline,
-    // the hover fill and the click handler cannot disagree about bounds.
-    void testFooterPillLabelsAreOnePerCommand() {
+    // Footer pills carry NO tooltip (removed 2026-09-06: it collided with the
+    // value-preview popups on the rows above). Pinned so it cannot creep back
+    // in unnoticed — hovering every pill must leave the viewport tooltip empty.
+    void testFooterPillsHaveNoTooltip() {
         m_editor->applyDocument(m_result);
         auto* sci = m_editor->scintilla();
         const int line = firstPillFooterLine(m_editor);
         QVERIFY(line >= 0);
         const QString ft = sci->text(line);
         scrollLineIntoView(sci, line);
-
-        struct { const char* token; const char* label; } expect[] = {
-            { " +1 ",    "Append one field" },
-            { "+10h",    "Append 16 bytes (0x10)" },
-            { "+100h",   "Append 256 bytes (0x100)" },
-            { "+1000h",  "Append 4096 bytes (0x1000)" },
-            { "Trim",    "Remove trailing hex padding" },
-            { "Top",     "Scroll to top" },
-        };
-        for (const auto& e : expect) {
-            const int at = ft.indexOf(QString::fromLatin1(e.token));
-            QVERIFY2(at >= 0, e.token);
-            const int col = at + (QString::fromLatin1(e.token).startsWith(' ') ? 1 : 0);
+        for (const char* token : { " +1 ", "+10h", "+100h", "+1000h", "Trim", "Top" }) {
+            const int at = ft.indexOf(QString::fromLatin1(token));
+            QVERIFY2(at >= 0, token);
+            const int col = at + (QString::fromLatin1(token).startsWith(' ') ? 1 : 0);
             sendMouseMove(sci->viewport(), colToViewport(sci, line, col));
             QApplication::processEvents();
-            QCOMPARE(sci->viewport()->toolTip(), QString::fromLatin1(e.label));
+            QVERIFY2(sci->viewport()->toolTip().isEmpty(), token);
         }
     }
 

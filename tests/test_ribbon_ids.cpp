@@ -46,7 +46,7 @@ private slots:
 
     // Every command's words come from ONE place: the spec table. A button and
     // its action can no longer drift apart (Ptr→Class vs "Ptr → Class",
-    // "Swap" vs "Big endian", "Class" vs "Break Class"…).
+    // "Swap" vs "Big endian", "Class" vs "Extract Class"…).
     void testLabelsAndTooltipsComeFromTheSpec() {
         RibbonActions acts([]() -> RcxController* { return nullptr; },
                            []() -> RcxEditor* { return nullptr; });
@@ -63,7 +63,7 @@ private slots:
         QCOMPARE(acts.action(QStringLiteral("type.hex64"))->text(), QStringLiteral("Hex 64"));
         QCOMPARE(acts.action(QStringLiteral("sel.swap"))->text(), QStringLiteral("Big endian"));
         QVERIFY(acts.action(QStringLiteral("sel.swap"))->isCheckable());
-        QCOMPARE(acts.action(QStringLiteral("type.class"))->text(), QStringLiteral("Break Class"));
+        QCOMPARE(acts.action(QStringLiteral("type.class"))->text(), QStringLiteral("Extract Class"));
     }
 
     void testEveryModifyButtonHasAnAction() {

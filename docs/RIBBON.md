@@ -59,7 +59,7 @@ Type `neverHide`):
 | **Add** / **Insert** | 4 · 8 · 64 ‖ 1024 · 2048. The strip shows the count alone (`shortLabel`); the `QAction` keeps "Add 4". |
 | **Selection** (id `selected`) | Delete (red) · Duplicate · Comment ‖ `000` `FFF` `???` (icon-only) ‖ **Big endian** (checkable) · **RTTI** |
 | **Type** (`glyphLabels`) | `Hex:` H64 H32 H16 ‖ `Int:` I64 I32 I16 ‖ `UInt:` U64 U32 U16 ‖ `Byte:` H8 I8 U8 ‖ `Float:` D F B · V2 V3 V4 · M4 ‖ `Ptr:` PTR FN* ‖ `Str:` STR WSTR ‖ **Custom…** (`keepLabel`) |
-| **Structure** | Break Class (teal) · Ptr → Class (teal) · Array — all three `keepLabel`: words in **every** label mode and at every width (a bare `list-selection` glyph does not say "Break Class"). |
+| **Structure** | Extract Class (teal) · Ptr → Class (teal) · Array — all three `keepLabel`: words in **every** label mode and at every width (a bare `list-selection` glyph does not say "Extract Class"). The command had THREE names before 2026-09-06 (node menu "Break Class", Edit menu "Break into Class", ribbon "Break Class"); it is one name now, and it matches what the code has always called it (`extractByteSelectionToNewClass`). |
 
 ## Action ids
 

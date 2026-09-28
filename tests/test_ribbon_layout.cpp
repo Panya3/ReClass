@@ -397,7 +397,7 @@ void TestRibbonLayout::labelModes() {
     // DELIBERATE CHANGE (was `!itemLabelShown("type.array")`): the three
     // Structure commands are `keepLabel` — "words in every mode" — so they are
     // deliberately NOT part of the wordless sweep. A bare list-selection glyph
-    // does not say "Break Class".
+    // does not say "Extract Class".
     QVERIFY(bar.itemLabelShown(QStringLiteral("type.array")));
     // DELIBERATE CHANGE (was `<= 1`): keeping the Structure words costs ~48 px
     // that used to be spent on its labels, so at 760 the second panel in the
@@ -775,10 +775,11 @@ void TestRibbonLayout::flatMetrics() {
     const QRect modify = bar.tabRect(QStringLiteral("modify")), home = bar.tabRect(QStringLiteral("home"));
     QCOMPARE(home.left(), rcx::kGutter);
     QCOMPARE(modify.left(), home.right() + 1 + 8);
-    // Panels: 10 px gap; first row starts 2 px under the tab row.
+    // Panels: kPanelGap px gap (FORK: 9, see the ribbon.cpp constant note);
+    // first row starts 2 px under the tab row.
     bar.setCurrentTab(QStringLiteral("modify"));
     const QRect add = bar.panelRect(QStringLiteral("add")), ins = bar.panelRect(QStringLiteral("insert"));
-    QCOMPARE(ins.left(), add.right() + 1 + 10);
+    QCOMPARE(ins.left(), add.right() + 1 + 9);
     QCOMPARE(add.top(), bar.tabRowHeight() + 2);
     QCOMPARE(add.height(), 3 * qMax(18, fm.height() + 1) + 4 + 12);
     // Small rect is colW × 18 with a per-kind icon cell: H64 (24) column wider
@@ -792,8 +793,10 @@ void TestRibbonLayout::flatMetrics() {
     // DELIBERATE CHANGE (was 16 + 6, the icon-only cell): Structure is
     // keepLabel, so even in IconsOnly its three items carry words and the
     // column takes the widest of them.
+    // The Structure column takes its widest keepLabel item, which is now
+    // "Extract Class" (was "Ptr → Class" when the command was "Break Class").
     QCOMPARE(bar.itemRect(QStringLiteral("type.array")).width(),
-             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Ptr → Class")) + 6);
+             3 + 16 + 4 + fm.horizontalAdvance(QStringLiteral("Extract Class")) + 6);
     QCOMPARE(bar.itemRect(QStringLiteral("type.class")).width(),
              bar.itemRect(QStringLiteral("type.array")).width());
     QCOMPARE(bar.itemRect(QStringLiteral("type.hex64")).height(), qMax(18, fm.height() + 1));
@@ -868,7 +871,7 @@ void TestRibbonLayout::nothingFilledAtRest() {
     // clear of both hairlines (2 px), and nothing else in the gap.
     const QRect ins = bar.panelRect(QStringLiteral("insert"));
     const int gapL = add.right() + 1, gapR = ins.left() - 1;
-    QCOMPARE(gapR - gapL + 1, 10);
+    QCOMPARE(gapR - gapL + 1, 9);   // FORK: kPanelGap 9, see ribbon.cpp
     int cols = 0;
     const int yMid = qRound((add.top() + 20) * dpr);
     for (int x = qRound(gapL * dpr); x <= qRound((gapR + 1) * dpr); ++x)
@@ -1335,7 +1338,7 @@ void TestRibbonLayout::groupCaptionsSpanTheirColumns() {
 
 // P1 #18: "gives the three restructuring commands words in every mode".
 // keepLabel, not the ordinary labelDrop treatment — a bare list-selection
-// glyph does not say "Break Class".
+// glyph does not say "Extract Class".
 void TestRibbonLayout::structureKeepsItsWordsEverywhere() {
     RibbonBar bar;
     bar.applyTheme(m_dark);

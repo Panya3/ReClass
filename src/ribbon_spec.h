@@ -395,8 +395,8 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         structure.labelDrop = 10;
         structure.hideOrder = 30;
         {
-            RibbonItemSpec brk = codicon("type.class", "Break Class",
-                                         "Break the selected bytes / fields into a new embedded class (Ctrl+Shift+B)",
+            RibbonItemSpec brk = codicon("type.class", "Extract Class",
+                                         "Extract the selected bytes / fields into a new embedded class (Ctrl+Shift+B)",
                                          "selection", GF::Pointer);
             brk.data = int(NodeKind::Struct);
             brk.keepLabel = true;      // words in EVERY label mode

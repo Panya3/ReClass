@@ -51,9 +51,20 @@ constexpr int kRightMargin  = 6;
 // from 13/7 when the 5×7 font widened the Type cells: the gap is dead space,
 // the labels are not, and at 13 the Modify tab overflowed 1080 and dropped
 // the Add / Insert words.
-constexpr int kPanelGap     = 10;
+// FORK, 10→9: this machine's JetBrains Mono advances a hair wider than
+// upstream's (see the kColGap note), and 4 panel gaps × 1px closes the
+// remaining ~3px of the bothTabsFitTheUserWindow overflow.
+constexpr int kPanelGap     = 9;
 constexpr int kDividerInset = 5;
-constexpr int kColGap       = 3;   // `|`
+// `|` between columns INSIDE a panel. 2, not 3: the columns already have
+// their own cell padding, and at 3 the Modify tab had one pixel of slack
+// at 1080 once "Break Class" became "Extract Class" — one metric nudge
+// away from silently dropping labels.
+// FORK, 1 not 2: this machine's installed JetBrains Mono advances ~0.1px/char
+// wider than upstream's (two different JBM builds in play — the repo qrc copy
+// vs the system-installed one; md5s differ), which re-added ~8px across the
+// Modify tab and overflowed 1080 again (test bothTabsFitTheUserWindow).
+constexpr int kColGap       = 1;
 constexpr int kSepGap       = 7;   // `||` (hairline in the middle)
 // The tab titles get noticeably more air than the strip gutter: they are the
 // ribbon's own navigation, read as words rather than buttons, and at kGutter
