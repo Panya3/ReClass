@@ -120,21 +120,20 @@ inline QFont pixelLabelFontAt(int sizeDev) {
     return f;
 }
 
-// The BIGGEST whole multiple of the 11 px design size whose cap box still fits
-// the icon cell, with a pixel of air top and bottom.
-//
-// DERIVED, not hardcoded, because the ceiling here is geometry rather than
-// taste: the cell is 16 LOGICAL px, so the device budget moves with the DPI.
-// A flat 4x was tried and clipped (44 px wants 32 device px of cap in a 20 px
-// cell), and a flat 2x clipped at 100 %, where that same cell is only 16 device
-// px. This lands on 11 at 100 %, 22 at 125 % and 150 %, 33 at 200 % — as large
-// as the row can actually hold, at every DPI, and always on the pixel grid.
+// Glyph size in DEVICE px, clamped so it can never overflow the icon cell.
+// 12 logical px is the target: 15 device at 125 %, which is a third smaller
+// than the 22 it was briefly set to. The drawing path hard-thresholds, so a
+// size off the font's 11 px design grid still comes out hard-edged.
 inline int pixelFontSizeDev(qreal dpr) {
+    const qreal d = dpr > 0 ? dpr : 1.0;
+    const int want = qMax(8, qRound(12.0 * d));
+    // Never taller than the 16-logical icon cell, less a pixel of air.
     static const int capAtDesign =
         qMax(1, QFontMetrics(pixelLabelFontAt(kPixelFontDesign)).capHeight());
-    const qreal d = dpr > 0 ? dpr : 1.0;
-    const int budget = qMax(1, qRound(16.0 * d) - 2);   // icon cell, less 1 px of air
-    return kPixelFontDesign * qBound(1, budget / capAtDesign, 4);
+    const int budget = qMax(1, qRound(16.0 * d) - 2);
+    const int maxSize = qMax(kPixelFontDesign,
+                             kPixelFontDesign * budget / capAtDesign);
+    return qMin(want, maxSize);
 }
 
 inline QFont pixelLabelFont(qreal dpr) { return pixelLabelFontAt(pixelFontSizeDev(dpr)); }

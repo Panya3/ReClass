@@ -329,60 +329,52 @@ inline QVector<RibbonTabSpec> buildDefaultRibbonSpec() {
         type.labelDrop = 30;
         type.neverHide = true;
         type.glyphLabels = true;   // the glyphs ARE the labels, in every mode
-        // SIZE-MAJOR, and ONE CHARACTER per button.
-        //
-        // Columns are WIDTHS, rows are readings: 64 / 32 / 16 / 8, each column
-        // Hex over Int over UInt. Kind-major made row 1 read "H64 I64 U64 H8" —
-        // the row's meaning broke at the fourth column — and it disagreed with
-        // the keyboard, where 1-4 pick a WIDTH and S/U/F reinterpret at the
-        // existing size.
-        //
-        // Once the columns ARE the sizes, the digits in "H64" were saying what
-        // the caption underneath already said. Dropping them is what lets the
-        // glyph be drawn at 2x: a single character is nearly square (0.81)
-        // where "H64" is 2.38 wide however large you set it, and it is
-        // NARROWER than the three-character cell it replaces. Every column is
-        // disambiguated by its caption, so H/I/U repeating down the matrix
-        // reads as a table, not as four identical buttons.
+        // SIZE-MAJOR, not kind-major. Columns are WIDTHS, rows are readings:
+        // 64 / 32 / 16 / 8, each column Hex over Int over UInt. Kind-major
+        // made row 1 read "H64 I64 U64 H8" — the row's meaning broke at the
+        // fourth column — and it disagreed with the keyboard, where 1-4 pick a
+        // WIDTH and S/U/F reinterpret at the existing size. This layout is that
+        // grammar made visible. It is also cheaper: "64:" fits its column free,
+        // where "UInt:" inflated one by 3 px and "Byte:" by 13.
         type.items = {
-            glyph("type.hex64", "Hex 64", "Change to hex64 — 8 raw bytes (key 4)", "H", GF::Hex, NodeKind::Hex64, false, false, "64:"),
-            glyph("type.int64", "Int 64", "Change to int64_t — signed 8-byte integer (S on an 8-byte field)", "I", GF::Signed, NodeKind::Int64),
-            glyph("type.uint64", "UInt 64", "Change to uint64_t — unsigned 8-byte integer (U on an 8-byte field)", "U", GF::Unsigned, NodeKind::UInt64),
+            glyph("type.hex64", "Hex 64", "Change to hex64 — 8 raw bytes (key 4)", "H64", GF::Hex, NodeKind::Hex64, false, false, "64:"),
+            glyph("type.int64", "Int 64", "Change to int64_t — signed 8-byte integer (S on an 8-byte field)", "I64", GF::Signed, NodeKind::Int64),
+            glyph("type.uint64", "UInt 64", "Change to uint64_t — unsigned 8-byte integer (U on an 8-byte field)", "U64", GF::Unsigned, NodeKind::UInt64),
 
-            glyph("type.hex32", "Hex 32", "Change to hex32 — 4 raw bytes (key 3)", "H", GF::Hex, NodeKind::Hex32, true, false, "32:"),
-            glyph("type.int32", "Int 32", "Change to int32_t — signed 4-byte integer (S on a 4-byte field)", "I", GF::Signed, NodeKind::Int32),
-            glyph("type.uint32", "UInt 32", "Change to uint32_t — unsigned 4-byte integer (U on a 4-byte field)", "U", GF::Unsigned, NodeKind::UInt32),
+            glyph("type.hex32", "Hex 32", "Change to hex32 — 4 raw bytes (key 3)", "H32", GF::Hex, NodeKind::Hex32, true, false, "32:"),
+            glyph("type.int32", "Int 32", "Change to int32_t — signed 4-byte integer (S on a 4-byte field)", "I32", GF::Signed, NodeKind::Int32),
+            glyph("type.uint32", "UInt 32", "Change to uint32_t — unsigned 4-byte integer (U on a 4-byte field)", "U32", GF::Unsigned, NodeKind::UInt32),
 
-            glyph("type.hex16", "Hex 16", "Change to hex16 — 2 raw bytes (key 2)", "H", GF::Hex, NodeKind::Hex16, true, false, "16:"),
-            glyph("type.int16", "Int 16", "Change to int16_t — signed 2-byte integer (S on a 2-byte field)", "I", GF::Signed, NodeKind::Int16),
-            glyph("type.uint16", "UInt 16", "Change to uint16_t — unsigned 2-byte integer (U on a 2-byte field)", "U", GF::Unsigned, NodeKind::UInt16),
+            glyph("type.hex16", "Hex 16", "Change to hex16 — 2 raw bytes (key 2)", "H16", GF::Hex, NodeKind::Hex16, true, false, "16:"),
+            glyph("type.int16", "Int 16", "Change to int16_t — signed 2-byte integer (S on a 2-byte field)", "I16", GF::Signed, NodeKind::Int16),
+            glyph("type.uint16", "UInt 16", "Change to uint16_t — unsigned 2-byte integer (U on a 2-byte field)", "U16", GF::Unsigned, NodeKind::UInt16),
 
-            glyph("type.hex8", "Hex 8", "Change to hex8 — 1 raw byte (key 1)", "H", GF::Hex, NodeKind::Hex8, true, false, "8:"),
-            glyph("type.int8", "Int 8", "Change to int8_t — signed byte (S on a 1-byte field)", "I", GF::Signed, NodeKind::Int8),
-            glyph("type.uint8", "UInt 8", "Change to uint8_t — unsigned byte (U on a 1-byte field)", "U", GF::Unsigned, NodeKind::UInt8),
+            glyph("type.hex8", "Hex 8", "Change to hex8 — 1 raw byte (key 1)", "H8", GF::Hex, NodeKind::Hex8, true, false, "8:"),
+            glyph("type.int8", "Int 8", "Change to int8_t — signed byte (S on a 1-byte field)", "I8", GF::Signed, NodeKind::Int8),
+            glyph("type.uint8", "UInt 8", "Change to uint8_t — unsigned byte (U on a 1-byte field)", "U8", GF::Unsigned, NodeKind::UInt8),
 
-            // D = double, F = float. Their own caption, so F cannot be read as
-            // the F of a function pointer two groups along.
-            glyph("type.double", "Double", "Change to double — 8-byte float (F on an 8-byte field)", "D", GF::Float, NodeKind::Double, true, true, "Flt:"),
+            // One `‖` opens the float group; the columns inside it are plain
+            // `|` breaks. Four hairlines through one 4x3 grid contradicted the
+            // grid, and the rule after D/F/B made "Float:" read as the caption
+            // for V2/V3/V4 rather than for the whole group.
+            glyph("type.double", "Double", "Change to double — 8-byte float (F on an 8-byte field)", "D", GF::Float, NodeKind::Double, true, true, "Float:"),
             glyph("type.float", "Float", "Change to float — 4-byte float (F on a 4-byte field)", "F", GF::Float, NodeKind::Float),
 
-            // The component count IS the label under a "Vec:" caption.
-            glyph("type.vec2", "Vec 2", "Change to vec2 — 2 floats, 8 bytes", "2", GF::Float, NodeKind::Vec2, true, true, "Vec:"),
-            glyph("type.vec3", "Vec 3", "Change to vec3 — 3 floats, 12 bytes", "3", GF::Float, NodeKind::Vec3),
-            glyph("type.vec4", "Vec 4", "Change to vec4 — 4 floats, 16 bytes", "4", GF::Float, NodeKind::Vec4),
+            glyph("type.vec2", "Vec 2", "Change to vec2 — 2 floats, 8 bytes", "V2", GF::Float, NodeKind::Vec2, true),
+            glyph("type.vec3", "Vec 3", "Change to vec3 — 3 floats, 12 bytes", "V3", GF::Float, NodeKind::Vec3),
+            glyph("type.vec4", "Vec 4", "Change to vec4 — 4 floats, 16 bytes", "V4", GF::Float, NodeKind::Vec4),
 
-            glyph("type.mat4x4", "Mat 4x4", "Change to mat4x4 — 16 floats, 64 bytes", "M", GF::Float, NodeKind::Mat4x4, true, true, "Mat:"),
+            glyph("type.mat4x4", "Mat 4x4", "Change to mat4x4 — 16 floats, 64 bytes", "M4", GF::Float, NodeKind::Mat4x4, true),
 
-            // P = plain pointer, * = function pointer (the C spelling).
-            glyph("type.pointer", "Pointer", "Change to ptr64 — 8-byte pointer (P key)", "P", GF::Pointer, NodeKind::Pointer64, true, true, "Ptr:"),
-            glyph("type.funcptr", "Func Ptr", "Change to fnptr64 — 8-byte function pointer", "*", GF::Pointer, NodeKind::FuncPtr64),
+            glyph("type.pointer", "Pointer", "Change to ptr64 — 8-byte pointer (P key)", "PTR", GF::Pointer, NodeKind::Pointer64, true, true, "Ptr:"),
+            glyph("type.funcptr", "Func Ptr", "Change to fnptr64 — 8-byte function pointer", "FN*", GF::Pointer, NodeKind::FuncPtr64),
 
-            // S = str, W = wstr.
-            glyph("type.utf8", "Str", "Change to str — ASCII / UTF-8 text", "S", GF::Text, NodeKind::UTF8, true, true, "Str:"),
-            glyph("type.utf16", "WStr", "Change to wstr — UTF-16 text", "W", GF::Text, NodeKind::UTF16),
+            glyph("type.utf8", "Str", "Change to str — ASCII / UTF-8 text", "STR", GF::Text, NodeKind::UTF8, true, true, "Str:"),
+            glyph("type.utf16", "WStr", "Change to wstr — UTF-16 text", "WSTR", GF::Text, NodeKind::UTF16),
 
-            // Bool is a 1-byte flag, not a float — its own caption says so.
-            glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool, true, true, "Bool:"),
+            // Bool is a 1-byte flag, not a float. Under "Float:" the caption
+            // stated something false about the button beneath it.
+            glyph("type.bool", "Bool", "Change to bool — 1 byte", "B", GF::Bits, NodeKind::Bool, true, true, "Other:"),
         };
         {
             RibbonItemSpec custom = codicon("type.custom", "Custom…",

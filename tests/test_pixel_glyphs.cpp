@@ -141,13 +141,18 @@ void TestPixelGlyphs::glyphTableHasEveryUsedChar() {
     const QFontMetrics fm(pixelLabelFont(1.25));
     QCOMPARE(fm.horizontalAdvance(QStringLiteral("H")),
              fm.horizontalAdvance(QStringLiteral("W")));
+    // The size is no longer pinned to whole multiples of the 11 px design
+    // grid: the drawing path hard-thresholds the alpha, so an off-grid size
+    // still comes out hard-edged, and the cell has to be filled sensibly at
+    // every DPI. What must hold is that the glyph fits its cell.
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
-        QCOMPARE(pixelFontSizeDev(dpr) % kPixelFontDesign, 0);
+        QVERIFY(pixelLabelHeightDev(dpr) <= qRound(16.0 * dpr));
 
     // Widths the layout depends on, at the design size.
-    const QFontMetrics fmDesign(pixelLabelFontAt(kPixelFontDesign));
+    // Monospace: equal-length labels measure equal. (Summing single-character
+    // advances is off by a rounding step at some sizes, so compare strings.)
     QCOMPARE(pixelLabelWidthDev(QStringLiteral("H64"), 1.0),
-             3 * fmDesign.horizontalAdvance(QStringLiteral("H")));
+             pixelLabelWidthDev(QStringLiteral("PTR"), 1.0));
     QVERIFY(pixelLabelWidthDev(QStringLiteral("WSTR"), 1.0)
           > pixelLabelWidthDev(QStringLiteral("H64"), 1.0));
 }
@@ -197,13 +202,11 @@ void TestPixelGlyphs::scaleRule() {
     // Departure Mono renders at whole multiples of its 11 px design size, in
     // DEVICE px: 11 up to 150 %, 22 at 200 %. Anything else and the 1-px
     // strokes blur, which is the entire reason for using this font.
-    // As large as the 16-logical icon cell can hold at each DPI, always a
-    // whole multiple of the 11 px design size.
-    QCOMPARE(pixelFontSizeDev(1.0), 11);
-    QCOMPARE(pixelFontSizeDev(1.25), 22);
-    QCOMPARE(pixelFontSizeDev(1.5), 22);
-    QCOMPARE(pixelFontSizeDev(2.0), 33);
-    // Whatever the DPI, the cap box fits the cell it is drawn into.
+    // 12 logical px, clamped so it can never overflow the 16-logical cell.
+    QCOMPARE(pixelFontSizeDev(1.0), 12);
+    QCOMPARE(pixelFontSizeDev(1.25), 15);
+    QCOMPARE(pixelFontSizeDev(1.5), 18);
+    QCOMPARE(pixelFontSizeDev(2.0), 24);
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
         QVERIFY2(pixelLabelHeightDev(dpr) <= qRound(16.0 * dpr),
                  qPrintable(QStringLiteral("cap %1 overflows the %2 px cell at dpr %3")
@@ -214,7 +217,7 @@ void TestPixelGlyphs::scaleRule() {
     // it, at every shipped DPI. Worst case is dpr 1.0, where a device px IS a
     // logical px — which is exactly how pixelLabelCellWidth is derived.
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
-        for (const char* label : {"B", "H", "I", "U", "P", "*", "W", "1024"}) {
+        for (const char* label : {"B", "V2", "H8", "H64", "PTR", "FN*", "WSTR", "1024"}) {
             const QString l = QString::fromLatin1(label);
             const int cellW = qRound(pixelLabelCellWidth(l) * dpr);
             QVERIFY2(pixelLabelWidthDev(l, dpr) <= cellW,
@@ -237,8 +240,8 @@ void TestPixelGlyphs::uniformScaleAcrossLabels() {
     // Departure Mono at 11 device px (22 at 200 %): every label in a panel is
     // the same cap height, which is the property this test exists to pin.
     const int want = pixelLabelHeightDev(dpr);
-    QCOMPARE(pixelFontSizeDev(dpr), dpr == 1.0 ? 11 : dpr == 2.0 ? 33 : 22);
-    for (const char* label : {"H", "I", "U", "D", "P", "W", "1024", "2048"}) {
+    QCOMPARE(pixelFontSizeDev(dpr), qRound(12.0 * dpr));
+    for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
         const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);
         // Every label in a panel shares ONE font size, so their ink boxes are
@@ -286,22 +289,20 @@ void TestPixelGlyphs::cellWidthsPerKind() {
     // monospaced, so a cell is a character count times one advance, plus the
     // 6 px the rule adds. Deriving them here keeps the test honest if the
     // design size ever changes.
-    for (const char* label : {"F", "H", "U", "P", "*", "W", "1024", "2048"}) {
+    for (const char* label : {"F", "H8", "V2", "H64", "PTR", "FN*", "WSTR", "1024"}) {
         const QString l = QString::fromLatin1(label);
         QCOMPARE(cell(K::TypeGlyph, label), pixelLabelCellWidth(l));
-        // The rule takes the WIDEST the label gets in logical terms across
-        // every shipped DPI — the font size follows the DPI now.
         qreal widest = 0;
-        for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
-            widest = qMax(widest, pixelLabelWidthDev(l, dpr) / dpr);
+        for (qreal d : {1.0, 1.25, 1.5, 2.0})
+            widest = qMax(widest, pixelLabelWidthDev(l, d) / d);
         QCOMPARE(pixelLabelCellWidth(l), qMax(16, qCeil(widest) + 6));
     }
     // Monospace: same length, same cell — which is what lets the size-major
     // type matrix line up into columns.
-    QCOMPARE(cell(K::TypeGlyph, "H"), cell(K::TypeGlyph, "P"));
-    QCOMPARE(cell(K::TypeGlyph, "H"), cell(K::TypeGlyph, "U"));
-    QVERIFY(cell(K::TypeGlyph, "1024") > cell(K::TypeGlyph, "H"));
-    QVERIFY(cell(K::FillSquares, "000") > cell(K::TypeGlyph, "H"));
+    QCOMPARE(cell(K::TypeGlyph, "H64"), cell(K::TypeGlyph, "PTR"));
+    QCOMPARE(cell(K::TypeGlyph, "WSTR"), cell(K::TypeGlyph, "1024"));
+    QVERIFY(cell(K::TypeGlyph, "WSTR") > cell(K::TypeGlyph, "H64"));
+    QCOMPARE(cell(K::FillSquares, "000"), cell(K::TypeGlyph, "H64"));
     QCOMPARE(cell(K::Codicon, "symbol-class"), 16);
     QCOMPARE(cell(K::AddBytes, "1024"), 16);
     QCOMPARE(cell(K::InsertBytes, "2048"), 16);
@@ -313,12 +314,7 @@ void TestPixelGlyphs::cellWidthsPerKind() {
              qRound(pixelLabelCellWidth(QStringLiteral("H64")) * dpr));
         QCOMPARE(straight(typeGlyphIcon(QStringLiteral("WSTR"), GlyphFamily::Text, 16, dpr, m_dark)).width(),
              qRound(pixelLabelCellWidth(QStringLiteral("WSTR")) * dpr));
-        // A single character is no longer guaranteed to sit on the 16 floor:
-        // at 22 px one advance is 13 device, which is 10.4 logical at 125 % —
-        // still under 16 — but the rule adds 6 px of padding on top, so the
-        // cell lands just above it. Assert the rule, not the old constant.
-        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("F"), GlyphFamily::Float, 16, dpr, m_dark)).width(),
-                 qRound(pixelLabelCellWidth(QStringLiteral("F")) * dpr));
+        QCOMPARE(straight(typeGlyphIcon(QStringLiteral("F"), GlyphFamily::Float, 16, dpr, m_dark)).width(), qRound(16 * dpr));
     }
 }
 
@@ -549,9 +545,6 @@ void TestPixelGlyphs::signedDiffersFromUnsigned() {
 void TestPixelGlyphs::compositesFitAndAreCrisp() {
     for (double dpr : {1.0, 1.25, 1.5, 2.0, 2.5}) {
         const int cell = qRound(16 * dpr);
-        // The unlabelled cell is no longer a fixed 32: it is sized from the
-        // count it paints, so "+1K" gets more room than "+4". bytesCellWidth
-        // is the one rule the layout and both painters share.
         auto wideCellFor = [dpr](int n, bool add) {
             return qRound(bytesCellWidth(n, add, 16, false) * dpr);
         };
