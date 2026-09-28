@@ -867,12 +867,15 @@ if(BUILD_TESTING)
         endif()
         add_test(NAME test_controller COMMAND test_controller)
 
-        # ── Drill-down breadcrumb (nav stack + BreadcrumbBar widget) ──
+        # ── Drill-down trail (focus path + AddressBar widget) ──
+        # resources.qrc: the bar's nav cells are vsicons; the disabled-cell
+        # opacity probe needs real ink to measure.
         add_executable(test_breadcrumb tests/test_breadcrumb.cpp
         src/editor.cpp src/compose.cpp src/format.cpp src/addressparser.cpp src/profiler.cpp src/rtti.cpp ${LLVM_DEMANGLE_SRCS} src/controller.cpp src/hextoolbarpopup.cpp src/symbolstore.cpp
         src/processpicker.cpp src/processpicker.ui src/providerregistry.cpp
         src/typeselectorpopup.cpp src/sourcechooserpopup.cpp
-        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS})
+        src/themes/theme.cpp src/themes/thememanager.cpp ${WIDGET_SRCS} ${DISASM_SRCS}
+        src/resources.qrc)
         target_include_directories(test_breadcrumb PRIVATE src third_party/fadec)
         target_link_libraries(test_breadcrumb PRIVATE
         ${QT}::Widgets ${QT}::PrintSupport ${QT}::Concurrent ${QT}::Test ${QT}::Svg

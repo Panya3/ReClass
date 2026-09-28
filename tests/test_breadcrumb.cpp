@@ -1,26 +1,98 @@
-// Drill-down breadcrumb (v3 — CLICK-driven focus path): the breadcrumb reflects
-// where the selection sits in the inline-expanded tree. Selecting a typed
-// pointer (or any row inside its expansion) adds it to the breadcrumb; there is
-// no follow-arrow affordance. Crumb click = collapse below + scroll. Exercises
-// focusChainToNode / handleNodeClick / collapseToFocus and the BreadcrumbBar.
+// Drill-down trail (v3 — CLICK-driven focus path) and the AddressBar that
+// renders it. The trail reflects where the selection sits in the inline-
+// expanded tree: selecting a typed pointer (or any row inside its expansion)
+// adds it; there is no follow-arrow affordance. Crumb click = collapse below
+// + scroll. Exercises focusChainToNode / handleNodeClick / collapseToFocus /
+// addressBarState on the controller side, and — RibbonBar-style — the
+// AddressBar widget: geometry through itemRect(id), hover through a
+// synthesized MouseMove, pixels through grab(). Never waits for window
+// exposure (show() + qWait + processEvents is all that's needed), so the
+// whole target runs on the hidden desktop.
 
 #include <QtTest/QTest>
 #include <QtTest/QSignalSpy>
 #include <QApplication>
+#include <QEvent>
+#include <QImage>
+#include <QLineEdit>
+#include <QMouseEvent>
 #include <QSettings>
-#include <QLabel>
 #include <QSplitter>
-#include <QToolButton>
+#include <QVBoxLayout>
 #include <QtEndian>
 
 #include "address_callbacks.h"
 #include "controller.h"
 #include "core.h"
 #include "gotoaddressdialog.h"
+#include "paintutil.h"
 #include "providers/buffer_provider.h"
-#include "widgets/breadcrumb_bar.h"
+#include "sourcechooserpopup.h"
+#include "widgets/address_bar.h"
 
 using namespace rcx;
+
+namespace {
+
+bool sameColour(QRgb px, const QColor& c, int tol = 2) {
+    return qAbs(qRed(px) - c.red()) <= tol && qAbs(qGreen(px) - c.green()) <= tol
+        && qAbs(qBlue(px) - c.blue()) <= tol;
+}
+
+// Device-pixel rect of a logical rect in a grab() image.
+QRect devRect(const QImage& img, const QRect& logical) {
+    const qreal dpr = img.devicePixelRatio() > 0 ? img.devicePixelRatio() : 1.0;
+    return QRect(qRound(logical.left() * dpr), qRound(logical.top() * dpr),
+                 qRound(logical.width() * dpr), qRound(logical.height() * dpr));
+}
+
+// Number of pixels in `r` (device) that are exactly `c`.
+int countColour(const QImage& img, const QRect& r, const QColor& c) {
+    int n = 0;
+    for (int y = r.top(); y <= r.bottom() && y < img.height(); ++y)
+        for (int x = r.left(); x <= r.right() && x < img.width(); ++x)
+            if (y >= 0 && x >= 0 && sameColour(img.pixel(x, y), c)) ++n;
+    return n;
+}
+
+// Mean distance of the rect's pixels from the ground — a proxy for "how
+// much ink is there" (the disabled-cell / dimmed-icon opacity probe).
+// `exclude` (logical) masks a sub-rect out of the average — the liveness
+// dot sits on the chip icon and is painted at full opacity either way.
+double inkAmount(const QImage& img, const QRect& logical, const QColor& bg,
+                 const QRect& exclude = QRect()) {
+    const QRect r = devRect(img, logical);
+    const QRect ex = exclude.isNull() ? QRect() : devRect(img, exclude);
+    double sum = 0; int n = 0;
+    for (int y = r.top(); y <= r.bottom() && y < img.height(); ++y)
+        for (int x = r.left(); x <= r.right() && x < img.width(); ++x) {
+            if (!ex.isNull() && ex.contains(x, y)) continue;
+            const QRgb px = img.pixel(x, y);
+            sum += qAbs(qRed(px) - bg.red()) + qAbs(qGreen(px) - bg.green()) + qAbs(qBlue(px) - bg.blue());
+            ++n;
+        }
+    return n ? sum / n : 0.0;
+}
+
+// Plain hover move (no buttons) delivered straight to the widget.
+void hoverAt(QWidget& w, const QPoint& pos) {
+    QMouseEvent mv(QEvent::MouseMove, pos, w.mapToGlobal(pos), Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+    QApplication::sendEvent(&w, &mv);
+}
+
+QImage grabOf(QWidget& w) {
+    QApplication::processEvents();
+    return w.grab().toImage().convertToFormat(QImage::Format_ARGB32);
+}
+
+void showBar(AddressBar& bar, int width) {
+    bar.resize(width, AddressBar::kAddressBarHeight);
+    bar.show();
+    QTest::qWait(30);
+    QApplication::processEvents();
+}
+
+}  // namespace
 
 // RcxEditor.vptr → QWidgetPrivate.parent → QWidget. dptr is a non-drillable
 // pointer (no refId); leaf is a plain top-level field.
@@ -50,9 +122,9 @@ static Ids buildChain(NodeTree& tree) {
     return id;
 }
 
-// Crumbs in the production dotted shape (pushBreadcrumb): "Class.field"
+// Crumbs in the production dotted shape (addressBarState): "Class.field"
 // ancestors, a bare "Class" deepest, rootId = crumb index. classId is any
-// non-zero id — the widget only reads label and index.
+// non-zero id — the widget only reads label, index and address.
 static Crumb crumb(const QString& label, uint64_t index, uint64_t classId = 1) {
     Crumb c; c.label = label; c.rootId = index; c.classId = classId;
     return c;
@@ -60,6 +132,17 @@ static Crumb crumb(const QString& label, uint64_t index, uint64_t classId = 1) {
 static QVector<Crumb> twoLevel() {
     return { crumb(QStringLiteral("RcxEditor.vptr"), 0, 1),
              crumb(QStringLiteral("QWidgetPrivate"), 1, 2) };
+}
+// A live process source over the given trail — what a real push looks like.
+static AddressBarState stateWith(const QVector<Crumb>& crumbs) {
+    AddressBarState s;
+    s.sourceName   = QStringLiteral("REECLASS.exe");
+    s.sourceKindId = QStringLiteral("processmemory");
+    s.liveness     = liveness::Live;
+    s.baseAddress  = 0x7FF600000000ULL;
+    s.resolvedBase = s.baseAddress;
+    s.crumbs       = crumbs;
+    return s;
 }
 
 class TestBreadcrumb : public QObject {
@@ -87,7 +170,8 @@ private:
             if (m[i].nodeId == id && m[i].lineKind != LineKind::Footer) return i;
         return -1;
     }
-    QVector<Crumb> crumbs() const { return m_editor->breadcrumbBar()->crumbs(); }
+    QVector<Crumb> crumbs() const { return m_editor->addressBar()->state().crumbs; }
+    QStringList segments() const { return m_editor->addressBar()->segments(); }
     // Bytes holding real little-endian pointers for buildChain at base 0,
     // pointerSize 8: RcxEditor@0 .vptr = 0x20 → QWidgetPrivate@0x20 .parent
     // = 0x30 → QWidget@0x30. 64 bytes, so every target is readable.
@@ -118,8 +202,10 @@ private slots:
         m_ctrl = new RcxController(m_doc, nullptr);
         m_editor = m_ctrl->addSplitEditor(m_splitter);
         m_splitter->resize(800, 600);
+        // show() + qWait, never qWaitForWindowExposed: an unrendered desktop
+        // never composites, so an exposure wait fails on the hidden desktop.
         m_splitter->show();
-        QVERIFY(QTest::qWaitForWindowExposed(m_splitter));
+        QTest::qWait(30);
         QApplication::processEvents();
         m_ctrl->setViewRootId(m_id.editor);
     }
@@ -186,7 +272,7 @@ private slots:
         expand(m_id.vptr);
         m_ctrl->handleNodeClick(m_editor, lineOf(m_id.vptr), m_id.vptr, Qt::NoModifier);
         QApplication::processEvents();
-        const QStringList seg = m_editor->breadcrumbBar()->segments();
+        const QStringList seg = segments();
         QVERIFY(seg.contains(QStringLiteral("RcxEditor.vptr")));   // class.field source
         QVERIFY(seg.contains(QStringLiteral("QWidgetPrivate")));   // current class
         QVERIFY(!seg.contains(QStringLiteral("vptr")));            // no bare field crumb
@@ -222,7 +308,7 @@ private slots:
         expand(m_id.parent);
         m_ctrl->handleNodeClick(m_editor, lineOf(m_id.parent), m_id.parent, Qt::NoModifier);
         QApplication::processEvents();
-        const QStringList seg = m_editor->breadcrumbBar()->segments();
+        const QStringList seg = segments();
         QVERIFY(seg.contains(QStringLiteral("RcxEditor.vptr")));        // depth-0 class.field
         QVERIFY(seg.contains(QStringLiteral("QWidgetPrivate.parent"))); // depth-1 class.field
         QVERIFY(seg.contains(QStringLiteral("QWidget")));               // current class
@@ -273,7 +359,7 @@ private slots:
         expand(m_id.parent);
         m_ctrl->handleNodeClick(m_editor, lineOf(m_id.parent), m_id.parent, Qt::NoModifier);
         QCOMPARE(m_ctrl->focusPath().size(), 2);
-        // Fold-collapse vptr behind the breadcrumb's back; refresh reconciles.
+        // Fold-collapse vptr behind the trail's back; refresh reconciles.
         m_doc->tree.nodes[idx(m_id.vptr)].collapsed = true;
         m_ctrl->refresh();
         QVERIFY(m_ctrl->focusPath().isEmpty());
@@ -300,7 +386,7 @@ private slots:
         QCOMPARE(m_ctrl->focusPath().size(), 1);
         QCOMPARE(m_ctrl->focusPath()[0], statsId);
         QApplication::processEvents();
-        const QStringList seg = m_editor->breadcrumbBar()->segments();
+        const QStringList seg = segments();
         QVERIFY(seg.contains(QStringLiteral("RcxEditor.stats")));
         QVERIFY(seg.contains(QStringLiteral("Stats")));
         QVERIFY(!seg.contains(QStringLiteral("RcxEditor")));   // not the root twice
@@ -385,147 +471,12 @@ private slots:
         QCOMPARE(m_ctrl->focusPath(), before);
     }
 
-    // ── makeAddressCallbacks: one callback set for every caller ──
-
-    void testCallbackFactoryHasKernelPagingWhenProviderDoes() {
-        // No source: nothing wired; the parser reports module / symbol /
-        // pointer terms with its own "unavailable" error.
-        const AddressParserCallbacks none = makeAddressCallbacks(nullptr, 8);
-        QVERIFY(!none.resolveModule && !none.readPointer && !none.resolveIdentifier);
-        QVERIFY(!none.vtop && !none.cr3 && !none.physRead);
-
-        // A plain provider: the memory / symbol trio, no paging.
-        BufferProvider plain(QByteArray(16, '\0'));
-        const AddressParserCallbacks p = makeAddressCallbacks(&plain, 8);
-        QVERIFY(p.resolveModule && p.readPointer && p.resolveIdentifier);
-        QVERIFY(!p.vtop && !p.cr3 && !p.physRead);
-
-        // readPointer reads at the document's pointer size through Provider::read.
-        BufferProvider bytes(QByteArray::fromHex("efbeadde00000000"));
-        const AddressParserCallbacks q = makeAddressCallbacks(&bytes, 4);
-        bool ok = false;
-        QCOMPARE(q.readPointer(0, &ok), 0xDEADBEEFULL);
-        QVERIFY(ok);
-
-        // A provider that reports kernel paging gets vtop / cr3 / physRead
-        // too — the branch the live evaluator and navigateToFormula lacked.
-        struct PagingProvider : BufferProvider {
-            using BufferProvider::BufferProvider;
-            bool hasKernelPaging() const override { return true; }
-            uint64_t getCr3() const override { return 0x1000; }
-        } paging(QByteArray(16, '\0'));
-        const AddressParserCallbacks k = makeAddressCallbacks(&paging, 8);
-        QVERIFY(k.vtop && k.cr3 && k.physRead);
-        QCOMPARE(k.cr3(0, &ok), 0x1000ULL);
-        QVERIFY(ok);
-    }
-
-    // ── Crumb payload: class id, entry hop, address, keyword ──
-
-    void testCrumbAddressesFollowPointerValues() {
-        // Real pointer values in the buffer: the address of the class at
-        // crumb i+1 is what compose dereferenced for hop i (LineMeta::ptrBase
-        // on the first row rendered inside it). QWidget gets one field so its
-        // expansion renders a row to carry the base.
-        m_doc->provider = std::make_unique<BufferProvider>(chainBytes());
-        Node fl; fl.kind = NodeKind::UInt32; fl.name = "flags"; fl.parentId = m_id.widget; fl.offset = 0;
-        m_doc->tree.addNode(fl);
-        drillTwoLevels();
-        QVector<Crumb> c = crumbs();
-        QCOMPARE(c.size(), 3);
-        QCOMPARE(c[0].address, 0x00ULL);
-        QCOMPARE(c[1].address, 0x20ULL);
-        QCOMPARE(c[2].address, 0x30ULL);
-
-        // Null / unreadable pointers: the frame is unknown, not "0x0 + offset".
-        m_doc->provider = std::make_unique<BufferProvider>(QByteArray(64, '\0'));
-        m_ctrl->refresh();
-        c = crumbs();
-        QCOMPARE(c.size(), 3);                         // the trail itself survives
-        QCOMPARE(c[0].address, 0x00ULL);
-        QCOMPARE(c[1].address, 0x00ULL);
-        QCOMPARE(c[2].address, 0x00ULL);
-    }
-
-    void testCrumbAddressOfEmbeddedStructIsItsRow() {
-        // An embedded struct is its own hop and sits at base + its offset —
-        // compose's ptrBase does not change for it (it is not a pointer), so
-        // the crumb takes the row's own absolute address instead.
-        Node st; st.kind = NodeKind::Struct; st.name = "stats"; st.structTypeName = "Stats";
-        st.parentId = m_id.editor; st.offset = 24; st.collapsed = false;
-        const uint64_t statsId = m_doc->tree.nodes[m_doc->tree.addNode(st)].id;
-        Node hp; hp.kind = NodeKind::UInt32; hp.name = "hp"; hp.parentId = statsId; hp.offset = 0;
-        const uint64_t hpId = m_doc->tree.nodes[m_doc->tree.addNode(hp)].id;
-        m_ctrl->refresh();
-        m_ctrl->handleNodeClick(m_editor, lineOf(hpId), hpId, Qt::NoModifier);
-        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ statsId }));
-        QVector<Crumb> c = crumbs();
-        QCOMPARE(c.size(), 2);
-        QCOMPARE(c[0].address, 0ULL);
-        QCOMPARE(c[1].address, 24ULL);
-        QCOMPARE(c[1].classId, statsId);
-        QCOMPARE(c[1].pointerId, statsId);              // its own hop
-        QCOMPARE(c[1].label, QStringLiteral("Stats"));
-        // A rebase moves every crumb with it (the focus path is kept).
-        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x100")));
-        c = crumbs();
-        QCOMPARE(c.size(), 2);
-        QCOMPARE(c[0].address, 0x100ULL);
-        QCOMPARE(c[1].address, 0x118ULL);
-    }
-
-    void testCrumbPointerIdsAndClassIds() {
-        drillTwoLevels();
-        const QVector<uint64_t>& fp = m_ctrl->focusPath();
-        const QVector<Crumb> c = crumbs();
-        QCOMPARE(c.size(), 3);
-        // pointerId = the hop crumb i was entered through = focusPath[i-1].
-        QCOMPARE(c[0].pointerId, 0ULL);
-        QCOMPARE(c[1].pointerId, fp[0]);
-        QCOMPARE(c[2].pointerId, fp[1]);
-        // classId = the container at each depth.
-        QCOMPARE(c[0].classId, m_id.editor);
-        QCOMPARE(c[1].classId, m_id.priv);
-        QCOMPARE(c[2].classId, m_id.widget);
-        for (int i = 0; i < 3; ++i) {
-            QCOMPARE(c[i].rootId, uint64_t(i));
-            QCOMPARE(c[i].keyword, QStringLiteral("struct"));   // resolved default
-        }
-        // The keyword follows the class node's resolved keyword.
-        m_doc->tree.nodes[idx(m_id.widget)].classKeyword = QStringLiteral("class");
-        m_doc->tree.nodes[idx(m_id.priv)].classKeyword = QStringLiteral("union");
-        m_ctrl->refresh();
-        QCOMPARE(crumbs()[2].keyword, QStringLiteral("class"));
-        QCOMPARE(crumbs()[1].keyword, QStringLiteral("union"));
-        QCOMPARE(crumbs()[0].keyword, QStringLiteral("struct"));
-    }
-
-    void testProductionCrumbsHaveNoConnector() {
-        drillTwoLevels();
-        QVector<Crumb> c = crumbs();
-        QCOMPARE(c.size(), 3);
-        for (int i = 0; i < c.size(); ++i) {
-            QVERIFY(!c[i].label.isEmpty());
-            QVERIFY(c[i].classId != 0);
-            // Ancestors are dotted ("Class.field"); the deepest is bare.
-            QCOMPARE(c[i].label.contains(QLatin1Char('.')), i < c.size() - 1);
-        }
-        // The widget echoes exactly the labels with one separator between
-        // them — no italic field connector is ever rendered.
-        QCOMPARE(m_editor->breadcrumbBar()->segments(),
-                 (QStringList{ QStringLiteral("RcxEditor.vptr"), QStringLiteral("›"),
-                               QStringLiteral("QWidgetPrivate.parent"), QStringLiteral("›"),
-                               QStringLiteral("QWidget") }));
-        // Lone root: one undotted crumb naming the view root.
-        m_ctrl->clearSelection();
-        c = crumbs();
-        QCOMPARE(c.size(), 1);
-        QVERIFY(!c[0].label.contains(QLatin1Char('.')));
-        QCOMPARE(c[0].classId, m_id.editor);
-        QCOMPARE(c[0].pointerId, 0ULL);
-    }
-
     // ── rebaseTo announces itself: documentChanged once, refresh not thrice ──
+    // Upstream's full-file rewrite in 60f80cd dropped these two; carried
+    // forward (see ticket 20 resolution) because they guard the single
+    // rebase path ticket 18 established — the bookmarks dock, doc-tab source
+    // icon and MCP bridge listen to documentChanged, and nothing else in the
+    // suite pins its emission count.
 
     void testGotoRebaseEmitsDocumentChanged() {
         // The bookmarks dock, the doc-tab source icon and the MCP bridge all
@@ -579,147 +530,767 @@ private slots:
         QCOMPARE(m_doc->undoStack.count(), n);
     }
 
-    // ── BreadcrumbBar widget ──
-    // Fed the production dotted shape (see crumb()/twoLevel() above): the
-    // field is part of the ancestor's label; there is no connector segment.
+    // ── makeAddressCallbacks: one callback set for every caller ──
 
-    void testBarAlwaysVisibleForSingleClass() {
-        BreadcrumbBar bar;
-        bar.setCrumbs({ crumb(QStringLiteral("RcxEditor"), 0) });
-        QVERIFY(bar.barVisible());
+    void testCallbackFactoryHasKernelPagingWhenProviderDoes() {
+        // No source: nothing wired; the parser reports module / symbol /
+        // pointer terms with its own "unavailable" error.
+        const AddressParserCallbacks none = makeAddressCallbacks(nullptr, 8);
+        QVERIFY(!none.resolveModule && !none.readPointer && !none.resolveIdentifier);
+        QVERIFY(!none.vtop && !none.cr3 && !none.physRead);
+
+        // A plain provider: the memory / symbol trio, no paging.
+        BufferProvider plain(QByteArray(16, '\0'));
+        const AddressParserCallbacks p = makeAddressCallbacks(&plain, 8);
+        QVERIFY(p.resolveModule && p.readPointer && p.resolveIdentifier);
+        QVERIFY(!p.vtop && !p.cr3 && !p.physRead);
+
+        // readPointer reads at the document's pointer size through Provider::read.
+        BufferProvider bytes(QByteArray::fromHex("efbeadde00000000"));
+        const AddressParserCallbacks q = makeAddressCallbacks(&bytes, 4);
+        bool ok = false;
+        QCOMPARE(q.readPointer(0, &ok), 0xDEADBEEFULL);
+        QVERIFY(ok);
+
+        // A provider that reports kernel paging gets vtop / cr3 / physRead
+        // too — the branch the live evaluator and navigateToFormula lacked.
+        struct PagingProvider : BufferProvider {
+            using BufferProvider::BufferProvider;
+            bool hasKernelPaging() const override { return true; }
+            uint64_t getCr3() const override { return 0x1000; }
+        } paging(QByteArray(16, '\0'));
+        const AddressParserCallbacks k = makeAddressCallbacks(&paging, 8);
+        QVERIFY(k.vtop && k.cr3 && k.physRead);
+        QCOMPARE(k.cr3(0, &ok), 0x1000ULL);
+        QVERIFY(ok);
     }
 
-    void testBarRendersTrailAndSeparators() {
-        BreadcrumbBar bar;
-        bar.setCrumbs(twoLevel());
-        QVERIFY(bar.barVisible());
-        // Exactly the labels with one separator between them.
-        QCOMPARE(bar.segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
-                                               QStringLiteral("›"),
-                                               QStringLiteral("QWidgetPrivate") }));
-        QCOMPARE(bar.findChildren<QToolButton*>().size(), 2);
-        const auto labels = bar.findChildren<QLabel*>();
-        QCOMPARE(labels.size(), 1);                     // the one '›'
-        QCOMPARE(labels[0]->text(), QStringLiteral("›"));
+    // ── Crumb payload: class id, entry hop, address, keyword ──
+
+    void testCrumbAddressesFollowPointerValues() {
+        // Real pointer values in the buffer: the address of the class at
+        // crumb i+1 is what compose dereferenced for hop i (LineMeta::ptrBase
+        // on the first row rendered inside it). QWidget gets one field so its
+        // expansion renders a row to carry the base.
+        m_doc->provider = std::make_unique<BufferProvider>(chainBytes());
+        Node fl; fl.kind = NodeKind::UInt32; fl.name = "flags"; fl.parentId = m_id.widget; fl.offset = 0;
+        m_doc->tree.addNode(fl);
+        drillTwoLevels();
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        QCOMPARE(c[0].address, 0x00ULL);
+        QCOMPARE(c[1].address, 0x20ULL);
+        QCOMPARE(c[2].address, 0x30ULL);
+        // The bar shows exactly that address on the crumb's tooltip.
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        hoverAt(*bar, bar->itemRect(QStringLiteral("crumb:1")).center());
+        QVERIFY2(bar->toolTip().contains(QStringLiteral("@ 0x20")), qPrintable(bar->toolTip()));
+        hoverAt(*bar, bar->itemRect(QStringLiteral("crumb:2")).center());
+        QVERIFY2(bar->toolTip().contains(QStringLiteral("@ 0x30")), qPrintable(bar->toolTip()));
+
+        // Null / unreadable pointers: the frame is unknown, not "0x0 + offset".
+        m_doc->provider = std::make_unique<BufferProvider>(QByteArray(64, '\0'));
+        m_ctrl->refresh();
+        c = crumbs();
+        QCOMPARE(c.size(), 3);                         // the trail itself survives
+        QCOMPARE(c[0].address, 0x00ULL);
+        QCOMPARE(c[1].address, 0x00ULL);
+        QCOMPARE(c[2].address, 0x00ULL);
+        QVERIFY2(bar->toolTip().contains(QStringLiteral("(unreadable)")), qPrintable(bar->toolTip()));
     }
 
-    void testBarClickFiresCrumbIndex() {
-        BreadcrumbBar bar;
+    void testCrumbAddressOfEmbeddedStructIsItsRow() {
+        // An embedded struct is its own hop and sits at base + its offset —
+        // compose's ptrBase does not change for it (it is not a pointer), so
+        // the crumb takes the row's own absolute address instead.
+        Node st; st.kind = NodeKind::Struct; st.name = "stats"; st.structTypeName = "Stats";
+        st.parentId = m_id.editor; st.offset = 24; st.collapsed = false;
+        const uint64_t statsId = m_doc->tree.nodes[m_doc->tree.addNode(st)].id;
+        Node hp; hp.kind = NodeKind::UInt32; hp.name = "hp"; hp.parentId = statsId; hp.offset = 0;
+        const uint64_t hpId = m_doc->tree.nodes[m_doc->tree.addNode(hp)].id;
+        m_ctrl->refresh();
+        m_ctrl->handleNodeClick(m_editor, lineOf(hpId), hpId, Qt::NoModifier);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ statsId }));
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 2);
+        QCOMPARE(c[0].address, 0ULL);
+        QCOMPARE(c[1].address, 24ULL);
+        QCOMPARE(c[1].classId, statsId);
+        QCOMPARE(c[1].pointerId, statsId);              // its own hop
+        QCOMPARE(c[1].label, QStringLiteral("Stats"));
+        // A rebase moves every crumb with it (the focus path is kept).
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x100")));
+        c = crumbs();
+        QCOMPARE(c.size(), 2);
+        QCOMPARE(c[0].address, 0x100ULL);
+        QCOMPARE(c[1].address, 0x118ULL);
+    }
+
+    void testCrumbAddressOfRefIdEmbedIsItsRow() {
+        // `Stats stats` embedded BY REFERENCE: a Struct field carrying a refId
+        // and no children of its own (the type chooser's embed-class shape;
+        // compose renders the referenced class's fields at this row). It
+        // drills through refId like a pointer but dereferences nothing, so
+        // its frame is its own row — not the enclosing frame's base, which
+        // the pointer rule handed back (ptrBase never moves for it).
+        Node cls; cls.kind = NodeKind::Struct; cls.structTypeName = "Stats";
+        cls.parentId = 0; cls.collapsed = false;
+        const uint64_t statsCls = m_doc->tree.nodes[m_doc->tree.addNode(cls)].id;
+        Node hp; hp.kind = NodeKind::UInt32; hp.name = "hp"; hp.parentId = statsCls; hp.offset = 0;
+        const uint64_t hpId = m_doc->tree.nodes[m_doc->tree.addNode(hp)].id;
+        Node st; st.kind = NodeKind::Struct; st.name = "stats"; st.refId = statsCls;
+        st.parentId = m_id.editor; st.offset = 24; st.collapsed = false;
+        const uint64_t statsId = m_doc->tree.nodes[m_doc->tree.addNode(st)].id;
+        m_ctrl->refresh();
+
+        const int ln = lineOf(hpId);
+        QVERIFY(ln >= 0);
+        m_ctrl->handleNodeClick(m_editor, ln, hpId, Qt::NoModifier);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ statsId }));
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 2);
+        QCOMPARE(c[0].label, QStringLiteral("RcxEditor.stats"));
+        QCOMPARE(c[1].label, QStringLiteral("Stats"));
+        QCOMPARE(c[1].classId, statsCls);
+        QCOMPARE(c[1].pointerId, statsId);
+        QCOMPARE(c[0].address, 0ULL);
+        QCOMPARE(c[1].address, 24ULL);                  // base + stats.offset
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x100")));
+        c = crumbs();
+        QCOMPARE(c[1].address, 0x118ULL);
+    }
+
+    void testCrumbAddressOfArrayHopIsTheElement() {
+        // An Array of struct with a refId, nested under an EXPANDED pointer
+        // (so the enclosing frame has a non-zero ptrBase to leak). The array
+        // drills through refId but dereferences nothing: its frame is the
+        // element compose rendered — the [0] separator's address — not the
+        // pointer's target the old pointer rule returned.
+        m_doc->provider = std::make_unique<BufferProvider>(chainBytes());
+        Node cls; cls.kind = NodeKind::Struct; cls.structTypeName = "Item";
+        cls.parentId = 0; cls.collapsed = false;
+        const uint64_t itemCls = m_doc->tree.nodes[m_doc->tree.addNode(cls)].id;
+        Node v; v.kind = NodeKind::UInt32; v.name = "v"; v.parentId = itemCls; v.offset = 0;
+        const uint64_t vId = m_doc->tree.nodes[m_doc->tree.addNode(v)].id;
+        Node arr; arr.kind = NodeKind::Array; arr.name = "items"; arr.refId = itemCls;
+        arr.elementKind = NodeKind::Struct; arr.arrayLen = 2;
+        arr.parentId = m_id.priv; arr.offset = 8; arr.collapsed = false;
+        const uint64_t itemsId = m_doc->tree.nodes[m_doc->tree.addNode(arr)].id;
+        expand(m_id.vptr);   // QWidgetPrivate at 0x20 renders inline, items at 0x28
+
+        const int ln = lineOf(vId);
+        QVERIFY(ln >= 0);
+        m_ctrl->handleNodeClick(m_editor, ln, vId, Qt::NoModifier);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr, itemsId }));
+        const QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        QCOMPARE(c[1].label, QStringLiteral("QWidgetPrivate.items"));
+        QCOMPARE(c[2].label, QStringLiteral("Item"));
+        QCOMPARE(c[2].classId, itemCls);
+        QCOMPARE(c[1].address, 0x20ULL);                // the pointer's target
+        QCOMPARE(c[2].address, 0x28ULL);                // element 0, not 0x20
+    }
+
+    void testCrumbPointerIdsAndClassIds() {
+        drillTwoLevels();
+        const QVector<uint64_t>& fp = m_ctrl->focusPath();
+        const QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        // pointerId = the hop crumb i was entered through = focusPath[i-1].
+        QCOMPARE(c[0].pointerId, 0ULL);
+        QCOMPARE(c[1].pointerId, fp[0]);
+        QCOMPARE(c[2].pointerId, fp[1]);
+        // classId = the container at each depth.
+        QCOMPARE(c[0].classId, m_id.editor);
+        QCOMPARE(c[1].classId, m_id.priv);
+        QCOMPARE(c[2].classId, m_id.widget);
+        for (int i = 0; i < 3; ++i) {
+            QCOMPARE(c[i].rootId, uint64_t(i));
+            QCOMPARE(c[i].keyword, QStringLiteral("struct"));   // resolved default
+        }
+        // The keyword follows the class node's resolved keyword.
+        m_doc->tree.nodes[idx(m_id.widget)].classKeyword = QStringLiteral("class");
+        m_doc->tree.nodes[idx(m_id.priv)].classKeyword = QStringLiteral("union");
+        m_ctrl->refresh();
+        QCOMPARE(crumbs()[2].keyword, QStringLiteral("class"));
+        QCOMPARE(crumbs()[1].keyword, QStringLiteral("union"));
+        QCOMPARE(crumbs()[0].keyword, QStringLiteral("struct"));
+    }
+
+    void testProductionCrumbsHaveNoConnector() {
+        drillTwoLevels();
+        QVector<Crumb> c = crumbs();
+        QCOMPARE(c.size(), 3);
+        for (int i = 0; i < c.size(); ++i) {
+            QVERIFY(!c[i].label.isEmpty());
+            QVERIFY(c[i].classId != 0);
+            // Ancestors are dotted ("Class.field"); the deepest is bare.
+            QCOMPARE(c[i].label.contains(QLatin1Char('.')), i < c.size() - 1);
+        }
+        // The bar echoes exactly the labels — no italic field connector, no
+        // separator token (the chevron cells are geometry, not text).
+        QApplication::processEvents();
+        QCOMPARE(segments(),
+                 (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                               QStringLiteral("QWidgetPrivate.parent"),
+                               QStringLiteral("QWidget") }));
+        // Lone root: one undotted crumb naming the view root.
+        m_ctrl->clearSelection();
+        c = crumbs();
+        QCOMPARE(c.size(), 1);
+        QVERIFY(!c[0].label.contains(QLatin1Char('.')));
+        QCOMPARE(c[0].classId, m_id.editor);
+        QCOMPARE(c[0].pointerId, 0ULL);
+    }
+
+    // ── The state the controller pushes ──
+
+    void testAddressBarStateCarriesSourceAndBase() {
+        QVERIFY(m_ctrl->rebaseTo(QStringLiteral("0x20+0x4")));
+        QApplication::processEvents();
+        const AddressBarState& s = m_editor->addressBar()->state();
+        QCOMPARE(s.baseAddress, 0x24ULL);
+        QCOMPARE(s.resolvedBase, 0x24ULL);
+        QCOMPARE(s.baseFormula, QStringLiteral("0x20+0x4"));
+        // A BufferProvider is never live: None before the first status tick,
+        // Static after it (the tick is timer-driven, so either is fine here;
+        // P2b wires sourceStatusChanged → setLiveness for the in-between).
+        QVERIFY(s.liveness == liveness::None || s.liveness == liveness::Static);
+        QVERIFY(!s.canBack && !s.canForward);   // P5 wires history
+        QVERIFY(!s.canUp);                      // nothing drilled
+        drillTwoLevels();
+        QVERIFY(m_editor->addressBar()->state().canUp);
+        // A second split pane is seeded with the current state at once — the
+        // per-refresh push is change-guarded and would otherwise leave it
+        // empty until the trail next moved.
+        RcxEditor* pane2 = m_ctrl->addSplitEditor(m_splitter);
+        QCOMPARE(pane2->addressBar()->state(), m_editor->addressBar()->state());
+        QCOMPARE(pane2->addressBar()->state().crumbs.size(), 3);
+    }
+
+    // ── AddressBar widget ──
+    // Driven RibbonBar-style: a bare bar, show() + qWait, geometry through
+    // itemRect(id), hover through a synthesized MouseMove, pixels via grab().
+
+    void testBarGeometry() {
+        AddressBar bar;
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        QCOMPARE(bar.height(), 26);
+        QCOMPARE(bar.height(), PanelSearchField::kFieldHeight);
+        // kGutter spent once: the Back cell is the first ink.
+        QCOMPARE(bar.itemRect(QStringLiteral("back")).left(), kGutter);
+        // Every cell of the anatomy is laid out, left → right, without
+        // overlaps, on one 22-px row.
+        const QStringList order = {
+            QStringLiteral("back"), QStringLiteral("fwd"), QStringLiteral("hist"), QStringLiteral("up"),
+            QStringLiteral("src"), QStringLiteral("src.chev"), QStringLiteral("root.chev"),
+            QStringLiteral("base"), QStringLiteral("crumb:0"), QStringLiteral("chev:0"),
+            QStringLiteral("crumb:1"), QStringLiteral("chev:1"), QStringLiteral("space"),
+            QStringLiteral("recent") };
+        int lastRight = -1;
+        for (const QString& id : order) {
+            const QRect r = bar.itemRect(id);
+            QVERIFY2(!r.isNull(), qPrintable(id + QStringLiteral(" not laid out")));
+            QVERIFY2(r.left() > lastRight, qPrintable(id + QStringLiteral(" overlaps its left neighbour")));
+            QCOMPARE(r.top(), AddressBar::kCellTop);
+            QCOMPARE(r.height(), AddressBar::kCellH);
+            lastRight = r.right();
+        }
+        QVERIFY(bar.itemRect(QStringLiteral("overflow")).isNull());   // nothing folded
+        // The field divider sits between `up` and `src`; `recent` hugs the
+        // right edge.
+        QVERIFY(bar.itemRect(QStringLiteral("src")).left() - bar.itemRect(QStringLiteral("up")).right()
+                >= 2 * AddressBar::kDividerPad);
+        QCOMPARE(bar.itemRect(QStringLiteral("recent")).right() + 1 + AddressBar::kRightMargin, bar.width());
+        // Hit-testing round-trips; the gutter belongs to nobody.
+        QCOMPARE(bar.itemIdAt(bar.itemRect(QStringLiteral("crumb:1")).center()), QStringLiteral("crumb:1"));
+        QCOMPARE(bar.itemIdAt(bar.itemRect(QStringLiteral("base")).center()), QStringLiteral("base"));
+        QVERIFY(bar.itemIdAt(QPoint(2, 13)).isEmpty());
+        QCOMPARE(bar.focusPolicy(), Qt::NoFocus);
+    }
+
+    void testCrumbClickFiresIndexNotDeepest() {
+        drillTwoLevels();   // RcxEditor.vptr › QWidgetPrivate.parent › QWidget
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        QSignalSpy spy(m_editor, &RcxEditor::crumbClicked);
+        // The deepest crumb is inert: you are already there.
+        const QRect deep = bar->itemRect(QStringLiteral("crumb:2"));
+        QVERIFY(!deep.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, deep.center());
+        QApplication::processEvents();
+        QCOMPARE(spy.count(), 0);
+        QCOMPARE(m_ctrl->focusPath().size(), 2);
+        // Press inside, release outside → no click.
+        const QRect r1 = bar->itemRect(QStringLiteral("crumb:1"));
+        QVERIFY(!r1.isNull());
+        QTest::mousePress(bar, Qt::LeftButton, Qt::NoModifier, r1.center());
+        QTest::mouseRelease(bar, Qt::LeftButton, Qt::NoModifier, QPoint(r1.center().x(), r1.bottom() + 40));
+        QApplication::processEvents();
+        QCOMPARE(spy.count(), 0);
+        // An ancestor click → crumbClicked(index) → collapseToFocus(index).
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, r1.center());
+        QApplication::processEvents();
+        QCOMPARE(spy.count(), 1);
+        QCOMPARE(spy.at(0).at(0).toInt(), 1);
+        QCOMPARE(m_ctrl->focusPath(), (QVector<uint64_t>{ m_id.vptr }));
+        QVERIFY(collapsed(m_id.parent));
+        QCOMPARE(segments(), (QStringList{ QStringLiteral("RcxEditor.vptr"),
+                                           QStringLiteral("QWidgetPrivate") }));
+    }
+
+    void testBarNeverTakesFocus() {
+        // NoFocus contract: a click on the bar must not steal focus from the
+        // document (here: a sibling QLineEdit standing in for Scintilla).
+        QWidget win;
+        auto* lay = new QVBoxLayout(&win);
+        lay->setContentsMargins(0, 0, 0, 0);
+        auto* bar = new AddressBar(&win);
         int clicked = -1;
-        bar.setOnCrumb([&](uint64_t i) { clicked = (int)i; });
-        bar.setCrumbs(twoLevel());
-        QToolButton* rootBtn = nullptr;
-        QToolButton* deepBtn = nullptr;
-        for (auto* b : bar.findChildren<QToolButton*>()) {
-            if (b->text() == QStringLiteral("RcxEditor.vptr")) rootBtn = b;
-            if (b->text() == QStringLiteral("QWidgetPrivate")) deepBtn = b;
-        }
-        QVERIFY(rootBtn != nullptr && deepBtn != nullptr);
-        rootBtn->click();
+        AddressBar::Callbacks cb;
+        cb.onCrumb = [&](int i) { clicked = i; };
+        bar->setCallbacks(std::move(cb));
+        bar->setState(stateWith(twoLevel()));
+        auto* edit = new QLineEdit(&win);
+        lay->addWidget(bar);
+        lay->addWidget(edit);
+        win.resize(800, 80);
+        win.show();
+        edit->setFocus();
+        QTest::qWait(50);
+        QApplication::processEvents();
+        QCOMPARE(win.focusWidget(), edit);
+        QCOMPARE(bar->focusPolicy(), Qt::NoFocus);
+
+        const QRect r = bar->itemRect(QStringLiteral("crumb:0"));
+        QVERIFY(!r.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, r.center());
+        QApplication::processEvents();
         QCOMPARE(clicked, 0);
-        deepBtn->click();                               // deepest reports its index too
-        QCOMPARE(clicked, 1);
+        QCOMPARE(win.focusWidget(), edit);
+        QVERIFY(!bar->hasFocus());
     }
 
-    void testBarHasNoBackButton() {
-        BreadcrumbBar bar;
-        bar.setCrumbs({ crumb(QStringLiteral("A.f"), 0, 1), crumb(QStringLiteral("B"), 1, 2) });
-        for (auto* b : bar.findChildren<QToolButton*>())
-            QVERIFY(b->text() != QStringLiteral("↩"));
-        // ...and no connector label either: every QLabel is a separator.
-        for (auto* l : bar.findChildren<QLabel*>())
-            QCOMPARE(l->text(), QStringLiteral("›"));
-    }
-
-    // ── Tone ladder (the band is paper, not a third chrome strip) ──
-    // Depth 1 only repeats the class the doc tab and the command row already
-    // name, so the lone crumb stays secondary: textDim, regular weight.
-    void testDepth1CrumbIsDimAndRegular() {
-        BreadcrumbBar bar;
+    // Pixel contract: nothing filled at rest, hover is the `hover` fill on
+    // ancestors only, the tone ladder is textDim (ancestor) / text (deepest)
+    // / textDim (lone), the band is paper, the seam is one device row of
+    // containerBorderColor, and no accent pixel exists anywhere on the bar.
+    void testPixelsRestHoverAndTones() {
+        AddressBar bar;
         bar.applyTheme(ThemeManager::instance().current());
-        bar.setCrumbs({ crumb(QStringLiteral("RcxEditor"), 0) });
-        const auto& t = ThemeManager::instance().current();
-        QToolButton* only = nullptr;
-        for (auto* b : bar.findChildren<QToolButton*>()) only = b;
-        QVERIFY(only != nullptr);
-        const QString qss = only->styleSheet();
-        QVERIFY(qss.contains(t.textDim.name()));
-        QVERIFY(!qss.contains(QStringLiteral("font-weight")));
+        const Theme& t = bar.theme();
+        bar.setState(stateWith(twoLevel()));
+        showBar(bar, 800);
+        QImage img = grabOf(bar);
+        const QRect all(0, 0, img.width(), img.height());
+        // Text anti-aliasing can hit a fill colour by coincidence, so a
+        // handful of stray pixels is tolerated — a fill would be hundreds.
+        QVERIFY2(countColour(img, all, t.hover) < 16, "hover fill at rest");
+        QVERIFY2(countColour(img, all, pressedFill(t)) < 16, "pressed fill at rest");
+        QCOMPARE(countColour(img, all, t.indHoverSpan), 0);
+        // The band is paper — sample the stretch.
+        const QRect space = devRect(img, bar.itemRect(QStringLiteral("space")));
+        QVERIFY(space.width() > 4);
+        QVERIFY(sameColour(img.pixel(space.center()), editorPaperColor(t)));
+        // The seam: the bottom device row is containerBorderColor end to end.
+        const QRect bottom(0, img.height() - 1, img.width(), 1);
+        QVERIFY(countColour(img, bottom, containerBorderColor(t)) > img.width() * 9 / 10);
+        QVERIFY2(countColour(img, QRect(0, img.height() - 2, img.width(), 1), containerBorderColor(t))
+                     < img.width() / 10, "seam is more than one device row");
+        // Tones: the ancestor is textDim with no `text` ink; the deepest
+        // carries `text` (DemiBold).
+        const QRect c0 = devRect(img, bar.itemRect(QStringLiteral("crumb:0")));
+        const QRect c1 = devRect(img, bar.itemRect(QStringLiteral("crumb:1")));
+        QVERIFY(countColour(img, c0, t.textDim) > 0);
+        QCOMPARE(countColour(img, c0, t.text), 0);
+        QVERIFY(countColour(img, c1, t.text) > 0);
+
+        // Hover on an ancestor: the fill, and the tone steps up to text.
+        hoverAt(bar, bar.itemRect(QStringLiteral("crumb:0")).center());
+        img = grabOf(bar);
+        QVERIFY(countColour(img, c0, t.hover) > 0);
+        QVERIFY(countColour(img, c0, t.text) > 0);
+        QCOMPARE(countColour(img, all, t.indHoverSpan), 0);
+        // Hover on the deepest: inert, no fill.
+        hoverAt(bar, bar.itemRect(QStringLiteral("crumb:1")).center());
+        img = grabOf(bar);
+        QVERIFY2(countColour(img, c1, t.hover) < 16, "deepest crumb took a hover fill");
+        // Hover on the base: a text field, no fill either.
+        const QRect base = devRect(img, bar.itemRect(QStringLiteral("base")));
+        hoverAt(bar, bar.itemRect(QStringLiteral("base")).center());
+        img = grabOf(bar);
+        QVERIFY2(countColour(img, base, t.hover) < 16, "base took a hover fill");
+        // Leaving clears the fill.
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(&bar, &leave);
+        img = grabOf(bar);
+        QVERIFY2(countColour(img, all, t.hover) < 16, "hover fill survived leave");
+
+        // A lone crumb only repeats what the doc tab already names: textDim,
+        // regular — no `text` ink.
+        bar.setState(stateWith({ crumb(QStringLiteral("RcxEditor"), 0) }));
+        img = grabOf(bar);
+        const QRect lone = devRect(img, bar.itemRect(QStringLiteral("crumb:0")));
+        QVERIFY(countColour(img, lone, t.textDim) > 0);
+        QCOMPARE(countColour(img, lone, t.text), 0);
     }
 
-    // From depth 2 the trail is navigation: ancestors stay textDim, the
-    // deepest crumb steps up to text + DemiBold (the ONE weight step here).
-    void testDeepestCrumbIsTextDemiBold() {
-        BreadcrumbBar bar;
-        bar.applyTheme(ThemeManager::instance().current());
-        bar.setCrumbs(twoLevel());
-        const auto& t = ThemeManager::instance().current();
-        QString rootQss, deepQss;
-        for (auto* b : bar.findChildren<QToolButton*>()) {
-            if (b->text() == QStringLiteral("RcxEditor.vptr")) rootQss = b->styleSheet();
-            if (b->text() == QStringLiteral("QWidgetPrivate")) deepQss = b->styleSheet();
-        }
-        QVERIFY(!rootQss.isEmpty() && !deepQss.isEmpty());
-        QVERIFY(rootQss.contains(t.textDim.name()));
-        QVERIFY(!rootQss.contains(QStringLiteral("font-weight")));
-        QVERIFY(deepQss.contains(t.text.name()));
-        QVERIFY(deepQss.contains(QStringLiteral("font-weight:600")));
-        // Hover is a link cue (text + underline), not the accent — purple is
-        // spent on current/selected only.
-        QVERIFY(deepQss.contains(QStringLiteral("text-decoration:underline")));
-        QVERIFY(!deepQss.contains(t.indHoverSpan.name()));
-    }
-
-    // The bottom seam is painted device-exact (paintEvent), because a QSS
-    // "1px" border is TWO device rows at 125 % DPI next to the editor's
-    // device-exact frame.
-    void testBandHasNoQssBorderAndIsPaper() {
-        BreadcrumbBar bar;
-        const auto& t = ThemeManager::instance().current();
-        bar.applyTheme(t);
-        const QString qss = bar.styleSheet();
-        QVERIFY(!qss.contains(QStringLiteral("border")));
-        QVERIFY(qss.contains(rcx::editorPaperColor(t).name()));
-        QVERIFY(!qss.contains(rcx::menuBarColor(t).name()));
-    }
-
-    void testSetCrumbsSkipsIdenticalTrail() {
-        // The controller pushes the trail every refresh tick; an equal
-        // trail must leave the existing buttons alone (no teardown/rebuild).
-        BreadcrumbBar bar;
-        const QVector<Crumb> trail = twoLevel();
-        bar.setCrumbs(trail);
-        const auto before = bar.findChildren<QToolButton*>();
-        QCOMPARE(before.size(), 2);
-        bar.setCrumbs(trail);
-        const auto after = bar.findChildren<QToolButton*>();
-        QCOMPARE(after, before);            // same widget objects
-        bar.setCrumbs({ crumb(QStringLiteral("RcxEditor"), 0) });
-        // The old buttons are deleteLater'd; plain processEvents() skips
-        // deferred deletes outside an event loop, so flush them explicitly.
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-        QCOMPARE(bar.findChildren<QToolButton*>().size(), 1);
-    }
-
-    void testBarCollapsesDeepTrailToEllipsis() {
-        BreadcrumbBar bar;
+    void testOverflowFoldsFromTheRootNeverTheDeepest() {
+        AddressBar bar;
         QVector<Crumb> trail;
+        QStringList labels;
+        for (int i = 0; i < 6; ++i) {
+            const QString l = i < 5 ? QStringLiteral("C%1.f%1").arg(i) : QStringLiteral("C5");
+            trail.push_back(crumb(l, uint64_t(i), uint64_t(i + 1)));
+            labels << l;
+        }
+        bar.setState(stateWith(trail));
+        showBar(bar, 300);
+        QVERIFY(!bar.itemRect(QStringLiteral("overflow")).isNull());
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:0")).isNull());
+        QVERIFY(!bar.itemRect(QStringLiteral("crumb:5")).isNull());
+        QVERIFY(bar.itemRect(QStringLiteral("crumb:5")).left() > bar.itemRect(QStringLiteral("overflow")).right());
+        const QStringList hidden = bar.overflowMenuLabels();
+        QVERIFY(hidden.size() >= 1 && hidden.size() <= 5);
+        QCOMPARE(hidden.first(), QStringLiteral("C0.f0"));     // folded from the root
+        QVERIFY(!hidden.contains(QStringLiteral("C5")));       // never the deepest
+        QCOMPARE(bar.segments().first(), QStringLiteral("«"));
+        // Hidden and shown partition the trail, in order.
+        QCOMPARE(hidden + bar.segments().mid(1), labels);
+
+        // Wide: nothing folds, everything fits inside the strip.
+        bar.resize(1200, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY(bar.itemRect(QStringLiteral("overflow")).isNull());
         for (int i = 0; i < 6; ++i)
-            trail.push_back(crumb(i < 5 ? QStringLiteral("C%1.f%1").arg(i) : QStringLiteral("C5"),
-                                  uint64_t(i), uint64_t(i + 1)));
-        bar.setCrumbs(trail);
-        const QStringList seg = bar.segments();
-        QVERIFY(seg.contains(QStringLiteral("…")));
-        QVERIFY(seg.contains(QStringLiteral("C0.f0")));
-        QVERIFY(seg.contains(QStringLiteral("C5")));
-        QVERIFY(!seg.contains(QStringLiteral("C2.f2")));
-        // The gap's tooltip lists the hidden crumbs, already dotted, joined
-        // by the separator only.
-        QLabel* ell = nullptr;
-        for (auto* l : bar.findChildren<QLabel*>())
-            if (l->text() == QStringLiteral("…")) ell = l;
-        QVERIFY(ell != nullptr);
-        QCOMPARE(ell->toolTip(), QStringLiteral("C1.f1 › C2.f2"));
+            QVERIFY2(!bar.itemRect(QStringLiteral("crumb:%1").arg(i)).isNull(), "crumb dropped at 1200 px");
+        QVERIFY(bar.overflowMenuLabels().isEmpty());
+        QCOMPARE(bar.segments(), labels);
+        QVERIFY(bar.itemRect(QStringLiteral("chev:5")).right() < bar.itemRect(QStringLiteral("recent")).left());
+        QCOMPARE(bar.itemRect(QStringLiteral("recent")).right() + 1 + AddressBar::kRightMargin, 1200);
+        // Narrow again: folds again (the layout follows the width).
+        bar.resize(300, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY(!bar.itemRect(QStringLiteral("overflow")).isNull());
+    }
+
+    void testEqualStatePushAppliesOnce() {
+        // The controller pushes every refresh tick; an equal state is free.
+        AddressBar bar;
+        const AddressBarState s = stateWith(twoLevel());
+        bar.setState(s);
+        QCOMPARE(bar.stateApplyCount(), 1);
+        bar.setState(s);
+        QCOMPARE(bar.stateApplyCount(), 1);
+        AddressBarState s2 = s;
+        s2.liveness = liveness::Stale;
+        bar.setState(s2);
+        QCOMPARE(bar.stateApplyCount(), 2);
+        // Through the editor too: the controller's push of what the bar
+        // already shows must not count. Settle with one refresh first — the
+        // status tick can move m_lastStatus between two pushes.
+        m_ctrl->refresh();
+        const int n = m_editor->addressBar()->stateApplyCount();
+        m_editor->setAddressBarState(m_editor->addressBar()->state());
+        m_ctrl->refresh();
+        QCOMPARE(m_editor->addressBar()->stateApplyCount(), n);
+    }
+
+    void testTooltipsFollowHover() {
+        // The widget toolTip mirrors the hovered cell (the bridge shows it);
+        // QEvent::ToolTip is never handled here.
+        AddressBar bar;
+        QVector<Crumb> trail = twoLevel();
+        trail[0].address = 0x1000;
+        trail[1].address = 0x7FF6DEAD0030ULL;
+        bar.setState(stateWith(trail));
+        showBar(bar, 800);
+        QVERIFY(bar.toolTip().isEmpty());
+        hoverAt(bar, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("Base address")), qPrintable(bar.toolTip()));
+        QVERIFY(bar.toolTip().contains(QStringLiteral("0x7FF600000000")));
+        hoverAt(bar, bar.itemRect(QStringLiteral("crumb:1")).center());
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("@ 0x7FF6DEAD0030")), qPrintable(bar.toolTip()));
+        QVERIFY(bar.toolTip().startsWith(QStringLiteral("QWidgetPrivate")));
+        // An unreadable frame says so; the text is republished in place on
+        // the state push, without a dismiss.
+        trail[1].address = 0;
+        bar.setState(stateWith(trail));
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("(unreadable)")), qPrintable(bar.toolTip()));
+        hoverAt(bar, bar.itemRect(QStringLiteral("back")).center());
+        QCOMPARE(bar.toolTip(), QStringLiteral("Back  Alt+Left"));
+        hoverAt(bar, bar.itemRect(QStringLiteral("src")).center());
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("Process REECLASS.exe")), qPrintable(bar.toolTip()));
+        QVERIFY(bar.toolTip().contains(QStringLiteral("Live")));
+        hoverAt(bar, bar.itemRect(QStringLiteral("chev:0")).center());
+        QCOMPARE(bar.toolTip(), QStringLiteral("Fields of RcxEditor"));
+        // Leaving clears it.
+        QEvent leave(QEvent::Leave);
+        QApplication::sendEvent(&bar, &leave);
+        QVERIFY(bar.toolTip().isEmpty());
+    }
+
+    void testBackCellDisabledWhenNoHistory() {
+        // No history yet (P5): the Back cell is painted at 40 % and ignores
+        // clicks; with history it paints in full and fires.
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        const Theme& t = bar.theme();
+        int backs = 0;
+        AddressBar::Callbacks cb;
+        cb.onBack = [&] { ++backs; };
+        bar.setCallbacks(std::move(cb));
+        AddressBarState s = stateWith(twoLevel());   // canBack = false
+        bar.setState(s);
+        showBar(bar, 800);
+        const QRect back = bar.itemRect(QStringLiteral("back"));
+        QVERIFY(!back.isNull());
+        const double inkOff = inkAmount(grabOf(bar), back, editorPaperColor(t));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, back.center());
+        QApplication::processEvents();
+        QCOMPARE(backs, 0);
+
+        s.canBack = true;
+        bar.setState(s);
+        const double inkOn = inkAmount(grabOf(bar), back, editorPaperColor(t));
+        QVERIFY2(inkOn > 3.0, qPrintable(QStringLiteral("enabled Back paints no ink (%1)").arg(inkOn)));
+        QVERIFY2(inkOff < inkOn * 0.6,
+                 qPrintable(QStringLiteral("disabled Back didn't dim: on=%1 off=%2").arg(inkOn).arg(inkOff)));
+        QTest::mouseClick(&bar, Qt::LeftButton, Qt::NoModifier, back.center());
+        QApplication::processEvents();
+        QCOMPARE(backs, 1);
+    }
+
+    // ── Source chip + base segment ──
+
+    void testSourceChipTooltipNamesKindAndStatus() {
+        AddressBar bar;
+        bar.setState(stateWith(twoLevel()));   // Process REECLASS.exe, Live
+        showBar(bar, 800);
+        hoverAt(bar, bar.itemRect(QStringLiteral("src")).center());
+        const QString tip = bar.toolTip();
+        QVERIFY2(tip.contains(kindLabelFor(QStringLiteral("processmemory"))), qPrintable(tip));
+        QVERIFY(tip.contains(QStringLiteral("REECLASS.exe")));
+        QVERIFY(tip.contains(QStringLiteral("Live — reading")));   // the status chip's words
+        QVERIFY(tip.contains(QStringLiteral("click to change source")));
+        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("REECLASS.exe"));
+        // The chevron is part of the chip: same tip, same hover group.
+        hoverAt(bar, bar.itemRect(QStringLiteral("src.chev")).center());
+        QCOMPARE(bar.toolTip(), tip);
+        // Status words follow the liveness, republished in place.
+        AddressBarState s = stateWith(twoLevel());
+        s.liveness = liveness::Disconnected;
+        bar.setState(s);
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("Disconnected")), qPrintable(bar.toolTip()));
+        s.liveness = liveness::Static;
+        s.sourceKindId = QStringLiteral("File");
+        bar.setState(s);
+        QVERIFY(bar.toolTip().startsWith(kindLabelFor(QStringLiteral("File"))));
+        QVERIFY(bar.toolTip().contains(QStringLiteral("Static file")));
+        // No provider: the chip invites one, in the cell and in the tip.
+        s.sourceName.clear(); s.sourceKindId.clear(); s.liveness = liveness::None;
+        bar.setState(s);
+        QCOMPARE(bar.sourceDisplayText(), QStringLiteral("Select source"));
+        QVERIFY2(bar.toolTip().contains(QStringLiteral("Select source")), qPrintable(bar.toolTip()));
+        QVERIFY(bar.livenessDotRect().isNull());
+    }
+
+    void testSourceChipLivenessDot() {
+        // The status chip's mapping on the bar: green reading, focusGlow
+        // stale, markerError disconnected (with the icon at 40 %), nothing
+        // for a static file. The dot rides the icon's bottom-right corner.
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        const Theme& t = bar.theme();
+        const QColor paper = editorPaperColor(t);
+        AddressBarState s = stateWith(twoLevel());   // Live
+        bar.setState(s);
+        showBar(bar, 800);
+        const QRect icon = bar.sourceIconRect();
+        const QRect dot  = bar.livenessDotRect();
+        QVERIFY(!icon.isNull());
+        QVERIFY(!dot.isNull());
+        QCOMPARE(dot.size(), QSize(AddressBar::kDotPx, AddressBar::kDotPx));
+        QVERIFY(icon.contains(dot.topLeft()));            // on the icon...
+        QVERIFY(dot.right() > icon.right() && dot.bottom() > icon.bottom());   // ...over its corner
+        QVERIFY(dot.bottom() < bar.itemRect(QStringLiteral("src")).bottom()); // inside the cell
+        // The ring around the dot is excluded from the icon-ink probe.
+        const QRect ring = dot.adjusted(-AddressBar::kDotRing, -AddressBar::kDotRing,
+                                        AddressBar::kDotRing, AddressBar::kDotRing);
+        QImage img = grabOf(bar);
+        QRect dd = devRect(img, dot);
+        QVERIFY(countColour(img, dd, t.indHintGreen) > 0);
+        const double inkLive = inkAmount(img, icon, paper, ring);
+        QVERIFY2(inkLive > 3.0, qPrintable(QStringLiteral("live icon paints no ink (%1)").arg(inkLive)));
+
+        s.liveness = liveness::Stale;
+        bar.setState(s);
+        img = grabOf(bar);
+        QVERIFY(countColour(img, dd, t.focusGlow) > 0);
+        QCOMPARE(countColour(img, dd, t.indHintGreen), 0);
+
+        s.liveness = liveness::Disconnected;
+        bar.setState(s);
+        img = grabOf(bar);
+        QVERIFY(countColour(img, dd, t.markerError) > 0);
+        const double inkGone = inkAmount(img, icon, paper, ring);
+        QVERIFY2(inkGone < inkLive * 0.6,
+                 qPrintable(QStringLiteral("disconnected icon didn't dim: live=%1 gone=%2").arg(inkLive).arg(inkGone)));
+
+        // A static file has nothing to be alive: no dot at all, icon at full ink.
+        s.liveness = liveness::Static;
+        bar.setState(s);
+        QVERIFY(bar.livenessDotRect().isNull());
+        img = grabOf(bar);
+        QCOMPARE(countColour(img, dd, t.indHintGreen), 0);
+        QCOMPARE(countColour(img, dd, t.focusGlow), 0);
+        QCOMPARE(countColour(img, dd, t.markerError), 0);
+        QVERIFY(inkAmount(img, icon, paper, ring) > inkGone);
+
+        // setLiveness alone — the sourceStatusChanged path — moves the dot
+        // without counting as a state push.
+        const int n = bar.stateApplyCount();
+        bar.setLiveness(liveness::Live);
+        QCOMPARE(bar.stateApplyCount(), n);
+        img = grabOf(bar);
+        QVERIFY(countColour(img, dd, t.indHintGreen) > 0);
+        QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), t.indHoverSpan), 0);
+    }
+
+    void testBaseFormulaElidedForDisplayOnly() {
+        // The regression this pins: the command row elided a long formula
+        // for display and then edited the elided text, feeding the ellipsis
+        // to the parser. Here the display is elided, the state keeps every
+        // character, and the resolved address follows in textMuted.
+        AddressBar bar;
+        bar.applyTheme(ThemeManager::instance().current());
+        const Theme& t = bar.theme();
+        AddressBarState s = stateWith(twoLevel());
+        bar.setState(s);
+        showBar(bar, 1200);
+        // A literal: shown as-is, no suffix (it would repeat the number).
+        QCOMPARE(bar.baseDisplayText(), QStringLiteral("0x7FF600000000"));
+        QImage img = grabOf(bar);
+        QVERIFY2(countColour(img, devRect(img, bar.itemRect(QStringLiteral("base"))), t.textMuted) < 16,
+                 "resolved suffix drawn beside a literal");
+
+        const QString formula = QStringLiteral("<REECLASS.exe>+0x1234+[0x10]*2");
+        QCOMPARE(formula.size(), 30);
+        s.baseFormula  = formula;
+        s.resolvedBase = 0x7FF6DEAD1234ULL;
+        bar.setState(s);
+        QCOMPARE(bar.state().baseFormula, formula);            // the state: every character
+        const QString shown = bar.baseDisplayText();           // the display: elided
+        QVERIFY2(shown.size() < formula.size(), qPrintable(shown));
+        QVERIFY(shown.contains(QChar(0x2026)));
+        QVERIFY2(shown.startsWith(QStringLiteral("<REE")) && shown.endsWith(QStringLiteral("*2")),
+                 qPrintable(shown));                            // middle elision keeps both ends
+        QVERIFY(QFontMetrics(bar.font()).horizontalAdvance(shown) <= AddressBar::kBaseMaxW);
+        img = grabOf(bar);
+        const QRect base = devRect(img, bar.itemRect(QStringLiteral("base")));
+        QVERIFY(countColour(img, base, t.textMuted) > 8);      // the "→ 0x…" suffix
+        QCOMPARE(countColour(img, base, t.indHoverSpan), 0);
+        // The tooltip carries what the segment could not.
+        hoverAt(bar, bar.itemRect(QStringLiteral("base")).center());
+        QVERIFY2(bar.toolTip().contains(formula), qPrintable(bar.toolTip()));
+        QVERIFY(bar.toolTip().contains(QStringLiteral("0x7FF6DEAD1234")));
+        QVERIFY(bar.toolTip().startsWith(QStringLiteral("Base address")));
+
+        // 30 px short of the natural width: overflow step 1 takes only what
+        // is over — the formula loses a few characters and keeps its suffix.
+        // (`recent` hugs the right edge, so the natural width is the trail's
+        // right end plus the recent cell.)
+        const int naturalW = bar.itemRect(QStringLiteral("chev:1")).right() + 1
+                           + AddressBar::kRecentW + AddressBar::kRightMargin;
+        QVERIFY(naturalW < 1200);
+        bar.resize(naturalW - 30, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY(bar.itemRect(QStringLiteral("overflow")).isNull());
+        const QString slightly = bar.baseDisplayText();
+        QVERIFY2(slightly.size() < formula.size() && slightly.contains(QChar(0x2026)), qPrintable(slightly));
+        QVERIFY2(QFontMetrics(bar.font()).horizontalAdvance(slightly) > AddressBar::kBaseMinW,
+                 "a 30-px squeeze fell straight to the 90-px floor");
+        img = grabOf(bar);
+        QVERIFY2(countColour(img, devRect(img, bar.itemRect(QStringLiteral("base"))), t.textMuted) > 8,
+                 "resolved suffix dropped for a 30-px squeeze");
+        // A real squeeze: the base at its 90-px floor, suffix gone, the
+        // state untouched.
+        bar.resize(300, AddressBar::kAddressBarHeight);
+        QApplication::processEvents();
+        QVERIFY(QFontMetrics(bar.font()).horizontalAdvance(bar.baseDisplayText()) <= AddressBar::kBaseMinW);
+        img = grabOf(bar);
+        QVERIFY2(countColour(img, devRect(img, bar.itemRect(QStringLiteral("base"))), t.textMuted) < 16,
+                 "resolved suffix survived the narrow fold");
+        QCOMPARE(bar.state().baseFormula, formula);
+    }
+
+    void testSourceChipClickOpensPopupUnderTheBar() {
+        // Click the chip → sourcePopupRequested with the anchor on the bar's
+        // bottom edge → the controller's SourceChooserPopup opens there and
+        // the chip reads pressed until the popup hides, by any route.
+        //
+        // A Qt::Popup cannot keep OS focus on the hidden test desktop: the
+        // first event pump after show() takes it away again and the platform
+        // closes the popup (the artifact behind test_source_chooser's
+        // exposure failures). So the pressed probe grabs BEFORE the pump and
+        // the un-pressed probe after it — the platform's close and an
+        // explicit hide() both leave through hideEvent → dismissed().
+        QApplication::processEvents();
+        AddressBar* bar = m_editor->addressBar();
+        const Theme& t = bar->theme();
+        QSignalSpy spy(m_editor, &RcxEditor::sourcePopupRequested);
+        const QRect src = bar->itemRect(QStringLiteral("src"));
+        QVERIFY(!src.isNull());
+        QTest::mouseClick(bar, Qt::LeftButton, Qt::NoModifier, src.center());
+        QCOMPARE(spy.count(), 1);
+        const QPoint anchor = spy.at(0).at(0).toPoint();
+        QCOMPARE(anchor.y(), bar->mapToGlobal(QPoint(0, bar->height())).y());
+        QCOMPARE(anchor.x(), bar->mapToGlobal(QPoint(src.left(), 0)).x());
+        auto* popup = m_editor->findChild<SourceChooserPopup*>();
+        QVERIFY(popup);
+        QVERIFY(popup->isVisible());
+        QImage img = bar->grab().toImage().convertToFormat(QImage::Format_ARGB32);
+        QVERIFY2(countColour(img, devRect(img, src), pressedFill(t)) > 0, "chip not pressed while the popup is up");
+        QCOMPARE(countColour(img, QRect(0, 0, img.width(), img.height()), t.indHoverSpan), 0);
+        QApplication::processEvents();
+        popup->hide();
+        QApplication::processEvents();
+        QVERIFY(!popup->isVisible());
+        img = grabOf(*bar);
+        QVERIFY2(countColour(img, devRect(img, src), pressedFill(t)) < 16, "chip stayed pressed after the popup hid");
+    }
+
+    void testSourceStatusSignalMovesTheDot() {
+        // The controller's status flip reaches the chip without a refresh
+        // push: emit the signal and read the bar's liveness back.
+        AddressBar* bar = m_editor->addressBar();
+        emit m_ctrl->sourceStatusChanged(RcxController::SourceStatus::Stale);
+        QCOMPARE(bar->state().liveness, liveness::Stale);
+        emit m_ctrl->sourceStatusChanged(RcxController::SourceStatus::Disconnected);
+        QCOMPARE(bar->state().liveness, liveness::Disconnected);
+        // A second pane gets its own connection.
+        RcxEditor* pane2 = m_ctrl->addSplitEditor(m_splitter);
+        emit m_ctrl->sourceStatusChanged(RcxController::SourceStatus::Live);
+        QCOMPARE(pane2->addressBar()->state().liveness, liveness::Live);
+        QCOMPARE(bar->state().liveness, liveness::Live);
+    }
+
+    void testCrumbPathTextMatchesTheModel() {
+        // "Copy path" rebuilds the dotted path from the labels alone and must
+        // agree with trailPathText() over the tree for the same trail.
+        AddressBar bar;
+        bar.setState(stateWith({ crumb(QStringLiteral("RcxEditor.vptr"), 0),
+                                 crumb(QStringLiteral("QWidgetPrivate.parent"), 1),
+                                 crumb(QStringLiteral("QWidget"), 2) }));
+        QCOMPARE(bar.crumbPathText(0), QStringLiteral("RcxEditor"));
+        QCOMPARE(bar.crumbPathText(1), QStringLiteral("RcxEditor.vptr"));
+        QCOMPARE(bar.crumbPathText(2), QStringLiteral("RcxEditor.vptr.parent"));
+        drillTwoLevels();
+        QApplication::processEvents();
+        QCOMPARE(m_editor->addressBar()->crumbPathText(2),
+                 trailPathText(m_doc->tree, m_ctrl->viewRootId(), m_ctrl->focusPath()));
     }
 };
 

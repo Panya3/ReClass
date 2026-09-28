@@ -21,12 +21,13 @@
 #include <QFont>
 #include <QMouseEvent>
 #include <QFileInfo>
+#include <QPainter>
 #include <Qsci/qsciscintilla.h>
 #include <Qsci/qsciscintillabase.h>
 #include <cstdio>
 #include "controller.h"
 #include "editor.h"
-#include "widgets/breadcrumb_bar.h"
+#include "widgets/address_bar.h"
 #include "core.h"
 #include "providers/buffer_provider.h"
 #include "themes/thememanager.h"
@@ -262,11 +263,13 @@ int main(int argc, char** argv) {
     }
 
     if (mode == QStringLiteral("drill")) {
-        // Breadcrumb proof: swap in the tutorial-like tree, view RcxEditor,
-        // expand __vptr inline, then CLICK it (the click-driven breadcrumb adds
-        // it). The grab shows the always-visible breadcrumb grown to
-        // "RcxEditor › __vptr › QWidgetVTable", the vtable expanded inline, and
-        // the fnptr rows (single address). Prints the focus path for asserting.
+        // Address-bar proof: swap in the tutorial-like tree, view RcxEditor,
+        // expand __vptr inline, then CLICK it (the click-driven trail adds
+        // it). The grab shows the always-visible bar with its trail grown to
+        // the dotted production shape "RcxEditor.__vptr › QWidgetVTable"
+        // (ancestor = class.field, deepest = bare class), the vtable expanded
+        // inline, and the fnptr rows (single address). Prints the focus path
+        // for asserting.
         doc->tree = buildDrillTree();
         uint64_t rootId = 0, vptrId = 0;
         for (const auto& n : doc->tree.nodes) {
@@ -291,12 +294,63 @@ int main(int argc, char** argv) {
                     qPrintable(fp.join(',')), (unsigned long long)ctrl->viewRootId());
         std::fflush(stdout);
         editor->grab().save(out);
-        // Also grab just the breadcrumb bar, scaled 4×, to inspect crumb text
-        // rendering up close (vertical centering / first-crumb cleanliness).
-        if (auto* bar = editor->breadcrumbBar()) {
+        // Also grab just the address bar, scaled 4×, to inspect the crumb
+        // text up close (vertical centering / first-ink at kGutter).
+        if (auto* bar = editor->addressBar()) {
             QPixmap bp = bar->grab();
             bp.scaled(bp.width() * 4, bp.height() * 4, Qt::IgnoreAspectRatio,
                       Qt::SmoothTransformation).save(QStringLiteral("bc_bar_4x.png"));
+        }
+        // And the source chip + base segment in every liveness the controller
+        // can report, over a formula base, one bar per row at 760 px, 4×
+        // (bc_bar_states_4x.png): live, stale, disconnected, static, no
+        // source, then live over a lone crumb (room for the base's resolved-
+        // address suffix). The harness provider is a static buffer, so the
+        // real bar above never shows a dot — this strip is the only place to
+        // eyeball it without a live process.
+        {
+            AddressBarState s = editor->addressBar()->state();
+            s.sourceName   = QStringLiteral("REECLASS.exe");
+            s.sourceKindId = QStringLiteral("processmemory");
+            s.baseFormula  = QStringLiteral("<REECLASS.exe>+0x1234+[0x10]*2");
+            s.resolvedBase = 0x7FF6DEAD1234ULL;
+            const int levels[] = { liveness::Live, liveness::Stale, liveness::Disconnected,
+                                   liveness::Static, liveness::None };
+            const int w = 760;
+            QVector<QPixmap> rows;
+            for (int lv : levels) {
+                AddressBar bar;
+                bar.applyTheme(ThemeManager::instance().current());
+                AddressBarState st = s;
+                st.liveness = lv;
+                if (lv == liveness::None) { st.sourceName.clear(); st.sourceKindId.clear(); }
+                bar.setState(st);
+                bar.resize(w, AddressBar::kAddressBarHeight);
+                rows << bar.grab();
+            }
+            {
+                AddressBar bar;
+                bar.applyTheme(ThemeManager::instance().current());
+                AddressBarState st = s;
+                st.liveness = liveness::Live;
+                Crumb lone = st.crumbs.first();
+                lone.label = QStringLiteral("RcxEditor");
+                st.crumbs = { lone };
+                bar.setState(st);
+                bar.resize(w, AddressBar::kAddressBarHeight);
+                rows << bar.grab();
+            }
+            const int rowH = rows.first().height();
+            QPixmap strip(rows.first().width(), rowH * rows.size());
+            strip.setDevicePixelRatio(rows.first().devicePixelRatio());
+            strip.fill(Qt::black);
+            {
+                QPainter sp(&strip);
+                for (int i = 0; i < rows.size(); ++i)
+                    sp.drawPixmap(0, i * AddressBar::kAddressBarHeight, rows[i]);
+            }
+            strip.scaled(strip.width() * 4, strip.height() * 4, Qt::IgnoreAspectRatio,
+                         Qt::SmoothTransformation).save(QStringLiteral("bc_bar_states_4x.png"));
         }
         return 0;
     }

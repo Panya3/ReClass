@@ -648,7 +648,10 @@ void SourceChooserPopup::paintEvent(QPaintEvent* event) {
 
 void SourceChooserPopup::hideEvent(QHideEvent* event) {
     QFrame::hideEvent(event);
-//TODO-DELETE(dismissed)     // emit dismissed();
+    // Every way out — a pick, Esc, a click elsewhere — lands here, so this
+    // is the one place that can say "the popup is gone". The address bar's
+    // source chip reads pressed from popup() until it hears this.
+    emit dismissed();
 }
 
 bool SourceChooserPopup::eventFilter(QObject* obj, QEvent* event) {

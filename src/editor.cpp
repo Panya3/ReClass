@@ -4,7 +4,7 @@
 #include "rcxtooltip.h"
 #include "profiler.h"
 #include "widgets/hover_preview.h"
-#include "widgets/breadcrumb_bar.h"
+#include "widgets/address_bar.h"
 #include <QDebug>
 #include <QSettings>
 #include <QtEndian>
@@ -1786,17 +1786,36 @@ RcxEditor::RcxEditor(QWidget* parent) : QWidget(parent) {
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     // Zero spacing, not just zero margins: QVBoxLayout's default 6-px gap sat
-    // between the breadcrumb band and the Scintilla paper and painted in the
-    // WINDOW background, so the document column showed a chrome-coloured stripe
-    // under the breadcrumb. The band's own bottom hairline is the seam.
+    // between the address bar's band and the Scintilla paper and painted in
+    // the WINDOW background, so the document column showed a chrome-coloured
+    // stripe under the bar. The band's own bottom hairline is the seam.
     layout->setSpacing(0);
 
-    // Drill-down breadcrumb strip — above the command row (Scintilla line 0),
-    // hidden until the user drills ≥1 level. A click re-emits crumbClicked so
-    // the controller jumps the view back to that class.
-    m_breadcrumb = new BreadcrumbBar(this);
-    m_breadcrumb->setOnCrumb([this](uint64_t idx) { emit crumbClicked((int)idx); });
-    layout->addWidget(m_breadcrumb);
+    // The address bar — source chip, base address and the drill-down trail —
+    // above the command row (Scintilla line 0). It is a real widget outside
+    // the Scintilla viewport, so unlike line 0 it never scrolls out of view.
+    // Always visible: with no drill it names the class in view. Its
+    // std::function callbacks are bridged to signals here; the controller
+    // connects those (crumbClicked → collapseToFocus, sourcePopupRequested
+    // → showSourcePopup; the rest as the phases behind P2b land).
+    m_addressBar = new AddressBar(this);
+    {
+        AddressBar::Callbacks cb;
+        cb.onCrumb       = [this](int i) { emit crumbClicked(i); };
+        cb.onSourceClick = [this](QPoint g) { emit sourcePopupRequested(g); };
+        cb.onSiblingPick = [this](int level, uint64_t id) { emit siblingPickRequested(level, id); };
+        cb.onRootPick    = [this](uint64_t id) { emit rootPickRequested(id); };
+        cb.onBaseCommit  = [this](QString s) { emit baseCommitRequested(s); };
+        cb.onPathCommit  = [this](QString s) { emit pathCommitRequested(s); };
+        cb.onRecentPick  = [this](QString s) { emit recentPickRequested(s); };
+        cb.onBack        = [this] { emit navBackRequested(); };
+        cb.onForward     = [this] { emit navForwardRequested(); };
+        cb.onUp          = [this] { emit navUpRequested(); };
+        cb.onHistoryJump = [this](int i) { emit historyJumpRequested(i); };
+        cb.onRefresh     = [this] { emit refreshRequested(); };
+        m_addressBar->setCallbacks(std::move(cb));
+    }
+    layout->addWidget(m_addressBar);
 
     m_sci = new QsciScintilla(this);
     layout->addWidget(m_sci);
@@ -2420,12 +2439,19 @@ void RcxEditor::allocateMarginStyles() {
     }
 }
 
+void RcxEditor::setAddressBarState(const AddressBarState& s) {
+    if (m_addressBar) m_addressBar->setState(s);
+}
+
 void RcxEditor::setBreadcrumb(const QVector<Crumb>& crumbs) {
-    if (m_breadcrumb) m_breadcrumb->setCrumbs(crumbs);
+    if (!m_addressBar) return;
+    AddressBarState s = m_addressBar->state();
+    s.crumbs = crumbs;
+    m_addressBar->setState(s);
 }
 
 void RcxEditor::applyTheme(const Theme& theme) {
-    if (m_breadcrumb) m_breadcrumb->applyTheme(theme);
+    if (m_addressBar) m_addressBar->applyTheme(theme);
     // Editor paper:
     //   - Dark themes: slightly darker than chrome for visual depth.
     //   - Light themes (chrome lightness > 0.78): pure white. Threshold

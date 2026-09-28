@@ -1633,11 +1633,14 @@ QJsonObject McpBridge::toolTreeApply(const QJsonObject& args) {
             // Through rebaseTo so an MCP rebase is undoable and lands in the
             // recent list like every other rebase — when it can be evaluated
             // here: a bare literal always can, a formula needs an attached
-            // source. Otherwise (the documented "auto-resolve on provider
-            // attach" use) the old contract applies directly — store the
-            // literal base plus the formula verbatim — without first bouncing
-            // off rebaseTo, whose refusal would flash "Base: …" in the status
-            // bar for an op that is applied anyway.
+            // source. Otherwise the old contract applies directly — store the
+            // literal base plus the formula verbatim (the documented
+            // "auto-resolve on provider attach" use). The canEvaluate gate
+            // only exists to skip rebaseTo for that no-source / non-literal
+            // case, whose refusal would flash "Base: …" in the status bar for
+            // an op that is applied anyway; with a source attached and a
+            // formula that fails to evaluate, rebaseTo still refuses with its
+            // hint and the same fallback then stores the literal + formula.
             const QString formula = op.value("formula").toString().trimmed();
             const QString baseStr = op.value("baseAddress").toString().trimmed();
             const QString expr = formula.isEmpty() ? baseStr : formula;

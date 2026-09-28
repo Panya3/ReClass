@@ -82,7 +82,7 @@ signals:
     void providerSelected(const QString& identifier);
     void removeRequested(int savedIndex);
     void clearRequested();
-    void dismissed();
+    void dismissed();   // hidden by any route (pick, Esc, outside click); the chip that opened it un-presses
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override;

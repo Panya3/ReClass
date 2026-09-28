@@ -634,10 +634,14 @@ private:
     // Display label for a class id (structTypeName / name / fallback). For
     // id 0 / show-all, the first root struct name.
     QString classLabelOf(uint64_t id) const;
-    // Build the dotted "class.field" Crumb list from m_focusPath — with each
-    // crumb's class id, entry hop, address and keyword — and push it to every
-    // editor's breadcrumb.
-    void pushBreadcrumb();
+    // The address bar's snapshot: source name / kind / liveness, base
+    // address + formula, and the dotted "class.field" Crumb list built from
+    // m_focusPath — with each crumb's class id, entry hop, address and
+    // keyword. Reconciles the focus path first.
+    AddressBarState addressBarState();
+    // Push that snapshot to every editor's bar (each bar early-returns on an
+    // equal state, so the refresh tail calls this unconditionally).
+    void pushAddressBarState();
 
     // ── Class creation (one canonical scheme, shared by every creator) ──
     // Unique struct type name: `base`, else `base_2`, `base_3`, …

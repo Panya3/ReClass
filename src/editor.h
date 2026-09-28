@@ -20,7 +20,8 @@ namespace rcx {
 
 class HoverPreviewRegistry;  // src/widgets/hover_preview.h
 class HoverPreview;          // src/widgets/hover_preview.h
-class BreadcrumbBar;         // src/widgets/breadcrumb_bar.h
+class AddressBar;            // src/widgets/address_bar.h
+struct AddressBarState;      // src/widgets/address_bar_model.h
 
 class RcxEditor : public QWidget {
     Q_OBJECT
@@ -30,11 +31,17 @@ public:
 
     void applyDocument(const ComposeResult& result);
 
-    // Update the drill-down breadcrumb strip above the command row. The
-    // controller flattens its inline-expansion focus path into this Crumb list;
-    // the bar stays visible whenever a class is in view (≥1 class crumb).
+    // The address bar above the command row: source chip, base address and
+    // the drill-down trail. The controller pushes one AddressBarState per
+    // refresh; the bar early-returns on an equal state, so this is cheap to
+    // call every tick.
+    void setAddressBarState(const AddressBarState& s);
+    AddressBar* addressBar() const { return m_addressBar; }
+    // Adapters kept until P6 for callers that only know the trail:
+    // setBreadcrumb() folds the crumbs into the bar's current state and
+    // breadcrumbBar() is the old name for addressBar().
     void setBreadcrumb(const QVector<Crumb>& crumbs);
-    BreadcrumbBar* breadcrumbBar() const { return m_breadcrumb; }  // test accessor
+    AddressBar* breadcrumbBar() const { return m_addressBar; }
 
     ViewState saveViewState() const;
     void restoreViewState(const ViewState& vs);
@@ -227,10 +234,25 @@ signals:
     // a NEW tab (sharing the same document). Controller resolves and asks
     // MainWindow to spawn the tab.
     void openTypeInNewTabRequested(int nodeIdx);
-    // A breadcrumb class crumb was clicked: collapse everything below that
-    // class and scroll to it. Carries the crumb INDEX (0 = root class, i = the
-    // class shown by focus-path pointer i-1).
+    // An ancestor crumb (or a « menu entry) was clicked: collapse everything
+    // below that class and scroll to it. Carries the crumb INDEX (0 = root
+    // class, i = the class shown by focus-path pointer i-1). The deepest
+    // crumb is inert and never emits this.
     void crumbClicked(int crumbIndex);
+    // ── Address bar requests (bridged from AddressBar::Callbacks) ──
+    // Declared with the bar so the controller wiring lands one phase at a
+    // time; each is unconnected until its phase (P3 source/base/recent, P4
+    // sideways navigation + path edit, P5 history).
+    void siblingPickRequested(int level, uint64_t fieldId);   // chev:<level> menu pick
+    void rootPickRequested(uint64_t rootId);                  // root.chev menu pick
+    void baseCommitRequested(const QString& expr);            // Enter in the base edit
+    void pathCommitRequested(const QString& path);            // Enter in the path edit
+    void recentPickRequested(const QString& formula);         // recent-places menu pick
+    void navBackRequested();
+    void navForwardRequested();
+    void navUpRequested();
+    void historyJumpRequested(int entry);
+    void refreshRequested();                                  // source context menu
     // ── Byte-selection actions ──
     // Fired when the user invokes Ctrl+C / Ctrl+V / Delete with an active
     // hex byte selection (`m_byteSel`). Controller reads the selection
@@ -477,8 +499,9 @@ private:
     const Provider* m_disasmRealProv = nullptr;   // real process provider — for reading code at arbitrary addresses
     const NodeTree* m_disasmTree = nullptr;
 
+    // ── Address bar (layout item [0], above m_sci) ──
+    AddressBar* m_addressBar = nullptr;
     // ── Find bar ──
-    BreadcrumbBar* m_breadcrumb = nullptr;  // drill-down trail above the command row
     QWidget*   m_findBarContainer = nullptr;
     QLineEdit* m_findBar = nullptr;
     long       m_findPos = 0;

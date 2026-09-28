@@ -26,6 +26,7 @@
         <file alias="cloud-download.svg">vsicons/cloud-download.svg</file>
         <file alias="arrow-left.svg">vsicons/arrow-left.svg</file>
         <file alias="arrow-right.svg">vsicons/arrow-right.svg</file>
+        <file alias="arrow-up.svg">vsicons/arrow-up.svg</file>
         <file alias="split-horizontal.svg">vsicons/split-horizontal.svg</file>
         <file alias="chrome-close.svg">vsicons/chrome-close.svg</file>
         <file alias="chrome-minimize.svg">vsicons/chrome-minimize.svg</file>

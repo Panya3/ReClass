@@ -2,6 +2,7 @@
 #include "addressparser.h"
 #include "address_callbacks.h"
 #include "widgets/address_bar_model.h"
+#include "widgets/address_bar.h"
 #include "symbolstore.h"
 #include "profiler.h"
 #include "typeselectorpopup.h"
@@ -511,6 +512,10 @@ RcxEditor* RcxController::addSplitEditor(QWidget* parent) {
         editor->applyDocument(m_lastResult);
     }
     updateCommandRow();
+    // A new pane's bar starts empty and the per-refresh push is guarded on
+    // change, so it must be seeded now or it shows nothing until the trail
+    // next moves.
+    if (m_doc) editor->setAddressBarState(addressBarState());
 
     // Eagerly pre-warm the type popup so first click isn't slow (~350ms cold start).
     if (!m_cachedPopup) {
@@ -1238,6 +1243,14 @@ void RcxController::connectEditor(RcxEditor* editor) {
     // itself is grown by selection, in handleNodeClick.
     connect(editor, &RcxEditor::crumbClicked, this, &RcxController::collapseToFocus);
 
+    // Source liveness on the bar's chip. The per-refresh state push carries
+    // it too, but a source that just died gets no more refresh ticks, so the
+    // push alone would leave the dot green: the status signal turns it the
+    // moment the status flips. Context = the editor, so a closed split pane
+    // takes the connection with it.
+    connect(this, &RcxController::sourceStatusChanged, editor,
+            [editor](SourceStatus st) { editor->addressBar()->setLiveness(int(st)); });
+
     connect(editor, &RcxEditor::expandAllRequested, this, [this]() {
         m_suppressRefresh = true;
         m_doc->undoStack.beginMacro(QStringLiteral("Expand all"));
@@ -1914,7 +1927,7 @@ QString RcxController::classLabelOf(uint64_t id) const {
     return roots.isEmpty() ? QStringLiteral("…") : roots.first();
 }
 
-void RcxController::pushBreadcrumb() {
+AddressBarState RcxController::addressBarState() {
     reconcileFocusPath();
     const NodeTree& tree = m_doc->tree;
     const auto& meta = m_lastResult.meta;
@@ -1943,8 +1956,16 @@ void RcxController::pushBreadcrumb() {
     // same `parent` node renders twice; only the one under our hop counts).
     // The editor's node→line index is private to it, and this runs once per
     // refresh on a path that is 0-3 hops deep, so a scan is cheaper than
-    // plumbing an accessor; setCrumbs' change guard makes an equal result
-    // free downstream.
+    // plumbing an accessor; the bar's setState change guard makes an equal
+    // result free downstream.
+    //
+    // Show-all (m_viewRootId == 0) renders every root in order, so the scan
+    // starts on the first root's own rows — the root classLabelOf(0) names.
+    // A hop expanded under a LATER root matches there instead, and the trail
+    // then names the first root while pointing at the other one. That is the
+    // pre-existing show-all ambiguity classLabelOf(0) already has (the trail
+    // is click-built from one instance; only its label is guessed) and is
+    // left as is: a single view root has no such case.
     QVector<int> hopLine(m_focusPath.size(), -1);
     for (int i = 0, cursor = 0; i < m_focusPath.size(); ++i) {
         for (int j = cursor; j < meta.size(); ++j) {
@@ -1957,22 +1978,39 @@ void RcxController::pushBreadcrumb() {
         }
         if (hopLine[i] < 0) break;   // nothing rendered for it: deeper hops are unknown too
     }
-    // The address of the frame hop i opens. An embedded struct IS its row;
-    // a pointer's target is the ptrBase compose stamped on the first row
-    // rendered INSIDE it (deeper than the pointer's own row — its
-    // continuation rows share its depth and its nodeId). 0 when the hop has
-    // no row, the expansion is empty, or the pointer was null / unreadable
-    // (compose zero-fills those under a NullProvider with pBase = 0).
+    // The address of the frame hop i opens, by the hop's KIND — not by
+    // whether drillTargetId returns the hop itself, which misfiled two real
+    // shapes: an embedded Struct field WITH a refId (the type chooser's
+    // embed-class shape, compose's "embedded struct with refId but no child
+    // nodes") and an Array of struct with a refId both drill through refId,
+    // yet neither dereferences anything, so compose never moves
+    // currentPtrBase for them and the pointer rule handed back the ENCLOSING
+    // frame's base.
+    //   Pointer: the target is the ptrBase compose stamped on the first row
+    //   rendered INSIDE it (deeper than the pointer's own row — its
+    //   continuation rows share its depth and its nodeId).
+    //   Struct (refId or not): the frame IS its row — offsetAddr.
+    //   Array: the first deeper row is the [0] element separator, whose
+    //   offsetAddr is that element's base.
+    // 0 when the hop has no row, the expansion is empty, or the pointer was
+    // null / unreadable (compose zero-fills those under a NullProvider with
+    // pBase = 0).
+    auto firstDeeperRow = [&](int line, const Node& hop) -> int {
+        const int hopDepth = meta[line].depth;
+        for (int j = line + 1; j < meta.size(); ++j) {
+            if (meta[j].depth > hopDepth) return j;
+            if (meta[j].nodeId != hop.id) break;   // left the hop's rows without going deeper
+        }
+        return -1;
+    };
     auto frameAddress = [&](int i, const Node& hop) -> uint64_t {
         const int line = hopLine[i];
         if (line < 0) return 0;
-        if (drillTargetId(hop) == hop.id) return meta[line].offsetAddr;
-        const int hopDepth = meta[line].depth;
-        for (int j = line + 1; j < meta.size(); ++j) {
-            if (meta[j].depth > hopDepth) return meta[j].ptrBase;
-            if (meta[j].nodeId != hop.id) break;   // left the pointer's rows without going deeper
-        }
-        return 0;
+        if (hop.kind == NodeKind::Struct) return meta[line].offsetAddr;
+        const int inner = firstDeeperRow(line, hop);
+        if (inner < 0) return 0;
+        if (hop.kind == NodeKind::Array) return meta[inner].offsetAddr;
+        return isPointerKind(hop.kind) ? meta[inner].ptrBase : 0;
     };
     // The view root's own address: compose places a root at
     // baseAddress + offset (its absOffsets seed), and the root header row is
@@ -2024,8 +2062,29 @@ void RcxController::pushBreadcrumb() {
         crumbs.push_back(c);
     }
 
+    AddressBarState s;
+    s.sourceName   = m_doc->provider ? m_doc->provider->name() : QString();
+    // The saved-source kind is the provider IDENTIFIER (iconForProvider's
+    // vocabulary); Provider::kind() is a display word. A live attach that
+    // registered no saved source (tutorial self-attach, MCP attach) has no
+    // identifier to give, and the chip falls back to the generic icon.
+    s.sourceKindId = (m_activeSourceIdx >= 0 && m_activeSourceIdx < m_savedSources.size())
+        ? m_savedSources[m_activeSourceIdx].kind : QString();
+    s.liveness     = int(m_lastStatus);
+    s.baseAddress  = tree.baseAddress;
+    s.baseFormula  = tree.baseAddressFormula;
+    s.resolvedBase = tree.baseAddress;
+    s.crumbs       = crumbs;
+    s.canBack      = false;   // P5: NavHistory
+    s.canForward   = false;
+    s.canUp        = !m_focusPath.isEmpty();
+    return s;
+}
+
+void RcxController::pushAddressBarState() {
+    const AddressBarState s = addressBarState();
     for (auto* editor : m_editors)
-        editor->setBreadcrumb(crumbs);
+        editor->setAddressBarState(s);
 }
 
 void RcxController::scrollToNodeId(uint64_t nodeId) {
@@ -2316,7 +2375,7 @@ void RcxController::refresh() {
             }
         }
         updateCommandRow();
-        pushBreadcrumb();
+        pushAddressBarState();
         applySelectionOverlays();
     }
 }
@@ -7037,7 +7096,7 @@ void RcxController::handleNodeClick(RcxEditor* source, int line,
     QVector<uint64_t> newFocus = focusChainToNode(nodeId);
     if (newFocus != m_focusPath) {
         m_focusPath = std::move(newFocus);
-        pushBreadcrumb();
+        pushAddressBarState();
     }
 
     if (m_selIds.size() == 1) {
@@ -7055,7 +7114,7 @@ void RcxController::clearSelection() {
     m_focusPath.clear();   // breadcrumb back to the bare root crumb
     updateCommandRow();
     applySelectionOverlays();
-    if (hadFocus) pushBreadcrumb();
+    if (hadFocus) pushAddressBarState();
 }
 
 void RcxController::applySelectionOverlays() {
@@ -7285,6 +7344,17 @@ void RcxController::showSourcePopup(RcxEditor* editor, QPoint globalPos) {
             this, [this]() { clearSources(); });
 
     popup->popup(globalPos);
+
+    // The bar's chip reads pressed while the popup is up; its hide — a
+    // pick, Esc, a click elsewhere — emits dismissed(), which clears it.
+    // ensureSourcePopup's disconnect(this) drops this with the rest before
+    // the next open re-makes it. QPointer: the bar goes with its pane, and
+    // the popup can outlive both.
+    if (QPointer<AddressBar> bar = editor->addressBar()) {
+        bar->setSourceMenuOpen(true);
+        connect(popup, &SourceChooserPopup::dismissed, this,
+                [bar]() { if (bar) bar->setSourceMenuOpen(false); });
+    }
 
     // Deferred liveness probe for saved sources
     QTimer::singleShot(0, this, [this]() {
