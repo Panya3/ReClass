@@ -357,7 +357,9 @@ void TestRibbonLayout::typeLabelsCompactBeforePanelsHide() {
         // The glyph cell is the whole button: 8·len + 6 (a group caption can
         // widen the group's last column by a px or two — "Hex:" > 30).
         const int w64 = bar.itemRect(QStringLiteral("type.hex64")).width();
-        QVERIFY2(w64 >= 30 && w64 <= 36, qPrintable(QStringLiteral("H64 width %1").arg(w64)));
+        // The cell rule sizes for the WIDEST the label gets across every
+        // shipped DPI, because layout is logical and the font size is not.
+        QVERIFY2(w64 >= 30 && w64 <= 44, qPrintable(QStringLiteral("H64 width %1").arg(w64)));
         bar.resize(1350, bar.preferredHeight());
         QVERIFY(!bar.itemLabelShown(QStringLiteral("type.hex64")));
         QVERIFY(bar.itemLabelShown(QStringLiteral("type.custom")));

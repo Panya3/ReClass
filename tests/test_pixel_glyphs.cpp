@@ -203,10 +203,15 @@ void TestPixelGlyphs::scaleRule() {
     // DEVICE px: 11 up to 150 %, 22 at 200 %. Anything else and the 1-px
     // strokes blur, which is the entire reason for using this font.
     // 12 logical px, clamped so it can never overflow the 16-logical cell.
-    QCOMPARE(pixelFontSizeDev(1.0), 12);
-    QCOMPARE(pixelFontSizeDev(1.25), 15);
-    QCOMPARE(pixelFontSizeDev(1.5), 18);
-    QCOMPARE(pixelFontSizeDev(2.0), 24);
+    // ALWAYS a whole multiple of the 11 px design size. Off-grid sizes put the
+    // outlines between pixels and the threshold then deforms the letters —
+    // tried at 15 px, and it looked worse than the bitmap font it replaced.
+    QCOMPARE(pixelFontSizeDev(1.0), 11);
+    QCOMPARE(pixelFontSizeDev(1.25), 11);
+    QCOMPARE(pixelFontSizeDev(1.5), 22);
+    QCOMPARE(pixelFontSizeDev(2.0), 22);
+    for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
+        QCOMPARE(pixelFontSizeDev(dpr) % kPixelFontDesign, 0);
     for (qreal dpr : {1.0, 1.25, 1.5, 2.0})
         QVERIFY2(pixelLabelHeightDev(dpr) <= qRound(16.0 * dpr),
                  qPrintable(QStringLiteral("cap %1 overflows the %2 px cell at dpr %3")
@@ -240,7 +245,7 @@ void TestPixelGlyphs::uniformScaleAcrossLabels() {
     // Departure Mono at 11 device px (22 at 200 %): every label in a panel is
     // the same cap height, which is the property this test exists to pin.
     const int want = pixelLabelHeightDev(dpr);
-    QCOMPARE(pixelFontSizeDev(dpr), qRound(12.0 * dpr));
+    QCOMPARE(pixelFontSizeDev(dpr), 11 * qMax(1, qRound(dpr)));
     for (const char* label : {"H64", "F", "I32", "U32", "PTR", "STR", "WSTR", "1024", "D", "V2", "M4", "H8"}) {
         const QImage img = straight(typeGlyphIcon(QString::fromLatin1(label), GlyphFamily::Hex, 16, dpr, m_dark));
         const Bbox b = inkBbox(img);

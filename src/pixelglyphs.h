@@ -120,20 +120,25 @@ inline QFont pixelLabelFontAt(int sizeDev) {
     return f;
 }
 
-// Glyph size in DEVICE px, clamped so it can never overflow the icon cell.
-// 12 logical px is the target: 15 device at 125 %, which is a third smaller
-// than the 22 it was briefly set to. The drawing path hard-thresholds, so a
-// size off the font's 11 px design grid still comes out hard-edged.
+// Glyph size in DEVICE px. ALWAYS a whole multiple of the 11 px design size.
+//
+// This is not a preference, it is the font's one rule. Off-grid sizes were
+// tried (15 px, chasing "a third smaller") and the outlines land between
+// pixels: the threshold then snaps them arbitrarily, stems come out uneven and
+// the 6 in H64 deforms. It looked, correctly, worse than the hand-drawn 5x7
+// bitmap this replaced. On-grid or not at all.
+//
+// 11 px is also the only multiple that is not visibly chunky: at 22 every
+// design pixel becomes a 2x2 block, which is the blockiness the switch away
+// from the 5x7 bitmap was meant to fix. A pixel font simply cannot be both
+// larger and finer — that needs an outline font, not a bigger multiple.
 inline int pixelFontSizeDev(qreal dpr) {
+    // One design pixel per DEVICE pixel wherever that is legible (100 %, 125 %),
+    // two only once the display is dense enough that a doubled pixel is still
+    // physically small (150 %, 200 %). This keeps the strokes 1 px on the
+    // screens where chunkiness would actually show.
     const qreal d = dpr > 0 ? dpr : 1.0;
-    const int want = qMax(8, qRound(12.0 * d));
-    // Never taller than the 16-logical icon cell, less a pixel of air.
-    static const int capAtDesign =
-        qMax(1, QFontMetrics(pixelLabelFontAt(kPixelFontDesign)).capHeight());
-    const int budget = qMax(1, qRound(16.0 * d) - 2);
-    const int maxSize = qMax(kPixelFontDesign,
-                             kPixelFontDesign * budget / capAtDesign);
-    return qMin(want, maxSize);
+    return kPixelFontDesign * qMax(1, qRound(d));
 }
 
 inline QFont pixelLabelFont(qreal dpr) { return pixelLabelFontAt(pixelFontSizeDev(dpr)); }
